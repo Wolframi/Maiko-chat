@@ -49,3 +49,4 @@ docker run -p 3000:3000 -e PUBLIC_ORIGIN=https://your.domain pulse-chat
 ```
 
 Health check: `GET /api/health`
+енкнкн
