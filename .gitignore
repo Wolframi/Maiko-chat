@@ -1,0 +1,77 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# local auth store / user media (ephemeral on free hosts without a disk)
+/data
+/uploads
+upload-secret.txt
+
+# local tooling
+.cursor/
+.serena/
+.claude/
+.deploy/
+AGENTS.md
+CLAUDE.md
+
+# local binaries, logs, fixtures
+/tools/
+/tmp/
+/shots/
+build-restart.log
+scripts/_deploy-run.ps1
+
+# local test fixtures
+/test.png
+/test.txt
+/test.webm
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files
+.env*
+.turn-user
+.turn-pass
+.livekit-url
+.livekit-api-key
+.livekit-api-secret
+.livekit-server.yaml
+data/push.json
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts

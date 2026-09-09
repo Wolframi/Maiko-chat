@@ -1,0 +1,12 @@
+# Self-hosted LiveKit SFU on this VM. Not LiveKit Cloud.
+# Dev keys (livekit-server --dev): API key `devkey`, secret `secret`.
+# Pulse in non-production uses ws://127.0.0.1:7880 automatically.
+services:
+  livekit:
+    image: livekit/livekit-server:v1.8.4
+    restart: unless-stopped
+    command: ["--dev", "--bind", "0.0.0.0", "--node-ip", "127.0.0.1"]
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"

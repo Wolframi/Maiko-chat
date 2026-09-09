@@ -1,0 +1,10 @@
+{
+  "name": "Pulse",
+  "short_name": "Pulse",
+  "description": "Чат: ЛС, группы и каналы",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0e0e10",
+  "theme_color": "#0e0e10",
+  "lang": "ru"
+}
