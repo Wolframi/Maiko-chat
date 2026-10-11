@@ -14,8 +14,15 @@
       <div class="brand"><img src="../assets/icon.png" alt="" width="22" height="22"><span>Майко</span></div>
       <span class="connection" aria-live="polite"><span class="status-dot"></span><span id="status">Запускаем…</span></span>
       <div class="window-actions">
-        <button id="update-notice" class="update-notice" hidden>Обновление</button>
-        <button id="settings" class="utility-button" title="Настройки" aria-label="Настройки подключения"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 17h16M8 4v6m8 4v6"/></svg></button>
+        <div class="update-dock" id="update-dock" data-phase="idle">
+          <span class="app-version" id="app-version" aria-label="Версия приложения"></span>
+          <button id="update-action" class="update-button" aria-label="Проверить обновления" title="Проверить обновления">
+            <svg class="update-wheel" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/></svg>
+            <span id="update-label">Проверить</span>
+          </button>
+          <progress id="update-progress" max="100" value="0" aria-label="Скачивание обновления" hidden></progress>
+          <span class="sr-only" id="update-status" role="status" aria-live="polite"></span>
+        </div>
         <button data-action="minimize" title="Свернуть" aria-label="Свернуть"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
         <button data-action="maximize" id="maximize" title="Развернуть" aria-label="Развернуть"><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1"/></svg></button>
         <button data-action="close" class="close-button" title="Закрыть" aria-label="Закрыть"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
@@ -30,30 +37,10 @@
         <div class="loader" id="loader" aria-label="Загрузка"></div>
         <div class="error-actions" id="error-actions" hidden>
           <button class="primary" data-action="reload">Повторить</button>
-          <button class="secondary" id="change-url">Изменить адрес</button>
           <button class="text-button" data-action="logs">Открыть журнал</button>
         </div>
       </section>
     </main>
-    <section class="settings-screen" id="settings-screen" hidden>
-      <form class="connection-card" id="connection-form">
-        <div class="eyebrow">ПОДКЛЮЧЕНИЕ</div>
-        <h1>Ваш Майко</h1>
-        <p class="description">Укажите адрес сайта, чтобы войти в свои чаты.</p>
-        <label for="site-url">Адрес сайта</label>
-        <input id="site-url" type="url" autocomplete="url" placeholder="https://…" required spellcheck="false">
-        <p class="form-error" id="form-error" role="alert"></p>
-        <div class="form-actions"><button type="button" class="secondary" id="cancel-settings">Назад</button><button type="submit" class="primary">Подключиться</button></div>
-        <p class="hint">Адрес и вход сохраняются на этом компьютере.</p>
-        <section class="update-panel" aria-labelledby="update-heading">
-          <h2 id="update-heading">Обновления приложения</h2>
-          <p class="hint" id="app-version"></p>
-          <p class="description" id="update-status" role="status" aria-live="polite"></p>
-          <progress id="update-progress" max="100" value="0" aria-label="Скачивание обновления" hidden></progress>
-          <button type="button" class="secondary" id="update-action">Проверить обновления</button>
-        </section>
-      </form>
-    </section>
   </div>
 </body>
 </html>

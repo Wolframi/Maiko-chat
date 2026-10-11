@@ -12,6 +12,7 @@ delete env.ELECTRON_RUN_AS_NODE;
 
 async function waitReady(app) {
   const page = await app.firstWindow();
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
   await page.waitForFunction(() => typeof window.maikoDesktop !== 'undefined', null, { polling: 100, timeout: 30_000 });
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
@@ -44,11 +45,9 @@ async function main() {
     });
     assert.deepEqual(preferences, { sandbox: true, contextIsolation: true, nodeIntegration: false });
 
-    await shell.getByRole('button', { name: 'Настройки подключения' }).click();
-    await shell.getByLabel('Адрес сайта', { exact: true }).fill('http://example.com');
-    await shell.getByRole('button', { name: 'Подключиться', exact: true }).click();
-    await shell.getByRole('alert').filter({ hasText: 'HTTPS' }).waitFor();
-    await shell.getByRole('button', { name: 'Назад', exact: true }).click();
+    assert.equal(await shell.locator('input[type="url"]').count(), 0);
+    assert.equal(await shell.evaluate(() => typeof window.maikoDesktop.connect), 'undefined');
+    assert.equal(await shell.locator('#titlebar #update-dock').isVisible(), true);
 
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1000, 700));
     const [contentWidth, contentHeight] = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getContentSize());
@@ -79,7 +78,7 @@ async function main() {
     const restored = app.windows().find((page) => /^https?:/.test(page.url()));
     assert.equal(await restored.evaluate(() => localStorage.getItem('maiko-desktop-smoke')), 'persisted');
     await restored.evaluate(() => localStorage.removeItem('maiko-desktop-smoke'));
-    console.log('Electron smoke passed: site, isolation, settings validation, viewport, window controls, capture cancellation, session persistence.');
+    console.log('Electron smoke passed: site, isolation, fixed site address, update dock, viewport, window controls, capture cancellation, session persistence.');
   } finally { if (app) await app.close(); }
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

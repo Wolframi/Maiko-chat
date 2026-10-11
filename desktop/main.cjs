@@ -17,7 +17,7 @@ if (process.env.MAIKO_DESKTOP_USER_DATA) {
 }
 const testing = process.env.MAIKO_DESKTOP_TEST === '1';
 const defaults = readJson(path.join(__dirname, 'config.json'));
-let win, site, localServer, settingsOpen = false, shuttingDown = false;
+let win, site, localServer, shuttingDown = false;
 let updates;
 let loadGeneration = 0;
 let maximized = false, restoreBounds, resizeGesture, layoutExpanded;
@@ -111,8 +111,8 @@ function createSite() {
   const showSite = () => {
     if (!trusted(contents.getURL())) return;
     publish({ phase: 'ready', message: state.mode === 'local' ? 'Локальный сервер' : 'Подключено' });
-    view.setVisible(!settingsOpen);
-    if (!settingsOpen) contents.focus();
+    view.setVisible(true);
+    contents.focus();
   };
   contents.on('dom-ready', () => {
     if (!trusted(contents.getURL())) return;
@@ -127,7 +127,7 @@ function createSite() {
   contents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
     if (!isMainFrame || code === -3) return;
     view.setVisible(false);
-    publish({ phase: 'error', message: `Не удалось открыть сайт (${description}). Проверьте соединение или адрес.` });
+    publish({ phase: 'error', message: `Не удалось открыть Майко (${description}). Проверьте соединение и попробуйте снова.` });
   });
   contents.on('render-process-gone', (_event, details) => {
     view.setVisible(false);
@@ -146,7 +146,6 @@ function createSite() {
 async function connect(url) {
   const generation = ++loadGeneration;
   site?.setVisible(false);
-  settingsOpen = false;
   publish({ phase: 'loading', message: 'Запускаем Майко…' });
   try {
     log(`Connecting in ${state.mode} mode`);
@@ -174,8 +173,7 @@ async function connect(url) {
 }
 function saveWindow() {
   if (!win || win.isDestroyed()) return;
-  const current = readJson(settingsPath());
-  fs.writeFileSync(settingsPath(), JSON.stringify({ ...current, bounds: maximized ? restoreBounds : win.getNormalBounds(), maximized }, null, 2));
+  fs.writeFileSync(settingsPath(), JSON.stringify({ bounds: maximized ? restoreBounds : win.getNormalBounds(), maximized }, null, 2));
 }
 function createWindow() {
   const saved = readJson(settingsPath());
@@ -221,7 +219,7 @@ function createWindow() {
   }).then(() => {
     if (createdWindow.isDestroyed()) return;
     publish();
-    return connect(process.env.MAIKO_DESKTOP_URL || saved.url || defaults.url);
+    return connect((testing || !app.isPackaged ? process.env.MAIKO_DESKTOP_URL : undefined) || defaults.url);
   }).catch((error) => { if (win && !win.isDestroyed()) log(error.stack || error.message); });
 }
 
@@ -277,21 +275,6 @@ else {
     });
     ipcMain.on('desktop:resize-end', (event) => {
       try { requireShell(event); resizeGesture = undefined; } catch { /* untrusted sender */ }
-    });
-    ipcMain.handle('desktop:settings', (event, visible) => {
-      requireShell(event); settingsOpen = visible === true;
-      site?.setVisible(!settingsOpen && state.phase === 'ready');
-      return state;
-    });
-    ipcMain.handle('desktop:connect', async (event, value) => {
-      requireShell(event);
-      const url = normalizeUrl(value);
-      const current = readJson(settingsPath());
-      fs.writeFileSync(settingsPath(), JSON.stringify({ ...current, url }, null, 2));
-      state.mode = 'remote';
-      if (localServer) { await localServer.stop(); localServer = undefined; }
-      void connect(url);
-      return { ok: true };
     });
     createWindow();
     updates.start();

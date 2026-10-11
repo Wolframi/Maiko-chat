@@ -116,16 +116,6 @@ async function main() {
     assert.ok(sidebarScroll.scroll > 0 && sidebarScroll.height > sidebarScroll.client, 'Chat list scrolls independently');
     const footer = await page.locator('.sidebar > footer').boundingBox();
     assert.ok(footer.y + footer.height <= await page.evaluate(() => innerHeight), 'Sidebar profile stays reachable');
-    await shell.getByRole('button', { name: 'Настройки подключения' }).click();
-    await shell.locator('#connection-form > .description').evaluate((element) => {
-      element.textContent = 'Длинное описание соединения и настроек. '.repeat(120);
-    });
-    const connectButton = shell.getByRole('button', { name: 'Подключиться', exact: true });
-    await connectButton.scrollIntoViewIfNeeded();
-    assert.ok(await shell.locator('.settings-screen').evaluate((element) => element.scrollTop > 0), 'Tall desktop settings scroll');
-    const connectBounds = await connectButton.boundingBox();
-    assert.ok(connectBounds.y >= 42 && connectBounds.y + connectBounds.height <= await shell.evaluate(() => innerHeight), 'Settings action stays reachable');
-    await shell.getByRole('button', { name: 'Назад', exact: true }).click();
     await page.goto(origin + '/auth');
     await page.getByRole('button', { name: 'Продолжить' }).scrollIntoViewIfNeeded();
     assert.ok(await page.locator('.app-shell').evaluate((element) => element.scrollTop > 0), 'Tall login form scrolls');

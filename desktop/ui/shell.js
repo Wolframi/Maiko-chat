@@ -1,6 +1,5 @@
 const api = window.maikoDesktop;
 let currentState;
-let settingsVisible = false;
 const element = (id) => document.getElementById(id);
 
 function render(state) {
@@ -17,57 +16,40 @@ function render(state) {
   element('maximize').setAttribute('aria-label', element('maximize').title);
   const update = state.update;
   if (update) {
-    element('app-version').textContent = `Версия ${update.currentVersion}`;
+    element('app-version').textContent = `v${update.currentVersion}`;
+    element('app-version').title = `Версия приложения ${update.currentVersion}`;
     element('update-status').textContent = update.message;
+    element('update-dock').dataset.phase = update.phase;
+    element('update-dock').title = update.message;
     const busy = ['checking', 'downloading', 'installing'].includes(update.phase);
     const command = update.phase === 'downloaded' ? 'install' :
       update.phase === 'available' || (update.phase === 'error' && update.retryAction === 'download') ? 'download' : 'check';
     element('update-action').dataset.command = command;
     element('update-action').disabled = busy || update.phase === 'disabled';
-    element('update-action').textContent = busy ? update.phase === 'checking' ? 'Проверяем…' : update.phase === 'installing' ? 'Перезапускаем…' : `Скачиваем: ${update.progress}%` :
-      command === 'install' ? 'Перезапустить и установить' : command === 'download' ? `Скачать ${update.version}` : 'Проверить обновления';
+    const label = busy ? update.phase === 'checking' ? 'Проверка…' : update.phase === 'installing' ? 'Перезапуск…' : `${update.progress}%` :
+      command === 'install' ? 'Установить' : command === 'download' ? 'Обновить' : update.phase === 'error' ? 'Повторить' : 'Проверить';
+    const description = command === 'install' ? `Перезапустить и установить ${update.version}` :
+      command === 'download' ? `Скачать обновление ${update.version}` : 'Проверить обновления';
+    element('update-label').textContent = label;
+    element('update-action').setAttribute('aria-label', busy ? update.message : description);
+    element('update-action').title = update.phase === 'disabled' ? update.message : `${description}. ${update.message}`;
     element('update-progress').hidden = update.phase !== 'downloading';
     element('update-progress').value = update.progress;
-    element('update-notice').hidden = !['available', 'downloaded'].includes(update.phase);
-    element('update-notice').textContent = update.phase === 'downloaded' ? 'Установить обновление' : 'Обновление';
-  }
-}
-async function showSettings(visible) {
-  await api.toggleSettings(visible);
-  settingsVisible = visible;
-  element('settings-screen').hidden = !visible;
-  element('form-error').textContent = '';
-  if (visible) {
-    element('site-url').value = currentState?.url || '';
-    element('site-url').focus();
   }
 }
 for (const button of document.querySelectorAll('[data-action]')) {
   button.addEventListener('click', () => {
-    if (button.dataset.action === 'reload') void showSettings(false);
     void api.control(button.dataset.action);
   });
 }
 element('titlebar').addEventListener('dblclick', (event) => {
   if (!event.target.closest('button')) void api.control('maximize');
 });
-element('settings').addEventListener('click', () => void showSettings(!settingsVisible));
-element('update-notice').addEventListener('click', () => void showSettings(true));
 element('update-action').addEventListener('click', async () => {
   try { await api.update(element('update-action').dataset.command || 'check'); }
-  catch (error) { element('update-status').textContent = error.message; }
-});
-element('change-url').addEventListener('click', () => void showSettings(true));
-element('cancel-settings').addEventListener('click', () => void showSettings(false));
-document.addEventListener('keydown', (event) => { if (event.key === 'Escape') void showSettings(false); });
-element('connection-form').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  try {
-    await api.connect(element('site-url').value);
-    settingsVisible = false;
-    element('settings-screen').hidden = true;
-  } catch (error) {
-    element('form-error').textContent = error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+  catch (error) {
+    element('update-status').textContent = error.message;
+    element('update-dock').title = error.message;
   }
 });
 api.onState(render);
