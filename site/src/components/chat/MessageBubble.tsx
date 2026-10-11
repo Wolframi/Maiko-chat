@@ -45,6 +45,7 @@ import {
   thumbSrc,
   withoutThumbParam,
   downloadHref,
+  downloadFile,
   displayFileName,
   messageAttachments,
   parseMediaSize,
@@ -845,7 +846,7 @@ function FileBodyInner({
     <div className="bubble__files">
       {list.map((item) => {
         const title = displayFileName(item.name);
-        const href = downloadHref(item.url);
+        const href = downloadHref(item.url, title);
         const kind = fileIconKind(item.name, item.mime);
         const ext = title.includes(".")
           ? title.split(".").pop()!.slice(0, 4).toUpperCase()
@@ -1260,8 +1261,7 @@ function MessageBubbleInner({
   function handleDownload() {
     const file = attachments[0];
     if (!file?.url) return;
-    const downloadUrl = `${file.url}${file.url.includes("?") ? "&" : "?"}download=1`;
-    window.open(downloadUrl, "_blank");
+    downloadFile(file.url, file.name);
   }
 
   async function handleCopy() {

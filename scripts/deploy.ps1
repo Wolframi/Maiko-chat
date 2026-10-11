@@ -1,10 +1,10 @@
-# Deploy Pulse Chat to Yandex Cloud VPS
+# Deploy the committed Maiko project to the VPS.
 param(
-  [string]$HostName = "193.233.247.171",
+  [string]$HostName = "179.254.175.134",
   [string]$User = "root",
   [string]$Key = "$env:USERPROFILE\.ssh\id_ed25519",
-  [string]$AppDir = "pulse-chat",
-  [string]$PublicOrigin = "https://193.233.247.171.sslip.io"
+  [string]$AppDir = "maiko",
+  [string]$PublicOrigin = "https://maiko.galacticvps.qzz.io"
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,30 +17,15 @@ $remote = "${User}@${HostName}"
 New-Item -ItemType Directory -Force -Path $deployDir | Out-Null
 if (Test-Path $tarball) { Remove-Item $tarball -Force }
 
-Write-Host "Packing..."
-tar -czf $tarball `
-  --exclude=node_modules `
-  --exclude=.next `
-  --exclude=data `
-  --exclude=uploads `
-  --exclude=.git `
-  --exclude=.deploy `
-  --exclude=.s3-storage.json `
-  --exclude=tools/cloudflared.exe `
-  --exclude=test-results `
-  --exclude=playwright-report `
-  --exclude=.cursor `
-  --exclude=.serena `
-  --exclude=.claude `
-  --exclude=build-restart.log `
-  --exclude=.livekit-url `
-  --exclude=.livekit-api-key `
-  --exclude=.livekit-api-secret `
-  --exclude=.livekit-server.yaml `
-  -C $root .
+if ($AppDir -notmatch '^[a-zA-Z0-9_-]+$') { throw 'AppDir must be a directory name' }
+if ($PublicOrigin -notmatch '^https://[a-zA-Z0-9.-]+(?::[0-9]+)?$') { throw 'PublicOrigin must be an HTTPS origin' }
+Write-Host "Packing committed sources..."
+git -C $root archive --format=tar.gz --output=$tarball HEAD
+if ($LASTEXITCODE -ne 0) { throw 'git archive failed' }
 
 Write-Host "Uploading..."
 & scp @sshArgs $tarball "${remote}:~/pulse-chat.tgz"
+if ($LASTEXITCODE -ne 0) { throw 'Upload failed' }
 
 Write-Host "Building & restarting on server..."
 # LF-only remote script — CRLF breaks `set -o pipefail` on Linux bash
@@ -49,12 +34,11 @@ $remoteScript = @(
   "mkdir -p ~/$AppDir",
   "tar -xzf ~/pulse-chat.tgz -C ~/$AppDir",
   "cd ~/$AppDir",
-  "node -e `"const fs=require('fs'); const p='ecosystem.config.cjs'; let s=fs.readFileSync(p,'utf8'); s=s.replace(/PUBLIC_ORIGIN:\\s*[\\\"'][^\\\"']*[\\\"']/, 'PUBLIC_ORIGIN: \\\"$PublicOrigin\\\"'); fs.writeFileSync(p,s);`"",
+  "export PUBLIC_ORIGIN='$PublicOrigin' TURN_HOST='$(([Uri]$PublicOrigin).Host)'",
   "npm ci",
   "SEED_DEMO=0 NEXT_PUBLIC_DEMO=0 npm run build",
   "mkdir -p data uploads",
-  "pm2 delete pulse-chat >/dev/null 2>&1 || true",
-  "pm2 start ecosystem.config.cjs",
+  "pm2 startOrReload ecosystem.config.cjs --update-env",
   "pm2 save",
   "sleep 5",
   "curl -fsS http://127.0.0.1:3000/api/health",

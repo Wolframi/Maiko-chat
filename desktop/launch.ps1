@@ -5,7 +5,7 @@ $projectDir = Join-Path (Split-Path -Parent $desktopDir) 'site'
 $launchLog = Join-Path $env:TEMP 'maiko-desktop-launch.log'
 try {
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-        throw 'Для запуска из исходников установите Node.js 22 или новее. Готовый Maiko-Portable.exe работает без Node.js.'
+        throw 'Для запуска из исходников установите Node.js 22 или новее. Установленная через Maiko-Setup версия работает без Node.js.'
     }
     if (-not (Test-Path -LiteralPath (Join-Path $desktopDir 'node_modules/electron/package.json'))) {
         & npm.cmd ci --prefix $desktopDir --no-audit --no-fund *> $launchLog

@@ -9,6 +9,8 @@ const { startLocalServer } = require('./local-server.cjs');
 const { configureCapture } = require('./screen-capture.cjs');
 const { enableNativeWindowAnimations } = require('./window-animations.cjs');
 const { createUpdates } = require('./updates.cjs');
+const { createDownloads } = require('./downloads.cjs');
+const { configureDownloadsPanel } = require('./downloads-panel.cjs');
 
 app.setName('Maiko');
 if (process.env.MAIKO_DESKTOP_USER_DATA) {
@@ -18,7 +20,7 @@ if (process.env.MAIKO_DESKTOP_USER_DATA) {
 const testing = process.env.MAIKO_DESKTOP_TEST === '1';
 const defaults = readJson(path.join(__dirname, 'config.json'));
 let win, site, localServer, shuttingDown = false;
-let updates;
+let updates, downloads, downloadsPanel;
 let loadGeneration = 0;
 let maximized = false, restoreBounds, resizeGesture, layoutExpanded;
 let state = { phase: 'loading', message: 'Запускаем Майко…', url: '', mode: process.argv.includes('--local') ? 'local' : 'remote', maximized: false };
@@ -35,6 +37,7 @@ function publish(patch = {}) {
   if (Object.keys(next).every((key) => next[key] === state[key])) return;
   state = next;
   if (win && !win.isDestroyed()) win.webContents.send('desktop:state-changed', state);
+  downloadsPanel?.publish(state.downloads);
 }
 function layout() {
   if (!win || win.isDestroyed()) return;
@@ -98,7 +101,11 @@ function createSite() {
   view.setVisible(false);
   win.contentView.addChildView(view);
   const contents = view.webContents;
-  contents.setWindowOpenHandler(({ url }) => { void openExternal(url); return { action: 'deny' }; });
+  contents.setWindowOpenHandler(({ url }) => {
+    if (trusted(url) && new URL(url).pathname.startsWith('/uploads/') && new URL(url).searchParams.has('download')) contents.downloadURL(url);
+    else void openExternal(url);
+    return { action: 'deny' };
+  });
   const guardNavigation = (event, url) => {
     if (!trusted(url)) { event.preventDefault(); void openExternal(url); }
   };
@@ -200,10 +207,13 @@ function createWindow() {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (event, url) => { if (url !== uiUrl) event.preventDefault(); });
   win.on('resize', layout);
+  win.on('resize', () => downloadsPanel?.hide());
+  win.on('blur', () => downloadsPanel?.hide());
   for (const event of ['maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen']) win.on(event, layout);
   win.on('close', () => { saveWindow(); });
   win.on('closed', () => {
     loadGeneration++;
+    downloadsPanel?.dispose();
     if (site && !site.webContents.isDestroyed()) site.webContents.close();
     site = undefined; win = undefined;
   });
@@ -242,6 +252,16 @@ else {
       callback(!!site && contents === site.webContents && trusted(details.requestingUrl || contents.getURL()) && allowed.has(permission));
     });
     configureCapture({ siteSession, getWindow: () => win, getSite: () => site, trusted, testing, log });
+    downloads = createDownloads({
+      directory: path.join(testing && process.env.MAIKO_DESKTOP_DOWNLOADS_DIR || app.getPath('downloads'), 'Maiko'),
+      historyPath: path.join(app.getPath('userData'), 'downloads.json'),
+      siteSession, getSite: () => site, trusted, publish, shell, log,
+    });
+    downloadsPanel = configureDownloadsPanel({ ipcMain, getWindow: () => win, requireShell, downloads, log });
+    ipcMain.handle('desktop:downloads', (event, command, id) => {
+      requireShell(event);
+      return downloads.action(command, id);
+    });
     updates = createUpdates({ app, publish, log, testing, beforeInstall: async () => {
       if (localServer?.owned) await localServer.stop();
       localServer = undefined;
@@ -278,7 +298,7 @@ else {
     });
     createWindow();
     updates.start();
-    app.once('will-quit', () => updates.dispose());
+    app.once('will-quit', () => { updates.dispose(); downloads.dispose(); });
     app.on('activate', () => { if (!win) createWindow(); });
   }).catch((error) => { log(error.stack); app.quit(); });
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

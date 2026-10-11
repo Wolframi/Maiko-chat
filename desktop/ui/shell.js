@@ -14,6 +14,12 @@ function render(state) {
   element('connection-screen').hidden = state.phase === 'ready';
   element('maximize').title = state.maximized ? 'Восстановить' : 'Развернуть';
   element('maximize').setAttribute('aria-label', element('maximize').title);
+  const files = state.downloads?.entries || [];
+  const pending = files.filter((file) => file.phase === 'downloading');
+  element('downloads-count').hidden = pending.length === 0;
+  element('downloads-count').textContent = pending.length;
+  element('downloads-action').title = pending.length ? `Открыть папку загрузок. Скачиваем: ${pending.length}` : 'Открыть папку загрузок';
+  element('downloads-status').textContent = files[0] ? `${files[0].name}: ${files[0].message}` : '';
   const update = state.update;
   if (update) {
     element('app-version').textContent = `v${update.currentVersion}`;
@@ -54,6 +60,23 @@ element('update-action').addEventListener('click', async () => {
 });
 api.onState(render);
 void api.state().then(render);
+element('downloads-action').addEventListener('click', async () => {
+  try { await api.downloadsPanel(false); await api.downloads('folder'); }
+  catch (error) {
+    element('downloads-status').textContent = error.message;
+    element('downloads-action').title = error.message;
+  }
+});
+const downloadsButton = element('downloads-action');
+function showDownloadsPanel() {
+  const { x, width } = downloadsButton.getBoundingClientRect();
+  void api.downloadsPanel(true, { x, width });
+}
+downloadsButton.addEventListener('pointerenter', showDownloadsPanel);
+downloadsButton.addEventListener('pointerleave', () => void api.downloadsPanel(false));
+downloadsButton.addEventListener('focus', showDownloadsPanel);
+downloadsButton.addEventListener('blur', () => void api.downloadsPanel(false));
+api.onDownloadsPanel((open) => downloadsButton.setAttribute('aria-expanded', String(open)));
 
 for (const edge of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
   const grip = document.createElement('div');

@@ -19,9 +19,10 @@ module.exports = {
   apps: [
     {
       name: "pulse-chat",
-      cwd: "/root/pulse-chat",
-      script: "npm",
-      args: "start",
+      cwd: path.join(__dirname, "site"),
+      script: "server.ts",
+      interpreter: process.execPath,
+      node_args: "--import tsx",
       instances: 1,
       exec_mode: "fork",
       autorestart: true,
@@ -35,9 +36,9 @@ module.exports = {
         NODE_ENV: "production",
         HOSTNAME: "127.0.0.1",
         PORT: "3000",
-        PUBLIC_ORIGIN: "https://193.233.247.171.sslip.io",
+        PUBLIC_ORIGIN: process.env.PUBLIC_ORIGIN || "https://maiko.galacticvps.qzz.io",
         // Domain (not IP) so clients also get turns:…5349 relay.
-        TURN_HOST: "193.233.247.171.sslip.io",
+        TURN_HOST: process.env.TURN_HOST || "maiko.galacticvps.qzz.io",
         SEED_DEMO: "0",
         NEXT_PUBLIC_DEMO: "0",
         TRUST_PROXY: "1",

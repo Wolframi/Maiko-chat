@@ -28,7 +28,7 @@ async function main() {
   const source = path.join(root, 'assets/icon-source.png');
   const version = require('../package.json').version;
   const files = [path.join(root, 'release/win-unpacked/Maiko.exe'),
-    path.join(root, `release/Maiko-Portable-${version}.exe`), path.join(root, `release/Maiko-Setup-${version}.exe`)];
+    path.join(root, `release/Maiko-Setup-${version}.exe`)];
   assert.ok((await sharp(source).metadata()).width >= 1024);
   assert.ok((await fs.readFile(path.join(root, 'release/win-unpacked/Maiko.ico'))).equals(await fs.readFile(path.join(root, 'assets/icon.ico'))));
   for (const file of files) {

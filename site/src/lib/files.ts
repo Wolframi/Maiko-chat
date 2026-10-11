@@ -35,14 +35,27 @@ export function signedMediaSrc(url: string) {
   return `${encoded}${String(url).slice(q)}`;
 }
 
-export function downloadHref(url: string) {
+export function downloadHref(url: string, name?: string) {
   if (isLocalMediaUrl(url)) return url;
   const encoded = mediaSrc(url);
   if (!encoded) return "#";
   const q = String(url || "").indexOf("?");
-  const params = new URLSearchParams(q >= 0 ? String(url).slice(q + 1) : "");
+  const params = new URLSearchParams(q >= 0 ? String(url).slice(q + 1).split("#")[0] : "");
   params.set("download", "1");
+  params.delete("w");
+  params.delete("waveform");
+  if (name) params.set("name", displayFileName(name));
   return `${encoded}?${params.toString()}`;
+}
+
+/** Use the browser/Electron download manager without opening a new window. */
+export function downloadFile(url: string, name?: string) {
+  const link = document.createElement("a");
+  link.href = downloadHref(url, name);
+  link.download = displayFileName(name);
+  document.body.append(link);
+  link.click();
+  link.remove();
 }
 
 /** Thumbnail URL for chat bubbles — server resizes JPEGs on the fly. */

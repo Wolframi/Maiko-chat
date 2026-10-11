@@ -1,0 +1,24 @@
+:root { color-scheme: dark; font-family: "Segoe UI", sans-serif; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: #141416; color: #ececee; overflow: hidden; }
+body { display: flex; flex-direction: column; border: 1px solid #ffffff20; border-radius: 12px; }
+[hidden] { display: none !important; }
+header { flex-shrink: 0; display: flex; justify-content: space-between; align-items: center; padding: 15px 16px 12px; border-bottom: 1px solid #ffffff0d; }
+header strong { font-size: 12px; font-weight: 600; }
+header span { font-size: 10px; color: #85858e; }
+ul { flex: 1; min-height: 0; list-style: none; margin: 0; padding: 5px 6px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #ffffff25 transparent; }
+li { display: flex; align-items: center; gap: 10px; padding: 10px 8px; border-radius: 7px; }
+li:hover { background: #ffffff06; }
+.file-icon { display: grid; place-items: center; flex: 0 0 32px; height: 36px; border: 1px solid #6784b740; border-radius: 6px; color: #a9bde0; background: #6784b711; font-size: 9px; font-weight: 600; }
+.file-meta { flex: 1; min-width: 0; }
+.file-name { display: block; font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-status { display: block; margin-top: 5px; color: #85858e; font-size: 10px; }
+li[data-phase="error"] .file-status { color: #e3ab8f; }
+button { display: grid; place-items: center; flex-shrink: 0; width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: #96969f; cursor: pointer; }
+button:hover { background: #ffffff0c; color: #ececee; }
+button:focus-visible { outline: 2px solid #809acd; outline-offset: 1px; }
+svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+progress { display: block; width: 100%; height: 3px; margin-top: 6px; border: 0; accent-color: #809acd; }
+footer { flex-shrink: 0; padding: 11px 16px; border-top: 1px solid #ffffff0d; color: #6e6e78; font-size: 10px; }
+#empty { flex: 1; display: grid; place-items: center; color: #85858e; font-size: 12px; margin: 0; }
+#error { margin: 0; padding: 9px 16px; font-size: 11px; color: #e3ab8f; background: #e3ab8f0b; }

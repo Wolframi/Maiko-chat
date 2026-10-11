@@ -40,10 +40,12 @@ jobs:
         run: |
           npm --prefix site test
           npm --prefix desktop test
-      - name: Build Windows installer and portable
+      - name: Build Windows installer
         run: npm --prefix desktop run dist -- --publish never
       - name: Validate update artifacts
         run: node desktop/verify-release.cjs
+      - name: Check downloads in Electron
+        run: npm --prefix desktop run test:downloads
       - name: Check packaged update interface
         shell: pwsh
         run: |
@@ -55,7 +57,6 @@ jobs:
           path: |
             desktop/release/Maiko-Setup-*.exe
             desktop/release/Maiko-Setup-*.exe.blockmap
-            desktop/release/Maiko-Portable-*.exe
             desktop/release/latest.yml
           if-no-files-found: error
       - name: Publish complete GitHub Release
@@ -63,7 +64,7 @@ jobs:
         run: |
           $version = (Get-Content desktop/package.json -Raw | ConvertFrom-Json).version
           $tag = "v$version"
-          gh release create $tag --verify-tag --draft --title "Майко $version" --notes-file desktop/release-notes.md "desktop/release/Maiko-Setup-$version.exe" "desktop/release/Maiko-Setup-$version.exe.blockmap" "desktop/release/Maiko-Portable-$version.exe" desktop/release/latest.yml
+          gh release create $tag --verify-tag --draft --title "Майко $version" --notes-file desktop/release-notes.md "desktop/release/Maiko-Setup-$version.exe" "desktop/release/Maiko-Setup-$version.exe.blockmap" desktop/release/latest.yml
           if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
           gh release edit $tag --draft=false --latest
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

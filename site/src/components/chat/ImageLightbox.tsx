@@ -4,6 +4,7 @@ import Lightbox from "yet-another-react-lightbox";
 import Zoom from "yet-another-react-lightbox/plugins/zoom";
 import Download from "yet-another-react-lightbox/plugins/download";
 import Video from "yet-another-react-lightbox/plugins/video";
+import { downloadHref, displayFileName } from "@/lib/files";
 import "yet-another-react-lightbox/styles.css";
 
 export type MediaLightboxItem = {
@@ -21,17 +22,9 @@ export function MediaLightbox({ item, onClose }: MediaLightboxProps) {
   const open = Boolean(item?.src);
   const title = item?.kind === "video" ? "Видео" : "Фото";
   const src = item?.src || "";
-  const downloadUrl = src
-    ? `${src}${src.includes("?") ? "&" : "?"}download=1`
-    : "";
   const isVideo = item?.kind === "video";
-  const downloadName = isVideo
-    ? item?.name && /\.(mp4|webm|mov|m4v)$/i.test(item.name)
-      ? item.name
-      : "video.mp4"
-    : item?.name && /\.(png|jpe?g|gif|webp)$/i.test(item.name)
-      ? item.name
-      : "photo.jpg";
+  const downloadName = displayFileName(item?.name || (isVideo ? "video.mp4" : "photo.jpg"));
+  const downloadUrl = src ? downloadHref(src, downloadName) : "";
 
   return (
     <Lightbox

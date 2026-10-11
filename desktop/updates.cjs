@@ -10,7 +10,7 @@ function createUpdates({ app, publish, log, beforeInstall = async () => {}, test
   const send = (patch) => { state = { ...state, ...patch }; publish({ update: { ...state } }); };
   if (!app.isPackaged || testing || platform !== 'win32' || portable) {
     send({ phase: 'disabled', message: portable
-      ? 'Для обновлений установите Майко через Maiko-Setup. Portable заменяется вручную.'
+      ? 'Для обновлений установите Майко через Maiko-Setup.'
       : 'Обновления доступны в установленном приложении для Windows.' });
     return { action: async () => { throw new Error(state.message); }, start() {}, dispose() {} };
   }

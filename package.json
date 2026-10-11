@@ -17,6 +17,6 @@
     "desktop": "npm --prefix desktop start",
     "desktop:remote": "npm --prefix desktop run start:remote",
     "desktop:build": "npm --prefix desktop run dist",
-    "desktop:test": "npm --prefix desktop run assets && npm --prefix desktop test && npm --prefix desktop run test:window-assets && npm --prefix desktop run test:window-animations && npm --prefix desktop run test:viewport && npm --prefix desktop run test:compact-members && npm --prefix desktop run test:smoke"
+    "desktop:test": "npm --prefix desktop run assets && npm --prefix desktop test && npm --prefix desktop run test:downloads && npm --prefix desktop run test:window-assets && npm --prefix desktop run test:window-animations && npm --prefix desktop run test:viewport && npm --prefix desktop run test:compact-members && npm --prefix desktop run test:smoke"
   }
 }

@@ -25,7 +25,8 @@
     "test:local": "node tests/local-start.cjs",
     "test:screen-audio": "node prepare-native.cjs && node tests/screen-audio.cjs",
     "verify:release": "node verify-release.cjs",
-    "test:updates-ui": "node tests/updates-ui.cjs"
+    "test:updates-ui": "node tests/updates-ui.cjs",
+    "test:downloads": "node tests/downloads.cjs"
   },
   "devDependencies": {
     "electron": "44.7.0",
@@ -64,8 +65,7 @@
     "win": {
       "icon": "assets/icon.ico",
       "target": [
-        "nsis",
-        "portable"
+        "nsis"
       ]
     },
     "nsis": {
@@ -80,10 +80,6 @@
         "ru_RU",
         "en_US"
       ]
-    },
-    "portable": {
-      "artifactName": "Maiko-Portable-${version}.${ext}",
-      "requestExecutionLevel": "user"
     },
     "publish": [
       {

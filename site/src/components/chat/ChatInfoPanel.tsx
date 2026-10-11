@@ -27,7 +27,7 @@ import {
   IconTrash,
   IconUsers,
 } from "@/lib/icons";
-import { formatBytes, bareMediaUrl, validateAvatarFile } from "@/lib/files";
+import { formatBytes, bareMediaUrl, validateAvatarFile, downloadHref, displayFileName } from "@/lib/files";
 import { easeOutSoft, sheetSpring } from "@/lib/motion";
 import type {
   ChatInfo,
@@ -528,7 +528,7 @@ export function ChatInfoPanel({
               ) : (
                 <ul className="chat-info__files">
                   {items.map((item) => {
-                    const href = `${item.file.url}${item.file.url.includes("?") ? "&" : "?"}download=1`;
+                    const href = downloadHref(item.file.url, item.file.name);
                     return (
                       <li key={item.messageId}>
                         <div className="chat-info__file-meta">
@@ -547,7 +547,7 @@ export function ChatInfoPanel({
                         <a
                           className="icon-btn"
                           href={href}
-                          download={item.file.name}
+                          download={displayFileName(item.file.name)}
                           aria-label="Скачать"
                           title="Скачать"
                         >

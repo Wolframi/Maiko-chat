@@ -13,7 +13,7 @@ const file = metadata.files.find((entry) => entry.url === installer);
 const bytes = fs.readFileSync(path.join(release, installer));
 const hash = crypto.createHash('sha512').update(bytes).digest('base64');
 if (!file || file.sha512 !== hash || metadata.sha512 !== hash || file.size !== bytes.length) throw new Error('Installer checksum mismatch');
-for (const name of [`${installer}.blockmap`, `Maiko-Portable-${version}.exe`]) {
+for (const name of [`${installer}.blockmap`]) {
   if (!fs.statSync(path.join(release, name)).size) throw new Error(`Empty artifact: ${name}`);
 }
-console.log(`Verified ${version}: installer SHA-512, blockmap, portable and latest.yml.`);
+console.log(`Verified ${version}: installer SHA-512, blockmap and latest.yml.`);

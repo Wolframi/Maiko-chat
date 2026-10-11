@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Недавние загрузки</title>
+  <link rel="stylesheet" href="downloads-panel.css">
+  <script src="downloads-panel.js" defer></script>
+</head>
+<body>
+  <header><strong>Недавние загрузки</strong><span id="count">0 / 15</span></header>
+  <p id="error" role="alert" hidden></p>
+  <p id="empty">Скачанные файлы появятся здесь.</p>
+  <ul id="files" aria-label="Недавние скачанные файлы"></ul>
+  <footer>Последние 15 загрузок. Все файлы остаются в папке.</footer>
+</body>
+</html>

@@ -28,6 +28,7 @@ import { isDevAccessibleHost } from "../lib/devHosts";
 import { restoreSession } from "./auth";
 import { rateLimit } from "./rateLimit";
 import { audioWaveform } from "./audioWaveform";
+import { downloadName, downloadDisposition } from "./downloadName";
 import {
   isTranscodableVideoPath,
   normalizedVideoName,
@@ -901,7 +902,7 @@ async function serveUpload(req: IncomingMessage, res: ServerResponse) {
   }
 
   const size = info.size;
-  if (parsed.searchParams.get("waveform") === "1") {
+  if (!download && parsed.searchParams.get("waveform") === "1") {
     if (size > 64 * 1024 * 1024 || !INLINE_MEDIA_EXT.has(ext) || looksImage) {
       res.writeHead(422, { "Cache-Control": "no-store" });
       res.end();
@@ -950,14 +951,15 @@ async function serveUpload(req: IncomingMessage, res: ServerResponse) {
   }
 
   const forceAttach = download || !INLINE_MEDIA_EXT.has(ext);
-  const disposition = `${forceAttach ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(original)}`;
+  const suggestedName = download ? downloadName(parsed.searchParams.get("name") || "", original) : original;
+  const disposition = downloadDisposition(suggestedName, forceAttach);
   const isVideo = mime.startsWith("video/");
 
   // Thumbnail proxy: a ready thumb is served immediately. A miss falls
   // through to the original so the chat is not stuck on ffmpeg.
   const wantW = parsed.searchParams.get("w");
   if (
-    wantW &&
+    !download && wantW &&
     THUMB_WIDTHS.has(wantW) &&
     looksImage &&
     THUMB_SOURCE_EXT.has(ext) &&
@@ -997,7 +999,7 @@ async function serveUpload(req: IncomingMessage, res: ServerResponse) {
   };
 
   const ifNoneMatch = String(req.headers["if-none-match"] || "");
-  if (ifNoneMatch && ifNoneMatch === etag) {
+  if (!download && ifNoneMatch && ifNoneMatch === etag) {
     res.writeHead(304, {
       ETag: etag,
       "Cache-Control": cacheControl,
