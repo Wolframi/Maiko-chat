@@ -1,6 +1,6 @@
 {
   "name": "maiko-desktop",
-  "version": "1.1.9",
+  "version": "1.1.10",
   "private": true,
   "description": "Майко — приложение для Windows",
   "author": "Maiko",
@@ -83,10 +83,9 @@
     },
     "publish": [
       {
-        "provider": "github",
-        "owner": "Wolframi",
-        "repo": "Maiko-chat",
-        "releaseType": "release"
+        "provider": "generic",
+        "url": "https://maiko.galacticvps.qzz.io/desktop-updates/",
+        "useMultipleRangeRequest": false
       }
     ]
   },

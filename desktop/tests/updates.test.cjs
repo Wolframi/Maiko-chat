@@ -69,10 +69,27 @@ test('network check failures recover and disposal removes timers and listeners',
   await f.controller.action('check');
   assert.equal(f.state().phase, 'error'); assert.equal(f.state().retryAction, 'check');
   f.updater.checkForUpdates = async () => f.updater.emit('update-not-available');
-  await f.controller.action('check'); assert.equal(f.state().phase, 'idle');
+  await f.controller.action('check'); assert.equal(f.state().phase, 'current');
+  assert.equal(f.state().version, ''); assert.equal(f.state().progress, 0);
   await assert.rejects(f.controller.action('arbitrary-url'));
   f.controller.start(); f.controller.dispose();
   assert.equal(f.updater.eventNames().length, 0);
+});
+
+test('failed preparation retries the downloaded installer without downloading again', async () => {
+  let attempts = 0;
+  const f = fixture({ beforeInstall: async () => { if (++attempts === 1) throw new Error('Server stop failed'); } });
+  await f.controller.action('check');
+  await f.controller.action('download');
+  await f.controller.action('install');
+  assert.equal(f.state().phase, 'error');
+  assert.equal(f.state().retryAction, 'install');
+  f.updater.quitAndInstall = () => {};
+  f.updater.downloadUpdate = () => { throw new Error('Must not download again'); };
+  await f.controller.action('install');
+  assert.equal(f.state().phase, 'installing');
+  assert.equal(attempts, 2);
+  f.controller.dispose();
 });
 
 test('development, portable and test runs never instantiate the updater', async () => {

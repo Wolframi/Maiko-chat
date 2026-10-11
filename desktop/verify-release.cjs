@@ -5,7 +5,7 @@ const yaml = require('js-yaml');
 const { version } = require('./package.json');
 const release = path.join(__dirname, 'release');
 const feed = yaml.load(fs.readFileSync(path.join(release, 'win-unpacked/resources/app-update.yml'), 'utf8'));
-if (feed.provider !== 'github' || feed.owner !== 'Wolframi' || feed.repo !== 'Maiko-chat') throw new Error('Incorrect update repository in packaged app');
+if (feed.provider !== 'generic' || feed.url !== 'https://maiko.galacticvps.qzz.io/desktop-updates/' || feed.useMultipleRangeRequest !== false) throw new Error('Incorrect update source in packaged app');
 const metadata = yaml.load(fs.readFileSync(path.join(release, 'latest.yml'), 'utf8'));
 const installer = `Maiko-Setup-${version}.exe`;
 if (metadata.version !== version || metadata.path !== installer) throw new Error('Update metadata does not match the release');

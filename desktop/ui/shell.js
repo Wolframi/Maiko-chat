@@ -28,12 +28,12 @@ function render(state) {
     element('update-dock').dataset.phase = update.phase;
     element('update-dock').title = update.message;
     const busy = ['checking', 'downloading', 'installing'].includes(update.phase);
-    const command = update.phase === 'downloaded' ? 'install' :
+    const command = update.phase === 'downloaded' || (update.phase === 'error' && update.retryAction === 'install') ? 'install' :
       update.phase === 'available' || (update.phase === 'error' && update.retryAction === 'download') ? 'download' : 'check';
     element('update-action').dataset.command = command;
     element('update-action').disabled = busy || update.phase === 'disabled';
     const label = busy ? update.phase === 'checking' ? 'Проверка…' : update.phase === 'installing' ? 'Перезапуск…' : `${update.progress}%` :
-      command === 'install' ? 'Установить' : command === 'download' ? 'Обновить' : update.phase === 'error' ? 'Повторить' : 'Проверить';
+      update.phase === 'error' ? 'Повторить' : command === 'install' ? 'Установить' : command === 'download' ? 'Обновить' : update.phase === 'current' ? 'Обновлено' : 'Проверить';
     const description = command === 'install' ? `Перезапустить и установить ${update.version}` :
       command === 'download' ? `Скачать обновление ${update.version}` : 'Проверить обновления';
     element('update-label').textContent = label;

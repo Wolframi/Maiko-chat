@@ -36,7 +36,11 @@ async function main() {
       ipcMain.removeHandler('desktop:update');
       ipcMain.handle('desktop:update', async (_event, action) => {
         global.updateTestActions.push(action);
-        if (action === 'check') send({ phase: 'available', message: 'Доступна версия 9.9.9.' });
+        if (action === 'check') {
+          send({ phase: 'checking', message: 'Проверяем обновления…' });
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          send({ phase: 'available', message: 'Доступна версия 9.9.9.' });
+        }
         if (action === 'download') {
           send({ phase: 'downloading', progress: 47, message: 'Скачиваем обновление…' });
           await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -44,9 +48,15 @@ async function main() {
         }
         if (action === 'install') send({ phase: 'installing', message: 'Перезапускаем приложение…' });
       });
-      send({ phase: 'idle', message: 'Проверяем новые версии автоматически.' });
+      send({ phase: 'current', message: 'Обновлено. Установлена последняя версия.' });
     }, { state, version });
+    await page.waitForFunction(() => document.querySelector('#update-label').textContent === 'Обновлено');
+    assert.equal(await page.locator('#update-action').isDisabled(), false, 'Current version can be checked again');
+    assert.match(await page.locator('#update-dock').getAttribute('title'), /Установлена последняя версия/);
     await page.getByRole('button', { name: 'Проверить обновления', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('#update-dock').dataset.phase === 'checking');
+    assert.equal(await page.locator('#update-action').isDisabled(), true);
+    assert.equal(await page.locator('#update-label').textContent(), 'Проверка…');
     await page.getByRole('button', { name: 'Скачать обновление 9.9.9', exact: true }).click();
     await page.locator('#update-progress:not([hidden])').waitFor();
     assert.equal(await page.locator('.update-wheel').evaluate((icon) => getComputedStyle(icon).animationName), 'spin');
@@ -62,7 +72,12 @@ async function main() {
     await page.getByRole('button', { name: 'Перезапустить и установить 9.9.9', exact: true }).click();
     assert.deepEqual(await app.evaluate(() => global.updateTestActions), ['check', 'download', 'install']);
     assert.equal(await page.locator('#update-action').isDisabled(), true);
-    console.log('Update dock passed in Electron: version, spinner, progress, direct check/download/install, minimum window size and no site input.');
+    for (const retryAction of ['check', 'download', 'install']) {
+      await app.evaluate((_electron, retryAction) => global.sendUpdateTestState({ phase: 'error', retryAction, message: 'Ошибка обновления. Повторите попытку.' }), retryAction);
+      await page.waitForFunction((retryAction) => document.querySelector('#update-action').dataset.command === retryAction && document.querySelector('#update-label').textContent === 'Повторить', retryAction);
+      assert.equal(await page.locator('#update-action').isDisabled(), false);
+    }
+    console.log('Update dock passed in Electron: current, checking, available, downloading, downloaded, installing, all error retries, version, spinner, progress and minimum window size.');
   } finally {
     if (app) await app.close();
     await new Promise((resolve) => server.close(resolve));

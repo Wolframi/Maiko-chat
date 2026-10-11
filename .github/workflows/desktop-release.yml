@@ -68,3 +68,29 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
           gh release edit $tag --draft=false --latest
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
+
+  publish-update-feed:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MAIKO_RELEASE_SSH_KEY: ${{ secrets.MAIKO_RELEASE_SSH_KEY }}
+      MAIKO_RELEASE_HOST_KEY: ${{ secrets.MAIKO_RELEASE_HOST_KEY }}
+    steps:
+      - name: Publish verified release to the desktop update server
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$MAIKO_RELEASE_SSH_KEY"
+          test -n "$MAIKO_RELEASE_HOST_KEY"
+          install -d -m 700 ~/.ssh release
+          printf '%s\n' "$MAIKO_RELEASE_SSH_KEY" > ~/.ssh/maiko-release
+          printf '%s\n' "$MAIKO_RELEASE_HOST_KEY" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/maiko-release ~/.ssh/known_hosts
+          version="${GITHUB_REF_NAME#v}"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir release \
+            --pattern "Maiko-Setup-$version.exe" --pattern "Maiko-Setup-$version.exe.blockmap" --pattern latest.yml
+          tar -C release -cf - "Maiko-Setup-$version.exe" "Maiko-Setup-$version.exe.blockmap" latest.yml | \
+            ssh -i ~/.ssh/maiko-release -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=30 root@179.254.175.134 publish
+          curl --retry 3 --fail --silent --show-error https://maiko.galacticvps.qzz.io/desktop-updates/latest.yml | grep -Fx "version: $version"

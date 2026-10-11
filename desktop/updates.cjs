@@ -23,12 +23,12 @@ function createUpdates({ app, publish, log, beforeInstall = async () => {}, test
   const handlers = {
     'checking-for-update': () => send({ phase: 'checking', message: 'Проверяем обновления…', progress: 0 }),
     'update-available': (info) => send({ phase: 'available', version: info.version, message: `Доступна версия ${info.version}.` }),
-    'update-not-available': () => send({ phase: 'idle', version: '', message: 'Установлена последняя версия.' }),
+    'update-not-available': () => send({ phase: 'current', version: '', progress: 0, retryAction: '', message: 'Обновлено. Установлена последняя версия.' }),
     'download-progress': (info) => send({ phase: 'downloading', progress: Math.min(100, Math.max(0, Math.round(info.percent))), message: 'Скачиваем обновление…' }),
     'update-downloaded': (info) => send({ phase: 'downloaded', version: info.version, progress: 100, message: 'Обновление готово. Перезапустите приложение для установки.' }),
     'error': (error) => {
       log(`Update error: ${error.stack || error.message}`);
-      const retryAction = ['downloading', 'installing'].includes(state.phase) ? 'download' : 'check';
+      const retryAction = state.phase === 'installing' ? 'install' : state.phase === 'downloading' ? 'download' : 'check';
       send({ phase: 'error', retryAction, message: 'Не удалось обновить приложение. Проверьте соединение и повторите.' });
     },
   };
@@ -42,7 +42,7 @@ function createUpdates({ app, publish, log, beforeInstall = async () => {}, test
     if (command === 'download' && !(state.phase === 'available' || (state.phase === 'error' && state.retryAction === 'download'))) {
       throw new Error('Сначала проверьте наличие обновления.');
     }
-    if (command === 'install' && state.phase !== 'downloaded') throw new Error('Обновление ещё не скачано.');
+    if (command === 'install' && !(state.phase === 'downloaded' || (state.phase === 'error' && state.retryAction === 'install'))) throw new Error('Обновление ещё не скачано.');
     busy = true;
     try {
       if (command === 'check') await updater.checkForUpdates();

@@ -31,4 +31,4 @@ npm run desktop:build
 
 Также доступны `Запустить Майко.cmd` и `Майко онлайн.cmd`. Установщик создаётся в `desktop/release/`.
 
-Инструкции: [сайт](site/README.md), [Electron](desktop/README.md), [обновления и релизы](docs/desktop-updates.md), [архитектура](docs/README.md).
+Инструкции: [сайт](site/README.md), [Electron](desktop/README.md), [обновления и релизы](docs/desktop-updates.md), [сервер](docs/deployment.md), [архитектура](docs/README.md).
