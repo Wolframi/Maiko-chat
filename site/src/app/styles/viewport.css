@@ -1,0 +1,100 @@
+/* Grid's automatic minimum used to grow the chat beyond the visible window.
+   Keep the workspace inside the viewport; the lists own their scrolling. */
+.app-shell:has(> .workspace) {
+  height: var(--app-height, 100dvh);
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.app-shell > .workspace {
+  grid-area: 1 / 1;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.workspace__sidebar {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* The member rail moves into the group's sidebar below Invite at exactly
+   the width where the right rail disappears. It shares the sidebar scroller. */
+.sidebar__responsive-members {
+  display: none;
+}
+
+@media (max-width: 1100px) {
+  .sidebar__responsive-members {
+    display: block;
+    min-width: 0;
+  }
+
+  .sidebar__responsive-members > .member-rail {
+    display: flex;
+    border: 0;
+    background: transparent;
+  }
+
+  .sidebar__responsive-members .member-rail__scroll {
+    flex: none;
+    overflow: visible;
+    padding: 4px 0 8px;
+  }
+
+  .sidebar__members-summary:has(+ .sidebar__responsive-members),
+  .sidebar__list--guild.has-compact-members > .sidebar__members-summary,
+  .sidebar__list--guild.has-compact-members > .sidebar__section,
+  .sidebar__list--guild.has-compact-members > .sidebar__meta-line {
+    display: none;
+  }
+}
+
+.app-shell .room.room--in-call .room__stream {
+  min-height: 0;
+  flex-basis: 0;
+}
+
+/* Leave space for messages and input below media in a short window. The dock
+   may shrink even when the user previously dragged it to a larger height. */
+@media (min-width: 641px) and (max-width: 1099px) {
+  .app-shell .room.room--in-call > .room__stage {
+    min-height: min(260px, 65%);
+  }
+
+  .app-shell .room.room--in-call:has(.composer__reply:not([hidden]), .composer__pending:not([hidden])) > .room__stage {
+    min-height: min(360px, 70%);
+  }
+
+  .app-shell .room.room--in-call > .room__call-dock:not(:empty):not(.is-mini) {
+    min-height: 0;
+    flex-shrink: 1;
+  }
+}
+
+.room .composer__input {
+  min-width: 0;
+  max-height: clamp(46px, calc(var(--app-height, 100dvh) * 0.18), 224px);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+
+.composer__reply {
+  max-height: clamp(40px, calc(var(--app-height, 100dvh) * 0.1), 64px);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+
+.composer__pending {
+  max-height: 80px;
+  overflow-y: auto;
+}
+
+/* Tall login/registration forms remain reachable at smaller window heights.
+   Safe centering starts at the top whenever the card does not fit. */
+.app-shell.app-shell--auth:not(:has(> .workspace)) {
+  height: var(--app-height, 100dvh);
+  min-height: 0;
+  overflow-y: auto;
+  align-items: safe center;
+  overscroll-behavior-y: contain;
+}

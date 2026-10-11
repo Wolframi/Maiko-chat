@@ -20,8 +20,8 @@ module.exports = {
     {
       name: "pulse-chat",
       cwd: "/root/pulse-chat",
-      script: "npx",
-      args: "tsx server.ts",
+      script: "npm",
+      args: "start",
       instances: 1,
       exec_mode: "fork",
       autorestart: true,

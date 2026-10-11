@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+/* Keep this order: later files contain intentional cascade overrides.
+   See styles/README.md for the stylesheet map. */
+@import "./styles/base.css";
+@import "./styles/auth.css";
+@import "./styles/workspace.css";
+@import "./styles/message-actions.css";
+@import "./styles/guilds.css";
+@import "./styles/sidebar.css";
+@import "./styles/room.css";
+@import "./styles/audio-playback.css";
+@import "./styles/room-controls.css";
+@import "./styles/reactions.css";
+@import "./styles/message-list.css";
+@import "./styles/message-bubbles.css";
+@import "./styles/composer.css";
+@import "./styles/call-mini.css";
+@import "./styles/message-status.css";
+@import "./styles/profile.css";
+@import "./styles/voice-messages.css";
+@import "./styles/chat-info.css";
+@import "./styles/profile-dialog.css";
+@import "./styles/call-stage.css";
+@import "./styles/call-participants.css";
+@import "./styles/call-controls.css";
+@import "./styles/responsive.css";
+@import "./styles/dialogs.css";
+@import "./styles/call-preview.css";
+@import "./styles/call-layout.css";
+@import "./styles/voice-controls.css";
+@import "./styles/unified-picker.css";
+@import "./styles/gif-picker.css";
+@import "./styles/stickers.css";
+@import "./styles/message-meta.css";
+@import "./styles/call-layout-overrides.css";
+@import "./styles/viewport.css";

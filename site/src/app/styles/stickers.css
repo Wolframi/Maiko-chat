@@ -1,0 +1,427 @@
+/* ============================================
+   STICKERS
+   ============================================ */
+
+/* ============================================
+   STICKERS
+   ============================================ */
+
+.sticker-picker {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+.sticker-picker__packs {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex: 0 0 auto;
+  scrollbar-width: thin;
+}
+
+.sticker-picker__pack {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  overflow: hidden;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.sticker-picker__pack img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.sticker-picker__pack:hover { background: rgba(255, 255, 255, 0.12); color: var(--ink); }
+.sticker-picker__pack.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.sticker-picker__pack--add { background: transparent; color: var(--muted); }
+.sticker-picker__pack--add:hover { background: rgba(255, 255, 255, 0.08); }
+
+.sticker-picker__create {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.sticker-picker__create input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--ink);
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 0.85rem;
+}
+.sticker-picker__create button {
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  padding: 0 12px;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.sticker-picker__create button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.sticker-picker__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px 4px;
+  flex: 0 0 auto;
+}
+.sticker-picker__title {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: default;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+}
+.sticker-picker__title:not(:disabled) { cursor: text; }
+.sticker-picker__title:not(:disabled):hover { color: var(--accent-hover); }
+.sticker-picker__count {
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+.sticker-picker__rename {
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--ink);
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 0.85rem;
+}
+.sticker-picker__head-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.sticker-picker__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  padding: 5px 9px;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.sticker-picker__action:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.sticker-picker__action:disabled { opacity: 0.5; cursor: progress; }
+.sticker-picker__action--danger { padding: 5px 8px; }
+.sticker-picker__action--danger:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+
+/* Сетка стикеров в пикере: жёстко 72px, чтобы ничего не растягивалось */
+.sticker-picker__grid {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 10px 12px 14px;
+}
+
+.sticker-picker__mosaic-width {
+  width: 100%;
+  height: 0;
+}
+
+.sticker-picker__mosaic {
+  position: relative;
+}
+
+.sticker-picker__item {
+  position: absolute;
+  border: 0;
+  padding: 6px;
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+.sticker-picker__item:hover { background: rgba(255, 255, 255, 0.06); }
+.sticker-picker__item:active { transform: scale(0.94); }
+.sticker-picker__item img,
+.sticker-picker__item video {
+  position: absolute;
+  inset: 6px;
+  width: calc(100% - 12px);
+  height: calc(100% - 12px);
+  object-fit: contain;
+  object-position: center;
+  display: block;
+  pointer-events: none;
+}
+
+.sticker-picker__item-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: 2;
+  cursor: pointer;
+}
+.sticker-picker__item:hover .sticker-picker__item-remove { opacity: 1; }
+.sticker-picker__item-remove:hover { background: var(--danger); }
+
+.sticker-picker__empty {
+  grid-column: 1 / -1;
+  padding: 40px 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+/* ─── Стикер в бабле сообщения ─────────────────────────────── */
+
+.bubble-row--sticker {
+  align-items: flex-end;
+  gap: 7px;
+  max-width: 100%;
+  width: 100%;
+  align-self: stretch;
+}
+
+.sticker-bubble {
+  position: relative;
+  display: block;
+  width: 176px;
+  height: 176px;
+  max-width: min(62vw, 240px);
+  max-height: min(62vw, 240px);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.sticker-bubble:active { transform: scale(0.98); }
+.sticker-bubble img,
+.sticker-bubble video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  display: block;
+  pointer-events: none;
+}
+
+@media (max-width: 640px) {
+  .sticker-bubble {
+    width: 140px;
+    height: 140px;
+    max-width: min(56vw, 176px);
+    max-height: min(56vw, 176px);
+  }
+}
+
+/* ─── Просмотрщик пака ─────────────────────────────────────── */
+
+.sticker-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+.sticker-viewer__backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(5, 5, 10, 0.65);
+  backdrop-filter: blur(3px);
+  cursor: pointer;
+}
+.sticker-viewer__card {
+  position: relative;
+  width: min(540px, 100%);
+  max-height: min(88dvh, 780px);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.sticker-viewer__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.sticker-viewer__meta { min-width: 0; }
+.sticker-viewer__meta h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sticker-viewer__meta span { color: var(--muted); font-size: 0.75rem; }
+.sticker-viewer__actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.sticker-viewer__install {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.sticker-viewer__install:disabled { opacity: 0.6; cursor: progress; }
+.sticker-viewer__installed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent-hover);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+.sticker-viewer__status {
+  margin: 0;
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+.sticker-viewer__status--error { color: var(--danger); }
+
+/* Ячейки фиксированного размера, ничего не тянется */
+.sticker-viewer__grid {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 108px);
+  grid-auto-rows: 108px;
+  gap: 8px;
+  padding: 14px 16px 18px;
+  align-content: start;
+  justify-content: start;
+}
+
+.sticker-viewer__item {
+  position: relative;
+  width: 108px;
+  height: 108px;
+  border: 1px solid transparent;
+  padding: 8px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  overflow: hidden;
+  transition: background 0.15s ease, transform 0.12s ease, border-color 0.15s ease;
+}
+.sticker-viewer__item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+.sticker-viewer__item:active { transform: scale(0.94); }
+.sticker-viewer__item img,
+.sticker-viewer__item video {
+  position: absolute;
+  inset: 8px;
+  width: calc(100% - 16px);
+  height: calc(100% - 16px);
+  object-fit: contain;
+  object-position: center;
+  display: block;
+  pointer-events: none;
+}
+.sticker-viewer__item.is-focus {
+  animation: sticker-focus 1.8s var(--ease-soft);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+@keyframes sticker-focus {
+  0%, 100% { background: rgba(255, 255, 255, 0.03); }
+  20% { background: var(--accent-soft); }
+}
+
+@media (max-width: 640px) {
+  .sticker-viewer { padding: 8px; }
+  .sticker-viewer__card {
+    width: 100%;
+    max-height: min(92dvh, 100%);
+    border-radius: 14px;
+  }
+  .sticker-viewer__head { padding: 12px; }
+  .sticker-viewer__grid {
+    grid-template-columns: repeat(auto-fill, 88px);
+    grid-auto-rows: 88px;
+    gap: 6px;
+    padding: 10px 12px 14px;
+  }
+  .sticker-viewer__item { width: 88px; height: 88px; padding: 6px; }
+  .sticker-viewer__item img,
+  .sticker-viewer__item video {
+    inset: 6px;
+    width: calc(100% - 12px);
+    height: calc(100% - 12px);
+  }
+}

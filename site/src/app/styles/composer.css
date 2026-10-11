@@ -1,0 +1,258 @@
+.composer {
+  position: relative;
+  z-index: 6;
+  padding: 0;
+  padding-bottom: var(--safe-bottom);
+  border-top: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(20px);
+  flex-shrink: 0;
+}
+
+.composer--drag .composer__box {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.composer__drop {
+  position: absolute;
+  inset: 8px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--accent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  color: var(--accent);
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.composer__pending {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+
+.composer__chip {
+  display: grid;
+  grid-template-columns: 40px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  min-width: min(220px, 70vw);
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-raised);
+}
+
+.composer__chip--media {
+  grid-template-columns: 64px auto;
+  min-width: 0;
+  width: auto;
+  padding: 4px;
+  gap: 4px;
+}
+
+.composer__chip img,
+.composer__chip video,
+.composer__chip-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: var(--bg-deep);
+}
+
+.composer__chip--media img,
+.composer__chip--media video {
+  width: 64px;
+  height: 64px;
+}
+
+.composer__chip-icon {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.composer__chip-meta {
+  display: grid;
+  min-width: 0;
+}
+
+.composer__chip-meta strong,
+.composer__chip-meta em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer__chip-meta strong {
+  font-size: 0.8rem;
+}
+
+.composer__chip-meta em {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.composer__chip-remove {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.composer__hint {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 10px);
+  z-index: 8;
+  max-width: min(92%, 420px);
+  margin: 0;
+  padding: 8px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--glass-border);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  color: var(--ink);
+  font-size: 0.8rem;
+  font-weight: 500;
+  line-height: 1.35;
+  text-align: center;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  pointer-events: none;
+  transform: translateX(-50%);
+  animation: composer-hint-in 0.18s var(--ease-out),
+    composer-hint-out 0.22s var(--ease-out) 2.95s forwards;
+}
+
+@keyframes composer-hint-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+@keyframes composer-hint-out {
+  to {
+    opacity: 0;
+    transform: translateX(-50%) translateY(4px);
+  }
+}
+
+.composer__box {
+  display: flex;
+  align-items: flex-end;
+  gap: 0;
+  min-height: 54px;
+  padding: 4px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.composer__box.is-busy {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.composer__count {
+  align-self: flex-end;
+  min-width: 2ch;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  padding: 0;
+}
+
+.composer__count.is-warn {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.bubble__video {
+  max-width: min(100%, 430px);
+  width: auto;
+  height: auto;
+  display: block;
+  border-radius: 0;
+  background: #0b0d0c;
+  max-height: min(48dvh, 430px);
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.bubble__video-btn {
+  position: relative;
+  display: block;
+  max-width: min(100%, 430px);
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  overflow: hidden;
+  cursor: zoom-in;
+  background: #0b0d0c;
+}
+
+.bubble__video-play {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: clamp(32px, 22%, 56px);
+  aspect-ratio: 1;
+  height: auto;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(5, 5, 10, 0.62);
+  color: #ffffff;
+  pointer-events: none;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  padding: 0;
+}
+
+.bubble__video-play svg {
+  width: 46%;
+  height: 46%;
+  /* Lucide Play sits left in the viewBox — nudge the triangle into the circle. */
+  transform: translateX(9%);
+}
+
+.bubble__download {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  color: inherit;
+  opacity: 0.72;
+  background: rgba(255, 255, 255, 0.06);
+  flex: 0 0 auto;
+  transition:
+    opacity 0.15s ease,
+    background 0.15s ease;
+}
+
+.bubble__file-link:hover .bubble__download {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.12);
+}

@@ -1,49 +1,34 @@
 # Майко
 
-Realtime-мессенджер: чаты как в Telegram, группы и звонки как в Discord.
+Realtime-мессенджер: сайт и отдельное приложение для Windows.
 
-Документация (архитектура, ЛС, гильдии, голос, шумодав):
+| Папка | Содержимое |
+| --- | --- |
+| `site/` | Next.js, Socket.IO, исходники сайта, ресурсы, тесты и собственные зависимости |
+| `desktop/` | Electron, оболочка Windows, установщик, обновления и собственные зависимости |
+| `docs/` | Общая документация |
+| `scripts/` | Развёртывание сайта и миграция старых установок |
 
-- [docs/README.md](docs/README.md) — оглавление
-- [Чаты как Telegram](docs/chats.md)
-- [Группы как Discord](docs/groups.md)
-- [Голос и звонки](docs/voice.md)
+## Запуск сайта
 
-## Run locally
-
-```bash
-npm install
-npm run livekit   # свой SFU на ВМ: ws://127.0.0.1:7880 (не LiveKit Cloud)
+```powershell
+npm ci
 npm run dev
 ```
 
-Open http://localhost:3000
+Открыть http://localhost:3000. Корневые команды `dev`, `build`, `start`, `lint` выполняются в `site/`. Можно работать напрямую: `cd site; npm ci; npm run dev`.
 
-Групповые голосовые каналы идут через этот LiveKit. Личные звонки — P2P, SFU им не нужен.
+Данные, загрузки и ключи нового сайта находятся в `site/` и исключены из Git. При обновлении старого VPS `npm ci` сохраняет существующие `data/` и `uploads/` через ссылки из `site/` и копирует локальные настройки, если их ещё нет в `site/`.
 
-Расшифровка голосовых сообщений использует Deepgram Nova-3. Задайте серверный
-`DEEPGRAM_API_KEY` или сохраните ключ в `.deepgram-api-key`. По умолчанию включён
-мультиязычный режим (`DEEPGRAM_LANGUAGE=multi`); специализированные имена можно
-передать через `DEEPGRAM_KEYTERMS`, разделяя их запятыми или переводами строк.
+## Приложение Windows
 
-## Demo accounts
-
-Created automatically unless `SEED_DEMO=0`:
-
-| Login | Password |
-|-------|----------|
-| artem | Artem1234! |
-| alice | Alice1234! |
-| bob | Bob12345! |
-| kirill | Kirill123! |
-
-## Production
-
-```bash
-npm run build
-SEED_DEMO=1 NEXT_PUBLIC_DEMO=1 npm start
+```powershell
+npm run desktop:install
+npm run desktop
+npm run desktop:remote
+npm run desktop:build
 ```
 
-VPS (PM2 + nginx): `powershell -File scripts/deploy.ps1`
+Также доступны `Запустить Майко.cmd` и `Майко онлайн.cmd`. Установщик и portable EXE создаются в `desktop/release/`.
 
-Health check: `GET /api/health`
+Инструкции: [сайт](site/README.md), [Electron](desktop/README.md), [обновления и релизы](docs/desktop-updates.md), [архитектура](docs/README.md).

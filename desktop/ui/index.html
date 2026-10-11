@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Майко</title>
+  <link rel="stylesheet" href="shell.css">
+  <script src="shell.js" defer></script>
+</head>
+<body>
+  <div class="desktop-frame">
+    <header class="titlebar" id="titlebar">
+      <div class="brand"><img src="../assets/icon.png" alt="" width="22" height="22"><span>Майко</span></div>
+      <span class="connection" aria-live="polite"><span class="status-dot"></span><span id="status">Запускаем…</span></span>
+      <div class="window-actions">
+        <button id="settings" class="utility-button" title="Адрес сайта" aria-label="Настройки подключения"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 17h16M8 4v6m8 4v6"/></svg></button>
+        <button data-action="minimize" title="Свернуть" aria-label="Свернуть"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+        <button data-action="maximize" id="maximize" title="Развернуть" aria-label="Развернуть"><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1"/></svg></button>
+        <button data-action="close" class="close-button" title="Закрыть" aria-label="Закрыть"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </div>
+    </header>
+    <main class="connection-screen" id="connection-screen">
+      <section class="connection-card" aria-live="polite">
+        <img class="app-icon" src="../assets/icon.png" width="72" height="72" alt="Майко">
+        <p class="eyebrow">ВАШИ ЛЮДИ. ВАШ МАЙКО.</p>
+        <h1 id="heading">Почти на месте</h1>
+        <p class="description" id="message">Запускаем приложение…</p>
+        <div class="loader" id="loader" aria-label="Загрузка"></div>
+        <div class="error-actions" id="error-actions" hidden>
+          <button class="primary" data-action="reload">Повторить</button>
+          <button class="secondary" id="change-url">Изменить адрес</button>
+          <button class="text-button" data-action="logs">Открыть журнал</button>
+        </div>
+      </section>
+    </main>
+    <section class="settings-screen" id="settings-screen" hidden>
+      <form class="connection-card" id="connection-form">
+        <div class="eyebrow">ПОДКЛЮЧЕНИЕ</div>
+        <h1>Ваш Майко</h1>
+        <p class="description">Укажите адрес сайта, чтобы войти в свои чаты.</p>
+        <label for="site-url">Адрес сайта</label>
+        <input id="site-url" type="url" autocomplete="url" placeholder="https://…" required spellcheck="false">
+        <p class="form-error" id="form-error" role="alert"></p>
+        <div class="form-actions"><button type="button" class="secondary" id="cancel-settings">Назад</button><button type="submit" class="primary">Подключиться</button></div>
+        <p class="hint">Адрес и вход сохраняются на этом компьютере.</p>
+      </form>
+    </section>
+  </div>
+</body>
+</html>

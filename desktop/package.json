@@ -1,0 +1,86 @@
+{
+  "name": "maiko-desktop",
+  "version": "1.1.7",
+  "private": true,
+  "description": "Майко — приложение для Windows",
+  "author": "Maiko",
+  "main": "main.cjs",
+  "scripts": {
+    "assets": "node ../site/scripts/prepare-dtln.mjs && node prepare-icons.cjs && node prepare-native.cjs && node prepare-assets.cjs",
+    "prestart": "npm run assets",
+    "start": "electron . --local",
+    "prestart:remote": "npm run assets",
+    "start:remote": "electron .",
+    "prepack": "npm run assets -- --remote",
+    "pack": "electron-builder --win --x64 --dir",
+    "predist": "npm run assets -- --remote",
+    "dist": "electron-builder --win --x64",
+    "test": "node --test tests/*.test.cjs",
+    "test:smoke": "node tests/smoke.cjs",
+    "test:window-assets": "node tests/window-assets.cjs",
+    "test:built-icons": "node tests/built-icons.cjs",
+    "test:window-animations": "node prepare-native.cjs && node tests/window-animations.cjs",
+    "test:viewport": "node tests/viewport.cjs",
+    "test:compact-members": "node tests/compact-members.cjs",
+    "test:local": "node tests/local-start.cjs",
+    "test:screen-audio": "node prepare-native.cjs && node tests/screen-audio.cjs"
+  },
+  "devDependencies": {
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.1",
+    "playwright": "1.62.1",
+    "sharp": "0.34.5"
+  },
+  "build": {
+    "appId": "io.maiko.desktop",
+    "productName": "Maiko",
+    "afterAllArtifactBuild": "./refresh-built-icons.cjs",
+    "extraFiles": [
+      {
+        "from": "assets/icon.ico",
+        "to": "Maiko.ico"
+      }
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "native/*.exe"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "*.cjs",
+      "native/**/*",
+      "config.json",
+      "ui/**/*",
+      "assets/**/*",
+      "bundled-assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "artifactName": "Maiko-Setup-${version}.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Майко",
+      "installerLanguages": [
+        "ru_RU",
+        "en_US"
+      ]
+    },
+    "portable": {
+      "artifactName": "Maiko-Portable-${version}.${ext}",
+      "requestExecutionLevel": "user"
+    }
+  }
+}

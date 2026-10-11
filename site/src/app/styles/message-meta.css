@@ -1,0 +1,72 @@
+/* Inline time reserves its actual width on the last text line. */
+.bubble-row--plaque .bubble__text,
+.bubble__media-caption-text {
+  position: relative;
+}
+.bubble__time-space {
+  display: inline-block;
+  padding-left: 8px;
+  visibility: hidden;
+  white-space: nowrap;
+  vertical-align: bottom;
+  line-height: 1;
+}
+.bubble__time-corner {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  line-height: 1;
+}
+.bubble-row--plaque .bubble__time-space .bubble__time,
+.bubble-row--plaque .bubble__time-corner .bubble__time,
+.bubble-row--plaque .bubble__reactions > .bubble__time {
+  position: static;
+  float: none;
+  margin: 0;
+  font-size: 12px;
+  line-height: 16px;
+  vertical-align: bottom;
+}
+.bubble-row--plaque .bubble__reactions > .bubble__time {
+  align-self: flex-end;
+  margin-left: auto;
+  padding-left: 6px;
+}
+.bubble__reactions {
+  align-items: center;
+  column-gap: 4px;
+  row-gap: 4px;
+}
+.bubble__reaction {
+  gap: 3px;
+  min-height: 26px;
+  padding: 2px 6px 2px 5px;
+}
+.bubble__reaction-avatars {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 1px;
+}
+.bubble__reaction-avatars .bubble__reaction-avatar {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  font-size: 8px;
+  border: 1px solid var(--bubble-them);
+  border-radius: 50%;
+}
+.bubble__reaction-avatar + .bubble__reaction-avatar {
+  margin-left: -7px;
+}
+.bubble__reaction.is-active .bubble__reaction-avatar {
+  border-color: #a9c8eb;
+}
+.bubble__reaction.is-active .bubble__reaction-emoji {
+  animation: reaction-pop 240ms var(--ease-out);
+}
+@keyframes reaction-pop {
+  50% { transform: scale(1.25); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bubble__reaction.is-active .bubble__reaction-emoji { animation: none; }
+}

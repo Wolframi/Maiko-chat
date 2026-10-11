@@ -1,0 +1,13 @@
+/* Desktop has no mobile keyboard reducing visualViewport. Use viewport units
+   during the layout pass itself, rather than the site's later resize effect. */
+:root {
+  --app-height: 100dvh !important;
+  --vv-top: 0px !important;
+}
+
+/* The desktop titlebar owns the connection label. The idle heading and brief
+   reconnect banner repeat it; active chat topics/presence remain useful. */
+.room--idle > .room__header .room__title,
+.reconnect-banner.is-ok {
+  display: none !important;
+}

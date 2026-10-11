@@ -1,0 +1,24 @@
+{
+  "name": "Майко",
+  "short_name": "Майко",
+  "description": "Чат: ЛС, группы и каналы",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0c10",
+  "theme_color": "#0b0c10",
+  "lang": "ru",
+  "icons": [
+    {
+      "src": "/maiko/maiko-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/maiko/maiko-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

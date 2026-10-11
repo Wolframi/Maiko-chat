@@ -1,0 +1,290 @@
+/* ============================================
+   GIF PICKER
+   ============================================ */
+
+.gif-picker {
+  position: absolute;
+  bottom: calc(100% + 12px);
+  right: 0;
+  z-index: 50;
+  width: 440px;
+  max-width: calc(100vw - 20px);
+  height: 460px;
+  background: #1a1a1d;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Встроенный режим — растягивается на всю высоту родителя */
+.gif-picker--embedded {
+  position: relative !important;
+  inset: auto !important;
+  bottom: auto !important;
+  right: auto !important;
+  top: auto !important;
+  left: auto !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  height: 100% !important;
+  max-height: 100% !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.gif-picker__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  flex-shrink: 0;
+}
+
+.gif-picker__search {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 10px;
+  padding: 8px 12px;
+  min-width: 0;
+}
+
+.gif-picker__search input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font-size: 0.9rem;
+  outline: none;
+  min-width: 0;
+}
+
+.gif-picker__search input::placeholder {
+  color: var(--muted);
+}
+
+.gif-picker__search svg {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.gif-picker__search button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.gif-picker__close {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+}
+
+.gif-picker__close:hover {
+  background: var(--bg-deep);
+  color: var(--ink);
+}
+
+/* Telegram-style justified mosaic — rows of equal height, width from aspect */
+.gif-picker__grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 2px;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+.gif-picker__mosaic-width {
+  width: 100%;
+  height: 0;
+  pointer-events: none;
+}
+
+.gif-picker__mosaic {
+  position: relative;
+  width: 100%;
+}
+
+.gif-picker__sentinel {
+  width: 100%;
+  height: 1px;
+  pointer-events: none;
+}
+
+.gif-picker__grid::-webkit-scrollbar {
+  width: 6px;
+}
+
+.gif-picker__grid::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.gif-picker__grid::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 999px;
+}
+
+.gif-picker__grid::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
+}
+
+.gif-picker__item {
+  position: absolute;
+  display: block;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 4px;
+  overflow: hidden;
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.gif-picker__item::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: transparent;
+  pointer-events: none;
+  transition: background 0.12s ease;
+}
+
+.gif-picker__item:hover::after {
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.gif-picker__item-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.gif-picker__loader {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 20px;
+  height: 60px;
+}
+
+.gif-picker__spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.gif-picker__empty {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 40px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.gif-picker__error {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 40px;
+  color: var(--danger);
+  font-size: 0.9rem;
+  flex: 1;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ============================================
+   GIF внутри unified-picker
+   ============================================ */
+
+.unified-picker__pane--gif {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.unified-picker__pane--gif .gif-picker {
+  position: relative !important;
+  inset: auto !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  height: 100% !important;
+  max-height: 100% !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.unified-picker__pane--gif .gif-picker__grid {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Мобильная адаптация */
+@media (max-width: 640px) {
+  .gif-picker:not(.gif-picker--embedded) {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    top: auto;
+    width: 100%;
+    max-width: 100%;
+    height: 60vh;
+    border-radius: 16px 16px 0 0;
+    z-index: 100;
+  }
+
+  .gif-picker__grid {
+    padding: 2px;
+  }
+
+  .gif-picker__search input {
+    font-size: 16px;
+  }
+}

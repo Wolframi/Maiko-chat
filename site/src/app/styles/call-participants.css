@@ -1,0 +1,581 @@
+.call__tiles {
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+  flex: 1;
+  height: 100%;
+  padding: 10px;
+  grid-auto-rows: minmax(0, 1fr);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.call__tiles--grid .call__tile,
+.call__tiles--c2 .call__tile,
+.call__tiles--c3 .call__tile,
+.call__tiles--c4 .call__tile {
+  container-type: size;
+}
+
+.call__tiles--grid,
+.call__tiles--c2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.call__tiles--c1 {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.call__tiles--c1 .call__tile {
+  container-type: size;
+}
+
+.call__tiles--c3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.call__tiles--c4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.call__tiles--count-3 .call__tile:last-child {
+  width: calc(50% - 4px);
+  grid-column: 1 / -1;
+  justify-self: center;
+}
+
+.call__tiles--count-5 .call__tile:nth-last-child(-n + 2) {
+  transform: translateX(50%);
+}
+
+.call__tiles--strip {
+  display: flex;
+  flex: 0 0 auto;
+  height: auto;
+  padding: 2px;
+  justify-content: safe center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.call__tile {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle closest-side at 50% 42%, #3a3c42 0%, #25262b 58%, #111214 100%);
+  border: 3px solid transparent;
+  display: grid;
+  place-items: center;
+}
+
+.call__tiles--grid .call__tile:not(.has-video),
+.call__tiles--c1 .call__tile:not(.has-video),
+.call__tiles--c2 .call__tile:not(.has-video),
+.call__tiles--c3 .call__tile:not(.has-video),
+.call__tiles--c4 .call__tile:not(.has-video),
+.call__participants-rail .call__tile:not(.has-video) {
+  padding: 8px;
+}
+
+.call__tiles--strip .call__tile {
+  flex: 0 0 auto;
+  width: auto;
+  height: 96px;
+  aspect-ratio: 16 / 9;
+}
+
+@media (max-width: 640px) {
+  .call__tiles--c3,
+  .call__tiles--c4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.call__tile:not(.has-video) {
+  overflow: visible;
+}
+
+.call__tile.is-speaking {
+  border-width: 3px;
+  border-color: #23a55a;
+  box-shadow:
+    0 0 0 1px rgba(35, 165, 90, 0.3),
+    0 12px 34px rgba(0, 0, 0, 0.24);
+}
+
+.call__card--voice .call__tile:not(.has-video)::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  width: min(300px, 72cqmin);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  filter: blur(34px);
+  opacity: 0.62;
+  pointer-events: none;
+}
+
+.call__tile.is-interactive {
+  cursor: pointer;
+  outline: 1px solid transparent;
+  transition:
+    border-color 0.16s ease,
+    outline-color 0.16s ease,
+    filter 0.16s ease;
+}
+
+.call__tile.is-interactive:hover,
+.call__tile.is-interactive:focus-visible {
+  outline-color: color-mix(in srgb, var(--accent) 72%, transparent);
+  filter: brightness(1.08);
+}
+
+.call__tile-swap {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.66);
+  color: #fff;
+  font-size: 0.82rem;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.call__tile-avatar {
+  display: grid;
+  place-items: center;
+  width: auto;
+  height: auto;
+  padding: 0;
+  border-radius: 50%;
+  position: relative;
+  z-index: 1;
+  line-height: 0;
+}
+
+.call__tile-avatar.is-speaking {
+  outline: none;
+}
+
+.call__tile-avatar.is-speaking .avatar {
+  outline: none;
+  box-shadow: none;
+}
+
+.call__tiles--duo {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(10px, 2cqi, 18px);
+  padding: clamp(12px, 2.4cqi, 24px);
+  overflow: hidden;
+}
+
+.call__tiles--duo .call__tile {
+  width: 100%;
+  height: min(100%, 420px);
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 18px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(111, 101, 190, 0.22), transparent 35%),
+    linear-gradient(145deg, #202126 0%, #17181c 55%, #121316 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.045),
+    0 14px 30px rgba(0, 0, 0, 0.18);
+  container-type: size;
+}
+
+.call__tiles--duo .call__tile:not(.has-video) {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(12px, 4cqh, 20px);
+  padding: clamp(14px, 4cqh, 28px);
+}
+
+.call__tiles--duo .call__tile-name {
+  position: static;
+  left: auto;
+  bottom: auto;
+  width: min(100%, 260px);
+  background: transparent;
+  padding: 0;
+  max-width: 100%;
+  justify-content: center;
+  font-size: 0.94rem;
+  text-align: center;
+  text-shadow: none;
+}
+
+.call__tiles--duo .call__tile .avatar--xl {
+  width: min(142px, 44cqh, 32cqi);
+  height: min(142px, 44cqh, 32cqi);
+  font-size: clamp(1.35rem, 9cqh, 2.45rem);
+}
+
+.call__tiles--duo .call__tile.has-video {
+  width: 100%;
+  height: min(100%, 420px);
+  background: #0a0a0c;
+  border-radius: 18px;
+  overflow: hidden;
+  position: relative;
+}
+
+.call__tiles--duo .call__tile.has-video .call__tile-name {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  background: rgba(0, 0, 0, 0.65);
+  padding: 4px 8px;
+}
+
+.call__tiles--solo {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: clamp(12px, 2.8cqi, 28px);
+  overflow: hidden;
+}
+
+.call__tiles--solo .call__tile {
+  width: min(100%, 760px);
+  height: min(78%, 480px);
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 20px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(111, 101, 190, 0.24), transparent 34%),
+    linear-gradient(145deg, #202126 0%, #17181c 56%, #121316 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 18px 42px rgba(0, 0, 0, 0.2);
+  container-type: size;
+}
+
+.call__tiles--solo .call__tile:not(.has-video) {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(12px, 4cqh, 20px);
+  padding: clamp(16px, 5cqh, 32px);
+}
+
+.call__tiles--solo .call__tile.has-video {
+  width: min(100%, 760px);
+  height: min(78%, 480px);
+  background: #0a0a0c;
+  border-radius: 20px;
+  overflow: hidden;
+}
+
+.call__tiles--solo .call__tile-name {
+  position: static;
+  left: auto;
+  bottom: auto;
+  background: none;
+  padding: 0;
+  width: min(100%, 320px);
+  max-width: 100%;
+  justify-content: center;
+  font-size: 1rem;
+  text-align: center;
+  text-shadow: none;
+}
+
+.call__tiles--solo .call__tile.has-video .call__tile-name {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  background: rgba(0, 0, 0, 0.65);
+  padding: 4px 8px;
+}
+
+.call__tiles--solo .avatar--xl {
+  width: min(158px, 42cqh, 30cqi);
+  height: min(158px, 42cqh, 30cqi);
+  font-size: clamp(1.5rem, 9cqh, 2.55rem);
+}
+
+.call__tiles--solo .call__tile.is-speaking,
+.call__tiles--duo .call__tile.is-speaking {
+  border-width: 3px;
+  border-color: #23a55a;
+  box-shadow:
+    0 0 0 1px rgba(35, 165, 90, 0.3),
+    0 14px 30px rgba(0, 0, 0, 0.18);
+}
+
+.call__calling {
+  margin: 0;
+  color: #b5bac1;
+  font-size: 0.86rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.call__ring--stage {
+  margin: 0;
+}
+
+.call__ring--stage::before,
+.call__ring--stage::after {
+  inset: -5px;
+  border-width: 2px;
+  border-color: color-mix(in srgb, var(--accent) 55%, #fff 10%);
+}
+
+.call__ring--stage::after {
+  inset: -9px;
+  border-width: 1px;
+}
+
+.call__self-pip {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 3;
+  width: min(28%, 168px);
+  aspect-ratio: 16 / 9;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #0a0a0c;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.call__self-pip .call__tile-video {
+  position: absolute;
+  inset: 0;
+}
+
+.call__card--dock.call__card--screen {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  position: relative;
+  padding: 0;
+  gap: 0;
+}
+
+.call__card--dock.call__card--screen .call__stage--discord {
+  height: 100%;
+  border-radius: 0;
+}
+
+.call__card--dock.call__card--screen .call__stage--discord.is-screen {
+  padding: 0;
+}
+
+.call__card--dock.call__card--screen .call__screens {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+}
+
+.call__card--dock.call__card--screen .call__screen-pane {
+  border-radius: 0;
+  height: 100%;
+}
+
+.call__card--dock.call__card--screen .call__bar {
+  position: relative;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  z-index: 6;
+  box-sizing: border-box;
+  height: var(--composer-foot);
+  min-height: var(--composer-foot);
+  padding: 0 12px var(--safe-bottom);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: #0c0c0e;
+}
+
+.call__card--dock.call__card--screen .call__minimize,
+.call__card--dock.call__card--screen .call__qos {
+  z-index: 7;
+}
+
+.call__card--dock .call__tiles--solo {
+  padding: 24px 18px 18px;
+}
+
+.call__card--dock .call__tiles--solo .avatar--xl {
+  width: min(152px, 48cqh, 40cqi);
+  height: min(152px, 48cqh, 40cqi);
+  font-size: clamp(1.5rem, 9cqh, 2.4rem);
+}
+
+
+
+
+.call__tile .avatar--xl {
+  width: min(152px, 72cqmin);
+  height: min(152px, 72cqmin);
+  font-size: clamp(0.85rem, 22cqmin, 2.4rem);
+  line-height: 1;
+}
+
+.call__tiles--strip .avatar--xl {
+  width: 56px;
+  height: 56px;
+  font-size: 1.05rem;
+}
+
+.call__participants-rail .call__tile .avatar--xl {
+  width: min(64px, 70cqmin);
+  height: min(64px, 70cqmin);
+  font-size: clamp(0.75rem, 18cqmin, 1.15rem);
+}
+
+
+
+.call__tile-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  background: #0a0a0c;
+  display: block;
+  opacity: 1;
+  transition: opacity 0.16s ease;
+}
+
+.call__tile-video.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.call__tile-video.is-camera {
+  transform: scaleX(-1);
+}
+
+.call__tile-name {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  margin: 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 0.75rem;
+  font-style: normal;
+  font-weight: 600;
+  max-width: calc(100% - 24px);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  z-index: 2;
+}
+
+.call__tile-label {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  line-height: 1.18;
+}
+
+.call__tile-label > strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #fff;
+  font: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call__tile-label > small {
+  overflow: hidden;
+  color: #9da0aa;
+  font-size: 0.7rem;
+  font-style: normal;
+  font-weight: 500;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call__tile.has-video .call__tile-label,
+.call__participants-rail .call__tile-label {
+  display: block;
+}
+
+.call__tile.has-video .call__tile-label > small,
+.call__participants-rail .call__tile-label > small {
+  display: none;
+}
+
+.call__tile-name > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.call__tile-icon {
+  color: #f23f43;
+}
+
+.call__card--dock .call__stage--discord {
+  min-height: 0;
+  max-height: none;
+  height: 100%;
+  aspect-ratio: auto;
+  border-radius: 12px;
+}
+
+.call__card--dock .call__tiles {
+  grid-auto-rows: minmax(0, 1fr);
+  padding: 8px;
+}
+
+.call__card--dock .call__tiles--grid {
+  align-content: start;
+  grid-auto-rows: minmax(168px, 1fr);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.call__card--dock .call__tiles--grid .call__tile {
+  min-height: 168px;
+}
+
+.call__card--dock .call__tiles--duo {
+  grid-auto-rows: unset;
+  height: 100%;
+  padding: 20px 16px 22px;
+}
+
+.call__card--dock .call__tiles--duo .call__tile .avatar--xl {
+  width: min(120px, 42cqh, 28cqi);
+  height: min(120px, 42cqh, 28cqi);
+  font-size: clamp(1.3rem, 8cqh, 2rem);
+}
+
+.call__card--dock .call__stage,
+.call__card--dock .call__stage--discord {
+  aspect-ratio: auto;
+  max-height: none;
+}

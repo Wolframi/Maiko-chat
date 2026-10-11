@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Демонстрация экрана — Майко</title>
+  <link rel="stylesheet" href="shell.css">
+  <script src="capture.js" defer></script>
+</head>
+<body>
+  <main class="capture-frame">
+    <header class="capture-header"><h1>Чем поделимся?</h1><p>Выберите экран или отдельное окно.</p></header>
+    <div class="sources" id="sources" role="group" aria-label="Экраны и окна"></div>
+    <footer class="capture-footer">
+      <div id="audio-option" hidden><label><input id="share-audio" type="checkbox"><span id="audio-label">Передавать звук</span></label><p id="audio-hint" class="hint">Выберите экран или окно. Голоса и демонстрации собеседников исключаются.</p></div>
+      <p id="capture-error" class="hint" role="alert" hidden></p>
+      <div class="form-actions"><button id="cancel" class="secondary">Отмена</button><button id="share" class="primary" disabled>Поделиться</button></div>
+    </footer>
+  </main>
+</body>
+</html>

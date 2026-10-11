@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><title>Проверка размеров чата</title><link rel="stylesheet" href="/layout.css"></head>
+<body>
+<div class="app-shell"><section aria-label="Уведомления"></section><div class="workspace">
+  <aside class="workspace__sidebar"><div class="workspace__sidebar-pane"><div class="sidebar"><header class="sidebar__head"><strong>Чаты</strong></header><div class="sidebar__list"></div><footer>Профиль</footer></div></div></aside>
+  <section class="room">
+    <header class="room__header"><strong>Проверка чата при изменении окна</strong></header>
+    <div class="room__call-dock is-screen"></div>
+    <div class="call-layout__resize"><span></span></div>
+    <div class="room__stage"><div class="room__stage-fill">
+      <header class="call-layout__chat-head"><strong>Текстовый канал</strong></header>
+      <div class="room__stream"><div class="room__messages-wrap"><div class="room__messages"></div></div></div>
+      <form class="composer"><div class="composer__reply" hidden>Ответ на сообщение</div><div class="composer__pending" hidden><div class="composer__chip composer__chip--media"><div style="width:64px;height:64px">Файл</div></div></div><div class="composer__box"><button class="composer__attach" type="button">+</button><textarea class="composer__input" aria-label="Сообщение" placeholder="Написать сообщение…"></textarea><button class="composer__send" type="button" aria-label="Отправить сообщение">➤</button></div></form>
+    </div><aside class="call-layout__utility"><header class="call-layout__utility-head">Каналы</header><div class="call-layout__utility-body"><nav class="call-layout__channels"></nav></div></aside></div>
+  </section>
+</div></div>
+<script>
+  const messages = document.querySelector('.room__messages');
+  const list = document.querySelector('.sidebar__list');
+  const channels = document.querySelector('.call-layout__channels');
+  for (let i = 0; i < 80; i++) {
+    const p = document.createElement('p'); p.textContent = `Сообщение ${i + 1}: проверка прокрутки истории`; messages.append(p);
+    const button = document.createElement('button'); button.textContent = `Чат ${i + 1}`; button.style.cssText='display:block;min-height:40px'; list.append(button);
+    const channel = button.cloneNode(true); channels.append(channel);
+  }
+  const sync = () => document.documentElement.style.setProperty('--app-height', `${Math.round(window.visualViewport?.height ?? innerHeight)}px`);
+  window.addEventListener('resize', sync); window.visualViewport?.addEventListener('resize', sync); sync();
+  window.setScenario = (mode, longDraft = false) => {
+    const room = document.querySelector('.room');
+    const calling = mode !== 'normal';
+    room.className = `room ${calling ? 'room--in-call' : ''} ${mode === 'group' ? 'room--group-call' : mode === 'direct' ? 'room--direct-call' : ''}`;
+    const dock = document.querySelector('.room__call-dock');
+    dock.className = `room__call-dock is-screen ${mode === 'mini' ? 'is-mini' : ''}`;
+    dock.innerHTML = calling ? '<div style="display:grid;place-items:center;background:#16202c">Демонстрация экрана</div>' : '';
+    document.querySelector('.room__stage > div').className = calling && mode !== 'mini' ? 'call-layout__chat' : 'room__stage-fill';
+    document.querySelector('.call-layout__chat-head').hidden = mode !== 'group';
+    document.querySelector('.call-layout__utility').hidden = !calling || mode === 'mini';
+    document.querySelector('.call-layout__resize').hidden = mode !== 'group';
+    const input = document.querySelector('textarea');
+    input.value = longDraft ? Array.from({ length:40 }, (_,i) => `Строка ${i + 1}`).join('\n') : '';
+    input.style.height = longDraft ? '224px' : '46px';
+    document.querySelector('.composer__reply').hidden = !longDraft;
+    document.querySelector('.composer__pending').hidden = !longDraft;
+  };
+  document.querySelector('form').addEventListener('submit', e => e.preventDefault());
+  window.setScenario('normal');
+</script>
+</body></html>

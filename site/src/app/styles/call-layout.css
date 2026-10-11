@@ -1,0 +1,347 @@
+.room__stage-fill {
+  display: contents;
+}
+
+:is(.room--group-call, .room--direct-call) .call-layout__chat {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+:is(.room--group-call, .room--direct-call) .call-layout__chat .room__stream {
+  min-height: 0;
+}
+
+:is(.room--group-call, .room--direct-call) .call-layout__chat .composer {
+  background: var(--surface);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.room--group-call .call-layout__chat-head,
+:is(.room--group-call, .room--direct-call) .call-layout__utility,
+.room--group-call > .call-layout__resize {
+  display: none;
+}
+
+@media (min-width: 641px) and (max-width: 1099px) {
+  .room.room--group-call > .room__call-dock:not(:empty):not(.is-mini) {
+    flex: 0 0 var(--call-dock-height, min(52vh, 420px));
+    height: var(--call-dock-height, min(52vh, 420px));
+    min-height: 220px;
+    max-height: calc(100% - 230px);
+  }
+
+  .room--group-call > .call-layout__resize {
+    position: relative;
+    z-index: 12;
+    display: grid;
+    place-items: center;
+    flex: 0 0 10px;
+    width: 100%;
+    height: 10px;
+    margin: -1px 0;
+    border: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.045);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.35);
+    background: #0c0c0e;
+    cursor: row-resize;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .room--group-call > .call-layout__resize > span {
+    width: 54px;
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.2);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+    transition:
+      width 0.16s ease,
+      background 0.16s ease;
+  }
+
+  .room--group-call > .call-layout__resize:hover > span,
+  .room--group-call > .call-layout__resize:focus-visible > span,
+  .room--group-call.is-resizing > .call-layout__resize > span {
+    width: 76px;
+    background: color-mix(in srgb, var(--accent) 78%, white);
+  }
+
+  .room--group-call > .call-layout__resize:focus-visible {
+    outline: none;
+    background: color-mix(in srgb, var(--accent) 6%, #0c0c0e);
+  }
+
+  .room--group-call.is-resizing {
+    cursor: row-resize;
+    user-select: none;
+  }
+
+  .room--group-call.is-resizing .room__call-dock,
+  .room--group-call.is-resizing .room__stage {
+    pointer-events: none;
+  }
+
+  .room.room--group-call > .room__stage {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    background: #101114;
+  }
+
+  .room--group-call .call-layout__chat {
+    grid-column: 1;
+    grid-row: 1;
+    overflow: hidden;
+    border-right: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  .room--group-call .call-layout__chat-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    flex: 0 0 48px;
+    min-height: 48px;
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--line);
+    color: var(--muted);
+    background: rgba(255, 255, 255, 0.025);
+  }
+
+  .room--group-call .call-layout__chat-head > span {
+    display: grid;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .room--group-call .call-layout__chat-head strong,
+  .room--group-call .call-layout__chat-head em {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .room--group-call .call-layout__chat-head strong {
+    color: var(--ink);
+    font-size: 0.8rem;
+  }
+
+  .room--group-call .call-layout__chat-head em {
+    color: var(--muted);
+    font-size: 0.65rem;
+    font-style: normal;
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__chat .room__messages {
+    gap: 6px;
+    padding: 10px 6px 8px;
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__chat .bubble-group {
+    gap: 5px;
+    margin-top: 10px;
+    padding-inline: 5px;
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__chat .bubble-row--plaque .bubble,
+  :is(.room--group-call, .room--direct-call) .call-layout__chat .bubble-group__body .bubble-row--plaque .bubble:not(.bubble--media):not(.bubble--audio) {
+    max-width: min(88%, 320px);
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__chat .bubble-group--mine {
+    justify-content: flex-end;
+    padding-left: 42px;
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__chat .bubble-group--mine .bubble-group__body {
+    align-items: flex-end;
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__chat .bubble-group--mine .bubble-group__rail,
+  :is(.room--group-call, .room--direct-call) .call-layout__chat .bubble-row--mine > .avatar {
+    display: none;
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__chat .bubble-row--plaque.bubble-row--mine {
+    justify-content: flex-end;
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__chat .bubble-row--plaque.bubble-row--mine .bubble,
+  :is(.room--group-call, .room--direct-call) .call-layout__chat .bubble-group--mine .bubble {
+    direction: ltr;
+    text-align: left;
+    align-self: flex-end;
+    border-radius: 16px 16px 0 16px;
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__chat .bubble.bubble--mine.bubble--tail::after {
+    left: auto;
+    right: -6px;
+    transform: scaleX(-1);
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__chat .composer__box {
+    min-height: 54px;
+    border-radius: 15px;
+  }
+
+  .room--group-call .call-layout__utility {
+    display: flex;
+    grid-column: 2;
+    grid-row: 1;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 80% 0%, rgba(92, 78, 190, 0.1), transparent 42%),
+      #111216;
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__utility-head {
+    display: grid;
+    gap: 2px;
+    flex: 0 0 48px;
+    align-content: center;
+    padding: 7px 14px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.025);
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__utility-head strong {
+    font-size: 0.82rem;
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__utility-head span {
+    color: var(--muted);
+    font-size: 0.66rem;
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__utility-body {
+    position: relative;
+    display: flex;
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .room--group-call .call-layout__channels {
+    display: grid;
+    align-content: start;
+    gap: 5px;
+    width: 100%;
+    padding: 12px;
+  }
+
+  .room--group-call .call-layout__channels > button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 52px;
+    padding: 7px 11px;
+    border: 1px solid transparent;
+    border-radius: 12px;
+    background: transparent;
+    color: var(--muted);
+    text-align: left;
+    cursor: pointer;
+    transition:
+      color 0.16s ease,
+      background 0.16s ease,
+      border-color 0.16s ease;
+  }
+
+  .room--group-call .call-layout__channels > button:hover,
+  .room--group-call .call-layout__channels > button:focus-visible {
+    border-color: rgba(255, 255, 255, 0.07);
+    background: rgba(255, 255, 255, 0.045);
+    color: var(--ink);
+  }
+
+  .room--group-call .call-layout__channels > button.is-active {
+    border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--ink);
+  }
+
+  .room--group-call .call-layout__channels > button > span {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .room--group-call .call-layout__channels strong {
+    font-size: 0.78rem;
+  }
+
+  .room--group-call .call-layout__channels em {
+    color: var(--muted);
+    font-size: 0.66rem;
+    font-style: normal;
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__utility-body > .unified-picker {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100% !important;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  :is(.room--group-call, .room--direct-call) .call-layout__utility-body > .unified-picker .unified-picker__resizer {
+    display: none;
+  }
+
+  .room.room--direct-call > .room__stage {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    background: #101114;
+  }
+
+  .room--direct-call .call-layout__chat {
+    grid-column: 1;
+    grid-row: 1;
+    overflow: hidden;
+    border-right: 0;
+    background: var(--surface);
+  }
+
+  .room--direct-call .call-layout__utility {
+    grid-column: 2;
+    grid-row: 1;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 80% 0%, rgba(92, 78, 190, 0.1), transparent 42%),
+      #111216;
+  }
+
+  .room.room--direct-call.is-call-picker-open > .room__stage {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .room--direct-call.is-call-picker-open .call-layout__chat {
+    border-right: 1px solid var(--line);
+  }
+
+  .room--direct-call.is-call-picker-open .call-layout__utility {
+    display: flex;
+  }
+}

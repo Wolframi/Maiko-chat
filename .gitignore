@@ -85,3 +85,11 @@ next-env.d.ts
 
 # локальный клон репозитория
 pulse-chat/
+
+# Local tools and generated artifacts
+.codex/
+.playwright-mcp/
+output/
+__pycache__/
+*.pyc
+.groq-*

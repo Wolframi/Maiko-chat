@@ -1,0 +1,378 @@
+/* Local-only fixture at /call-preview: real call/message components, fake media. */
+.call-preview__sidebar {
+  position: relative;
+  padding: 20px 12px 72px;
+  gap: 5px;
+  background: #111216;
+}
+
+.call-preview__sidebar header {
+  display: grid;
+  gap: 2px;
+  padding: 0 8px 17px;
+  border-bottom: 1px solid var(--line);
+}
+
+.call-preview__sidebar header strong {
+  font-size: 1rem;
+}
+
+.call-preview__sidebar header span,
+.call-preview__sidebar > p {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.call-preview__sidebar > p {
+  margin: 15px 8px 4px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.call-preview__sidebar > button {
+  width: 100%;
+  min-height: 38px;
+  justify-content: flex-start;
+  gap: 9px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.84rem;
+  cursor: default;
+}
+
+.call-preview__sidebar > button.is-active {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--ink);
+}
+
+.call-preview__voice-users {
+  display: grid;
+  gap: 7px;
+  padding: 7px 10px 0 36px;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.call-preview__sidebar footer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 58px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+  background: #0d0e11;
+}
+
+.call-preview__sidebar footer > span {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.call-preview__sidebar footer strong {
+  font-size: 0.78rem;
+}
+
+.call-preview__sidebar footer em {
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-style: normal;
+}
+
+.call-preview__composer .composer__box {
+  display: flex;
+  align-items: center;
+}
+
+.call-preview__composer .composer__input {
+  flex: 1;
+  resize: none;
+}
+
+.call-preview__chat-column {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
+}
+
+.call-preview__chat-head,
+.call-preview__utility,
+.call-preview__resize {
+  display: none;
+}
+
+@media (max-width: 1099px) {
+  .call-preview .workspace__sidebar {
+    display: none;
+  }
+
+  .call-preview .workspace {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (min-width: 641px) and (max-width: 1099px) {
+  .call-preview .room__call-dock.is-screen:not(:empty) {
+    flex: 0 0 var(--call-preview-call-height, min(52vh, 420px));
+    height: var(--call-preview-call-height, min(52vh, 420px));
+    min-height: 220px;
+    max-height: calc(100% - 230px);
+  }
+
+  .call-preview__resize {
+    position: relative;
+    z-index: 12;
+    display: grid;
+    place-items: center;
+    flex: 0 0 10px;
+    width: 100%;
+    height: 10px;
+    margin: -1px 0;
+    border: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.045);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.35);
+    background: #0c0c0e;
+    cursor: row-resize;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .call-preview__resize > span {
+    width: 54px;
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.2);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+    transition:
+      width 0.16s ease,
+      background 0.16s ease;
+  }
+
+  .call-preview__resize:hover > span,
+  .call-preview__resize:focus-visible > span,
+  .call-preview .room.is-resizing .call-preview__resize > span {
+    width: 76px;
+    background: color-mix(in srgb, var(--accent) 78%, white);
+  }
+
+  .call-preview__resize:focus-visible {
+    outline: none;
+    background: color-mix(in srgb, var(--accent) 6%, #0c0c0e);
+  }
+
+  .call-preview .room.is-resizing {
+    cursor: row-resize;
+    user-select: none;
+  }
+
+  .call-preview .room.is-resizing .room__call-dock,
+  .call-preview .room.is-resizing .room__stage {
+    pointer-events: none;
+  }
+
+  .call-preview .room__stage {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    background: #101114;
+  }
+
+  .call-preview__chat-column {
+    grid-column: 1;
+    grid-row: 1;
+    overflow: hidden;
+    border-right: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  .call-preview__chat-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    flex: 0 0 48px;
+    min-height: 48px;
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--line);
+    color: var(--muted);
+    background: rgba(255, 255, 255, 0.025);
+  }
+
+  .call-preview__chat-head > span {
+    display: grid;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .call-preview__chat-head strong,
+  .call-preview__chat-head em {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .call-preview__chat-head strong {
+    color: var(--ink);
+    font-size: 0.8rem;
+  }
+
+  .call-preview__chat-head em {
+    color: var(--muted);
+    font-size: 0.65rem;
+    font-style: normal;
+  }
+
+  .call-preview__chat-column .room__messages {
+    gap: 6px;
+    padding: 10px 6px 8px;
+  }
+
+  .call-preview__chat-column .bubble-group {
+    gap: 5px;
+    margin-top: 10px;
+    padding-inline: 5px;
+  }
+
+  .call-preview__chat-column .bubble-row--plaque .bubble,
+  .call-preview__chat-column
+    .bubble-group__body
+    .bubble-row--plaque
+    .bubble:not(.bubble--media):not(.bubble--audio) {
+    max-width: min(88%, 320px);
+  }
+
+  .call-preview__chat-column .composer {
+    padding: 7px 8px 8px;
+  }
+
+  .call-preview__chat-column .composer__box {
+    min-height: 46px;
+    border-radius: 15px;
+  }
+
+  .call-preview__utility {
+    display: flex;
+    grid-column: 2;
+    grid-row: 1;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 80% 0%, rgba(92, 78, 190, 0.1), transparent 42%),
+      #111216;
+  }
+
+  .call-preview__utility-head {
+    display: grid;
+    gap: 2px;
+    flex: 0 0 48px;
+    align-content: center;
+    padding: 7px 14px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.025);
+  }
+
+  .call-preview__utility-head strong {
+    font-size: 0.82rem;
+  }
+
+  .call-preview__utility-head span {
+    color: var(--muted);
+    font-size: 0.66rem;
+  }
+
+  .call-preview__utility-body {
+    position: relative;
+    display: flex;
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .call-preview__channels {
+    display: grid;
+    align-content: start;
+    gap: 5px;
+    width: min(100%, 480px);
+    padding: 12px;
+  }
+
+  .call-preview__channels > button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 52px;
+    padding: 7px 11px;
+    border: 1px solid transparent;
+    border-radius: 12px;
+    background: transparent;
+    color: var(--muted);
+    text-align: left;
+    cursor: pointer;
+    transition:
+      color 0.16s ease,
+      background 0.16s ease,
+      border-color 0.16s ease;
+  }
+
+  .call-preview__channels > button:hover,
+  .call-preview__channels > button:focus-visible {
+    border-color: rgba(255, 255, 255, 0.07);
+    background: rgba(255, 255, 255, 0.045);
+    color: var(--ink);
+  }
+
+  .call-preview__channels > button.is-active {
+    border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--ink);
+  }
+
+  .call-preview__channels > button > span {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .call-preview__channels strong {
+    font-size: 0.78rem;
+  }
+
+  .call-preview__channels em {
+    color: var(--muted);
+    font-size: 0.66rem;
+    font-style: normal;
+  }
+
+  .call-preview__utility-body > .unified-picker {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100% !important;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .call-preview__utility-body
+    > .unified-picker
+    .unified-picker__resizer {
+    display: none;
+  }
+}
