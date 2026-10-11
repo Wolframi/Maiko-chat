@@ -14,7 +14,8 @@
       <div class="brand"><img src="../assets/icon.png" alt="" width="22" height="22"><span>Майко</span></div>
       <span class="connection" aria-live="polite"><span class="status-dot"></span><span id="status">Запускаем…</span></span>
       <div class="window-actions">
-        <button id="settings" class="utility-button" title="Адрес сайта" aria-label="Настройки подключения"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 17h16M8 4v6m8 4v6"/></svg></button>
+        <button id="update-notice" class="update-notice" hidden>Обновление</button>
+        <button id="settings" class="utility-button" title="Настройки" aria-label="Настройки подключения"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 17h16M8 4v6m8 4v6"/></svg></button>
         <button data-action="minimize" title="Свернуть" aria-label="Свернуть"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
         <button data-action="maximize" id="maximize" title="Развернуть" aria-label="Развернуть"><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1"/></svg></button>
         <button data-action="close" class="close-button" title="Закрыть" aria-label="Закрыть"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
@@ -44,6 +45,13 @@
         <p class="form-error" id="form-error" role="alert"></p>
         <div class="form-actions"><button type="button" class="secondary" id="cancel-settings">Назад</button><button type="submit" class="primary">Подключиться</button></div>
         <p class="hint">Адрес и вход сохраняются на этом компьютере.</p>
+        <section class="update-panel" aria-labelledby="update-heading">
+          <h2 id="update-heading">Обновления приложения</h2>
+          <p class="hint" id="app-version"></p>
+          <p class="description" id="update-status" role="status" aria-live="polite"></p>
+          <progress id="update-progress" max="100" value="0" aria-label="Скачивание обновления" hidden></progress>
+          <button type="button" class="secondary" id="update-action">Проверить обновления</button>
+        </section>
       </form>
     </section>
   </div>

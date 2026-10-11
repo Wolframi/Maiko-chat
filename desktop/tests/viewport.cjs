@@ -83,6 +83,7 @@ async function main() {
       args: process.env.MAIKO_TEST_EXECUTABLE ? [] : [path.resolve(__dirname, '..')], env, timeout: 120_000 });
     app.context().setDefaultTimeout(15_000);
     const shell = await app.firstWindow();
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
     await shell.waitForFunction(async () => (await window.maikoDesktop?.state())?.phase === 'ready', null, { polling: 100, timeout: 60_000 });
     let page;
     for (let attempt = 0; attempt < 50 && !page; attempt++) {
@@ -90,7 +91,6 @@ async function main() {
       if (!page) await new Promise((resolve) => setTimeout(resolve, 100));
     }
     assert.ok(page, 'Site renders in its isolated view');
-    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
     for (const [width, height] of [[1280, 820], [1000, 700], [800, 600], [1200, 600], [1600, 900]]) {
       await app.evaluate(({ BrowserWindow }, bounds) => BrowserWindow.getAllWindows()[0].setBounds(bounds), { x: 100, y: 100, width, height });
       await page.waitForFunction(([width, height]) => innerWidth === width - 12 && innerHeight === height - 48, [width, height]);
@@ -117,7 +117,7 @@ async function main() {
     const footer = await page.locator('.sidebar > footer').boundingBox();
     assert.ok(footer.y + footer.height <= await page.evaluate(() => innerHeight), 'Sidebar profile stays reachable');
     await shell.getByRole('button', { name: 'Настройки подключения' }).click();
-    await shell.locator('.settings-screen .description').evaluate((element) => {
+    await shell.locator('#connection-form > .description').evaluate((element) => {
       element.textContent = 'Длинное описание соединения и настроек. '.repeat(120);
     });
     const connectButton = shell.getByRole('button', { name: 'Подключиться', exact: true });

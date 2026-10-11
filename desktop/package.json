@@ -1,6 +1,6 @@
 {
   "name": "maiko-desktop",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "private": true,
   "description": "Майко — приложение для Windows",
   "author": "Maiko",
@@ -23,12 +23,15 @@
     "test:viewport": "node tests/viewport.cjs",
     "test:compact-members": "node tests/compact-members.cjs",
     "test:local": "node tests/local-start.cjs",
-    "test:screen-audio": "node prepare-native.cjs && node tests/screen-audio.cjs"
+    "test:screen-audio": "node prepare-native.cjs && node tests/screen-audio.cjs",
+    "verify:release": "node verify-release.cjs",
+    "test:updates-ui": "node tests/updates-ui.cjs"
   },
   "devDependencies": {
     "electron": "44.7.0",
     "electron-builder": "26.15.3",
     "esbuild": "0.28.1",
+    "js-yaml": "4.1.1",
     "playwright": "1.62.1",
     "sharp": "0.34.5"
   },
@@ -81,6 +84,21 @@
     "portable": {
       "artifactName": "Maiko-Portable-${version}.${ext}",
       "requestExecutionLevel": "user"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Wolframi",
+        "repo": "Maiko-chat",
+        "releaseType": "release"
+      }
+    ]
+  },
+  "dependencies": {
+    "electron-updater": "6.8.10"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Wolframi/Maiko-chat.git"
   }
 }

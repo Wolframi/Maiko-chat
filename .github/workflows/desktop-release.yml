@@ -1,0 +1,69 @@
+name: Release Windows application
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            site/package-lock.json
+            desktop/package-lock.json
+      - name: Validate tag
+        shell: pwsh
+        run: |
+          $version = (Get-Content desktop/package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag must match desktop/package.json version' }
+      - name: Install dependencies
+        run: |
+          npm ci --prefix site --include=dev
+          npm ci --prefix desktop
+      - name: Test
+        run: |
+          npm --prefix site test
+          npm --prefix desktop test
+      - name: Build Windows installer and portable
+        run: npm --prefix desktop run dist -- --publish never
+      - name: Validate update artifacts
+        run: node desktop/verify-release.cjs
+      - name: Check packaged update interface
+        shell: pwsh
+        run: |
+          $env:MAIKO_TEST_EXECUTABLE = (Resolve-Path desktop/release/win-unpacked/Maiko.exe).Path
+          npm --prefix desktop run test:updates-ui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Maiko-Windows
+          path: |
+            desktop/release/Maiko-Setup-*.exe
+            desktop/release/Maiko-Setup-*.exe.blockmap
+            desktop/release/Maiko-Portable-*.exe
+            desktop/release/latest.yml
+          if-no-files-found: error
+      - name: Publish complete GitHub Release
+        shell: pwsh
+        run: |
+          $version = (Get-Content desktop/package.json -Raw | ConvertFrom-Json).version
+          $tag = "v$version"
+          gh release create $tag --verify-tag --draft --title "Майко $version" --notes-file desktop/release-notes.md "desktop/release/Maiko-Setup-$version.exe" "desktop/release/Maiko-Setup-$version.exe.blockmap" "desktop/release/Maiko-Portable-$version.exe" desktop/release/latest.yml
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
+          gh release edit $tag --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

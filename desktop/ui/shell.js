@@ -15,6 +15,22 @@ function render(state) {
   element('connection-screen').hidden = state.phase === 'ready';
   element('maximize').title = state.maximized ? 'Восстановить' : 'Развернуть';
   element('maximize').setAttribute('aria-label', element('maximize').title);
+  const update = state.update;
+  if (update) {
+    element('app-version').textContent = `Версия ${update.currentVersion}`;
+    element('update-status').textContent = update.message;
+    const busy = ['checking', 'downloading', 'installing'].includes(update.phase);
+    const command = update.phase === 'downloaded' ? 'install' :
+      update.phase === 'available' || (update.phase === 'error' && update.retryAction === 'download') ? 'download' : 'check';
+    element('update-action').dataset.command = command;
+    element('update-action').disabled = busy || update.phase === 'disabled';
+    element('update-action').textContent = busy ? update.phase === 'checking' ? 'Проверяем…' : update.phase === 'installing' ? 'Перезапускаем…' : `Скачиваем: ${update.progress}%` :
+      command === 'install' ? 'Перезапустить и установить' : command === 'download' ? `Скачать ${update.version}` : 'Проверить обновления';
+    element('update-progress').hidden = update.phase !== 'downloading';
+    element('update-progress').value = update.progress;
+    element('update-notice').hidden = !['available', 'downloaded'].includes(update.phase);
+    element('update-notice').textContent = update.phase === 'downloaded' ? 'Установить обновление' : 'Обновление';
+  }
 }
 async function showSettings(visible) {
   await api.toggleSettings(visible);
@@ -36,6 +52,11 @@ element('titlebar').addEventListener('dblclick', (event) => {
   if (!event.target.closest('button')) void api.control('maximize');
 });
 element('settings').addEventListener('click', () => void showSettings(!settingsVisible));
+element('update-notice').addEventListener('click', () => void showSettings(true));
+element('update-action').addEventListener('click', async () => {
+  try { await api.update(element('update-action').dataset.command || 'check'); }
+  catch (error) { element('update-status').textContent = error.message; }
+});
 element('change-url').addEventListener('click', () => void showSettings(true));
 element('cancel-settings').addEventListener('click', () => void showSettings(false));
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape') void showSettings(false); });

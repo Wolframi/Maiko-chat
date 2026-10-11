@@ -8,6 +8,7 @@ const { configureLocalAssets } = require('./local-assets.cjs');
 const { startLocalServer } = require('./local-server.cjs');
 const { configureCapture } = require('./screen-capture.cjs');
 const { enableNativeWindowAnimations } = require('./window-animations.cjs');
+const { createUpdates } = require('./updates.cjs');
 
 app.setName('Maiko');
 if (process.env.MAIKO_DESKTOP_USER_DATA) {
@@ -17,6 +18,7 @@ if (process.env.MAIKO_DESKTOP_USER_DATA) {
 const testing = process.env.MAIKO_DESKTOP_TEST === '1';
 const defaults = readJson(path.join(__dirname, 'config.json'));
 let win, site, localServer, settingsOpen = false, shuttingDown = false;
+let updates;
 let loadGeneration = 0;
 let maximized = false, restoreBounds, resizeGesture, layoutExpanded;
 let state = { phase: 'loading', message: 'Запускаем Майко…', url: '', mode: process.argv.includes('--local') ? 'local' : 'remote', maximized: false };
@@ -242,6 +244,11 @@ else {
       callback(!!site && contents === site.webContents && trusted(details.requestingUrl || contents.getURL()) && allowed.has(permission));
     });
     configureCapture({ siteSession, getWindow: () => win, getSite: () => site, trusted, testing, log });
+    updates = createUpdates({ app, publish, log, testing, beforeInstall: async () => {
+      if (localServer?.owned) await localServer.stop();
+      localServer = undefined;
+    } });
+    ipcMain.handle('desktop:update', (event, action) => { requireShell(event); return updates.action(action); });
     ipcMain.handle('desktop:state', (event) => { requireShell(event); return state; });
     ipcMain.handle('desktop:control', (event, action) => {
       requireShell(event);
@@ -287,6 +294,8 @@ else {
       return { ok: true };
     });
     createWindow();
+    updates.start();
+    app.once('will-quit', () => updates.dispose());
     app.on('activate', () => { if (!win) createWindow(); });
   }).catch((error) => { log(error.stack); app.quit(); });
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

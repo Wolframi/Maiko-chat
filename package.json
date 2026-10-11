@@ -4,7 +4,7 @@
   "private": true,
   "description": "Maiko site and Electron application",
   "scripts": {
-    "postinstall": "node scripts/migrate-site-data.cjs && npm ci --prefix site --no-audit --no-fund",
+    "postinstall": "node scripts/migrate-site-data.cjs && npm ci --prefix site --include=dev --no-audit --no-fund",
     "dev": "npm --prefix site run dev",
     "build": "npm --prefix site run build",
     "start": "node scripts/migrate-site-data.cjs && npm --prefix site start",

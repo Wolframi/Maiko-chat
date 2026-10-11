@@ -15,14 +15,12 @@ try {
         & node (Join-Path $desktopDir 'node_modules/electron/install.js') *> $launchLog
         if ($LASTEXITCODE -ne 0) { throw "Не удалось скачать Electron. Журнал: $launchLog" }
     }
-    if ($Mode -eq 'local' -and -not (Test-Path -LiteralPath (Join-Path $projectDir 'node_modules/tsx/dist/cjs/index.cjs'))) {
+    if (-not (Test-Path -LiteralPath (Join-Path $projectDir 'node_modules/tsx/dist/cjs/index.cjs'))) {
         & npm.cmd ci --prefix $projectDir --no-audit --no-fund *> $launchLog
         if ($LASTEXITCODE -ne 0) { throw "Не удалось установить зависимости сайта. Журнал: $launchLog" }
     }
-    if ($Mode -eq 'local') {
-        & node (Join-Path $projectDir 'scripts/prepare-dtln.mjs') *> $launchLog
-        if ($LASTEXITCODE -ne 0) { throw "Не удалось подготовить звук. Журнал: $launchLog" }
-    }
+    & node (Join-Path $projectDir 'scripts/prepare-dtln.mjs') *> $launchLog
+    if ($LASTEXITCODE -ne 0) { throw "Не удалось подготовить звук. Журнал: $launchLog" }
     & node (Join-Path $desktopDir 'prepare-native.cjs') *> $launchLog
     if ($LASTEXITCODE -ne 0) { throw "Не удалось подготовить захват звука приложения. Журнал: $launchLog" }
     & node (Join-Path $desktopDir 'prepare-assets.cjs') *> $launchLog
