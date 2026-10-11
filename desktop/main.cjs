@@ -28,6 +28,7 @@ const uiUrl = pathToFileURL(path.join(__dirname, 'ui', 'index.html')).href;
 const siteLayoutCSS = fs.readFileSync(path.join(__dirname, 'ui/site-layout.css'), 'utf8') + '\n' +
   fs.readFileSync(path.join(__dirname, 'ui/site-window.css'), 'utf8');
 const compactMembersJS = fs.readFileSync(path.join(__dirname, 'ui/compact-members.js'), 'utf8');
+const downloadProgressJS = fs.readFileSync(path.join(__dirname, 'ui/download-progress.js'), 'utf8');
 const settingsPath = () => path.join(app.getPath('userData'), 'desktop-settings.json');
 function log(message) {
   try { fs.appendFileSync(path.join(app.getPath('userData'), 'desktop.log'), `${new Date().toISOString()} ${message}\n`); } catch { /* logging is optional */ }
@@ -38,6 +39,9 @@ function publish(patch = {}) {
   state = next;
   if (win && !win.isDestroyed()) win.webContents.send('desktop:state-changed', state);
   downloadsPanel?.publish(state.downloads);
+  if (patch.downloads && site && !site.webContents.isDestroyed() && trusted(site.webContents.getURL())) {
+    site.webContents.send('desktop:site-downloads-changed', downloads?.siteProgress() || []);
+  }
 }
 function layout() {
   if (!win || win.isDestroyed()) return;
@@ -85,6 +89,11 @@ function requireShell(event) {
     throw new Error('Недоступно для этой страницы');
   }
 }
+function requireSite(event) {
+  if (!site || event.sender !== site.webContents || event.senderFrame !== site.webContents.mainFrame || !trusted(event.senderFrame.url)) {
+    throw new Error('Недоступно для этой страницы');
+  }
+}
 async function openExternal(url) {
   try {
     const parsed = new URL(url);
@@ -125,7 +134,7 @@ function createSite() {
     if (!trusted(contents.getURL())) return;
     void Promise.all([
       contents.insertCSS(siteLayoutCSS),
-      contents.executeJavaScriptInIsolatedWorld(1001, [{ code: compactMembersJS }]),
+      contents.executeJavaScriptInIsolatedWorld(1001, [{ code: compactMembersJS }, { code: downloadProgressJS }]),
     ]).then(showSite).catch((error) => {
       log(`Desktop layout helpers unavailable: ${error.message}`);
       showSite();
@@ -258,6 +267,8 @@ else {
       siteSession, getSite: () => site, trusted, publish, shell, log,
     });
     downloadsPanel = configureDownloadsPanel({ ipcMain, getWindow: () => win, requireShell, downloads, log });
+    ipcMain.handle('desktop:site-downloads-state', (event) => { requireSite(event); return downloads.siteProgress(); });
+    ipcMain.handle('desktop:site-downloads-cancel', (event, id) => { requireSite(event); return downloads.action('cancel', id); });
     ipcMain.handle('desktop:downloads', (event, command, id) => {
       requireShell(event);
       return downloads.action(command, id);

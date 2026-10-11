@@ -9,12 +9,22 @@ const payload = Buffer.from('%PDF-1.4\noriginal file bytes\n');
 const title = 'Отчёт за октябрь.pdf';
 const route = '/uploads/12345678-1234-1234-1234-123456789abc.pdf';
 const href = `${route}?download=1&name=${encodeURIComponent(title)}`;
+const ringCSS = require('node:fs').readFileSync(path.resolve(__dirname, '../../site/src/app/styles/message-actions.css'), 'utf8');
+const finitePayload = Buffer.alloc(256 * 1024, 42);
 const server = http.createServer((req, res) => {
   if (req.url.startsWith('/uploads/')) {
     if (!req.headers.cookie?.includes('download-session=yes')) { res.writeHead(403); res.end('Forbidden'); return; }
     res.setHeader('content-type', 'application/pdf');
     res.setHeader('content-disposition', `attachment; filename="report.pdf"; filename*=UTF-8''${encodeURIComponent(new URL(req.url, 'http://localhost').searchParams.get('name') || title)}`);
-    if (req.url.includes('slow=1') || req.url.includes('broken=1')) {
+    if (req.url.includes('finite=1')) {
+      res.setHeader('content-length', finitePayload.length);
+      let offset = 0;
+      const timer = setInterval(() => {
+        res.write(finitePayload.subarray(offset, offset + 32768)); offset += 32768;
+        if (offset >= finitePayload.length) { clearInterval(timer); res.end(); }
+      }, 350);
+      res.on('close', () => clearInterval(timer));
+    } else if (req.url.includes('slow=1') || req.url.includes('broken=1')) {
       res.setHeader('content-length', 10_000_000);
       res.write(payload);
       if (req.url.includes('broken=1')) {
@@ -29,10 +39,16 @@ const server = http.createServer((req, res) => {
   }
   res.setHeader('content-type', 'text/html; charset=utf-8');
   res.setHeader('set-cookie', 'download-session=yes; HttpOnly; SameSite=Lax; Path=/');
-  res.end(`<!doctype html><html lang="ru"><title>Проверка скачивания</title><body style="background:#0c0c0e;color:white;font-family:Segoe UI;padding:32px"><h1>Скачивание файлов</h1>
+  res.end(`<!doctype html><html lang="ru"><title>Проверка скачивания</title><style>${ringCSS}
+    :root{--accent:#6784b7}.bubble__file-link{display:flex;align-items:center;gap:12px;color:white;padding:14px;background:#181a20;width:340px;margin:16px 0;text-decoration:none}[hidden]{display:none!important}
+    .bubble__image-btn{position:relative;width:160px;height:100px;overflow:hidden}.bubble__image-btn img{width:100%;height:100%}
+    </style><body style="background:#0c0c0e;color:white;font-family:Segoe UI;padding:32px"><h1>Скачивание файлов</h1>
     <a href="${href}" download="${title}">Скачать файл</a>
     <button onclick="window.open('${href}', '_blank')">Скачать из старого меню</button>
-    <a href="${href}&slow=1" download>Медленная загрузка</a>
+    <a class="bubble__file-link" href="${href}&slow=1" download><span class="bubble__file-icon">PDF</span>Медленная загрузка<span class="bubble__download">↓</span></a>
+    <a class="bubble__file-link" id="finite" href="${href}&finite=1" download><span class="bubble__file-icon">PDF</span>Файл с кольцом<span class="bubble__download">↓</span></a>
+    <button class="bubble__image-btn" aria-label="Открыть фото" onclick="document.getElementById('photo-preview').hidden=false"><img src="${route}?w=430" alt="Превью медиа"></button>
+    <section id="photo-preview" role="dialog" aria-label="Просмотр фото" hidden>Просмотр фото<button onclick="document.getElementById('photo-preview').hidden=true">Закрыть просмотр</button></section>
     <a href="${href}&broken=1" download>Ошибка соединения</a>
     </body></html>`);
 });
@@ -68,6 +84,13 @@ async function main() {
     const site = app.windows().find((page) => /^http:/.test(page.url()));
     assert.ok(site);
     assert.deepEqual(await site.evaluate(() => ({ node: typeof window.require, bridge: typeof window.maikoDesktop })), { node: 'undefined', bridge: 'undefined' });
+    assert.equal(await site.evaluate(() => typeof window.maikoDownloadProgress), 'undefined', 'The download progress bridge is private to the isolated helper');
+    assert.equal((await shell.evaluate(() => window.maikoDesktop.state())).downloads.entries.length, 0, 'Loading media previews does not start a file download');
+    await site.getByRole('button', {name:'Открыть фото',exact:true}).click();
+    await site.getByRole('dialog', {name:'Просмотр фото'}).waitFor();
+    assert.equal((await shell.evaluate(() => window.maikoDesktop.state())).downloads.entries.length, 0, 'Opening a photo leaves the download manager empty');
+    assert.equal(await site.locator('.download-ring').count(), 0);
+    await site.getByRole('button', {name:'Закрыть просмотр'}).click();
     await site.getByRole('link', { name: 'Скачать файл', exact: true }).click();
     await waitState(shell, (s) => s.downloads.entries[0]?.phase === 'completed');
     let state = await shell.evaluate(() => window.maikoDesktop.state());
@@ -104,16 +127,39 @@ async function main() {
     await site.getByRole('link', { name: 'Медленная загрузка' }).click();
     const pending = await waitState(shell, (s) => s.downloads.entries[0]?.phase === 'downloading');
     const partialPath = pending.downloads.entries[0].path;
+    const messageRing = site.locator('.bubble__file-link .download-ring').first();
+    await messageRing.waitFor();
+    assert.equal(await messageRing.locator('.upload-ring__svg').evaluate(node => getComputedStyle(node).animationName), 'upload-ring-spin');
+    assert.equal(await site.locator('.bubble__image-btn .download-ring').count(), 1, 'Media previews show the same circular indicator');
+    await site.screenshot({path:path.join(output,'message-download-ring.png')});
+    await messageRing.click();
+    await waitState(shell, s => s.downloads.entries[0]?.phase === 'cancelled');
+    await site.waitForFunction(() => document.querySelectorAll('.download-ring').length === 0);
+    assert.equal(await site.locator('.bubble__file-link .bubble__file-icon').first().isVisible(), true);
+    await assert.rejects(fs.stat(partialPath), {code:'ENOENT'});
+    await site.locator('#finite').click();
+    await site.locator('#finite .download-ring').waitFor();
+    await site.waitForFunction(() => {
+      const label = document.querySelector('#finite .download-ring')?.getAttribute('aria-label') || '';
+      const percent = Number(label.match(/\((\d+)%\)/)?.[1]);
+      return percent > 0 && percent < 100;
+    });
+    const finished = await waitState(shell, s => s.downloads.entries[0]?.phase === 'completed');
+    assert.deepEqual(await fs.readFile(finished.downloads.entries[0].path), finitePayload);
+    await site.waitForFunction(() => document.querySelectorAll('.download-ring').length === 0);
+    assert.equal(await site.locator('#finite .bubble__file-icon').isVisible(), true);
+    await site.getByRole('link', { name: 'Медленная загрузка' }).click();
+    const secondPending = await waitState(shell, s => s.downloads.entries[0]?.phase === 'downloading');
     await folderButton.hover();
     await panel.getByRole('button', { name: 'Отменить скачивание' }).hover();
     await panel.getByRole('button', { name: 'Отменить скачивание' }).click();
     await waitState(shell, (s) => s.downloads.entries[0]?.phase === 'cancelled');
-    await assert.rejects(fs.stat(partialPath), { code: 'ENOENT' });
+    await assert.rejects(fs.stat(secondPending.downloads.entries[0].path), { code: 'ENOENT' });
     await site.getByRole('link', { name: 'Ошибка соединения' }).click();
     await waitState(shell, (s) => s.downloads.entries[0]?.phase === 'error');
     state = await shell.evaluate(() => window.maikoDesktop.state());
     await assert.rejects(fs.stat(state.downloads.entries[0].path), { code: 'ENOENT' });
-    await fs.unlink(completedPath);
+    await fs.unlink(finished.downloads.entries[0].path);
     await folderButton.hover();
     await panel.getByRole('button', { name: /Открыть папку с файлом/ }).first().hover();
     await panel.getByRole('button', { name: /Открыть папку с файлом/ }).first().click();
@@ -135,6 +181,9 @@ async function main() {
     await panel.locator('#files').evaluate((list) => { list.scrollTop = list.scrollHeight; });
     assert.ok(await panel.locator('#files').evaluate((list) => list.scrollTop) > 0);
     await panel.locator('#files').evaluate((list) => { list.scrollTop = 0; });
+    await app.evaluate(({ BrowserWindow }) => { const win = BrowserWindow.getAllWindows()[0]; win.show(); win.focus(); });
+    await folderButton.hover();
+    await panel.locator('#files').hover();
     await panel.screenshot({ path: path.join(output, 'recent-downloads.png') });
     await panel.keyboard.press('Escape');
     await app.close(); app = undefined;
@@ -148,7 +197,7 @@ async function main() {
     assert.ok(downloadsBounds.x >= 0 && downloadsBounds.x + downloadsBounds.width <= updateBounds.x);
     assert.ok(downloadsBounds.y + downloadsBounds.height <= 42);
     await shell.screenshot({ path: path.join(output, 'toolbar.png') });
-    console.log(`Electron downloads passed: names and bytes, session, duplicates, hover list, scrolling, reveal, folder click, one window, 15-record retention without file deletion, restart, cancel, errors and 800px layout. Screenshots: ${output}`);
+    console.log(`Electron downloads passed: message/media rings, real byte progress, cancel from message, completed-file cleanup, names and bytes, session, panel, history, errors and 800px layout. Screenshots: ${output}`);
   } finally {
     if (app) await app.close();
     server.closeAllConnections();

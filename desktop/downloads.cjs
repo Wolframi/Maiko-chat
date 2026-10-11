@@ -3,6 +3,11 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const HISTORY_LIMIT = 15;
 
+function downloadSourcePath(value) {
+  try { const url = new URL(value); return url.origin + decodeURIComponent(url.pathname); }
+  catch { return ''; }
+}
+
 function safeFilename(value) {
   let name = String(value || 'Файл').split(/[/\\]/).pop()
     .replace(/[\x00-\x1f\x7f<>:"/\\|?*]/g, '_').replace(/[. ]+$/g, '').trim();
@@ -41,6 +46,8 @@ function createDownloads({ directory, historyPath, siteSession, getSite, trusted
     entries = entries.filter((entry) => entry.phase === 'downloading' || recent++ < HISTORY_LIMIT);
   };
   const snapshot = () => ({ directory, limit: HISTORY_LIMIT, entries: entries.slice(0, HISTORY_LIMIT).map((entry) => ({ ...entry })) });
+  const siteProgress = () => entries.filter(entry => entry.phase === 'downloading' && entry.sourcePath)
+    .map(({ id, sourcePath, received, total }) => ({ id, sourcePath, received, total }));
   const send = () => publish({ downloads: snapshot() });
   const save = () => {
     try {
@@ -52,7 +59,8 @@ function createDownloads({ directory, historyPath, siteSession, getSite, trusted
   };
   function willDownload(event, item, contents) {
     if (contents !== getSite()?.webContents || !trusted(contents.getURL())) { event.preventDefault(); return; }
-    const entry = { id: randomUUID(), name: safeFilename(item.getFilename()), path: '',
+    const sourceUrl = item.getURLChain?.()[0] || item.getURL?.() || '';
+    const entry = { id: randomUUID(), name: safeFilename(item.getFilename()), path: '', sourcePath: downloadSourcePath(sourceUrl),
       phase: 'downloading', received: 0, total: item.getTotalBytes(), createdAt: Date.now(), message: 'Скачиваем…' };
     entries.unshift(entry);
     try {
@@ -91,6 +99,7 @@ function createDownloads({ directory, historyPath, siteSession, getSite, trusted
   send();
   return {
     snapshot,
+    siteProgress,
     async action(command, id) {
       if (command === 'folder') {
         fs.mkdirSync(directory, { recursive: true });
@@ -109,4 +118,4 @@ function createDownloads({ directory, historyPath, siteSession, getSite, trusted
   };
 }
 
-module.exports = { createDownloads, safeFilename, reservePath, HISTORY_LIMIT };
+module.exports = { createDownloads, safeFilename, reservePath, HISTORY_LIMIT, downloadSourcePath };

@@ -4,7 +4,13 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
-const { createDownloads, safeFilename, reservePath } = require('../downloads.cjs');
+const { createDownloads, safeFilename, reservePath, downloadSourcePath } = require('../downloads.cjs');
+
+test('message download identities keep the origin and filename, dropping credentials and thumbnail parameters', () => {
+  assert.equal(downloadSourcePath('https://maiko.test/uploads/%D0%A4%D0%B0%D0%B9%D0%BB.pdf?sig=secret&download=1'), 'https://maiko.test/uploads/Файл.pdf');
+  assert.notEqual(downloadSourcePath('https://maiko.test/a.pdf'), downloadSourcePath('https://other.test/a.pdf'));
+  assert.equal(downloadSourcePath('invalid'), '');
+});
 
 test('Windows filenames preserve Unicode and extensions while staying inside the downloads folder', () => {
   assert.equal(safeFilename('Отчёт (октябрь).pdf'), 'Отчёт (октябрь).pdf');
@@ -30,6 +36,7 @@ test('downloads never overwrite names; reveal only completed files and restore s
   let controller = createDownloads(options);
   function download(name) {
     const item = Object.assign(new EventEmitter(), { getFilename: () => name, getTotalBytes: () => 10, getReceivedBytes: () => 10,
+      getURLChain: () => ['https://maiko.test/uploads/file.pdf?download=1&sig=private'],
       setSavePath: (target) => { item.target = target; }, cancel: () => item.emit('done', {}, 'cancelled') });
     siteSession.emit('will-download', { preventDefault: () => assert.fail('Trusted downloads should be accepted') }, item, contents);
     return item;
@@ -39,13 +46,18 @@ test('downloads never overwrite names; reveal only completed files and restore s
     fs.writeFileSync(existing, 'old');
     const first = download('Отчёт.pdf');
     const second = download('Отчёт.pdf');
+    assert.equal(controller.siteProgress().length, 2);
+    assert.deepEqual(Object.keys(controller.siteProgress()[0]).sort(), ['id', 'received', 'sourcePath', 'total']);
+    assert.equal(controller.siteProgress()[0].sourcePath, 'https://maiko.test/uploads/file.pdf');
     assert.equal(path.basename(first.target), 'Отчёт (1).pdf');
     assert.equal(path.basename(second.target), 'Отчёт (2).pdf');
     await assert.rejects(controller.action('reveal', state.entries[0].id), /ещё не скачан/);
     const secondId = state.entries[0].id;
     await controller.action('cancel', secondId);
+    assert.equal(controller.siteProgress().length, 1);
     assert.equal(fs.existsSync(second.target), false);
     first.emit('done', {}, 'completed');
+    assert.deepEqual(controller.siteProgress(), []);
     const completed = state.entries.find((entry) => entry.phase === 'completed');
     await controller.action('reveal', completed.id);
     assert.deepEqual(revealed, [first.target]);

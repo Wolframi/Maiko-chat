@@ -1,5 +1,17 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+// Only our isolated DOM helper can see this bridge. No filesystem paths or
+// folder-opening commands are exposed to the remotely loaded messenger.
+contextBridge.exposeInIsolatedWorld(1001, 'maikoDownloadProgress', Object.freeze({
+  state: () => ipcRenderer.invoke('desktop:site-downloads-state'),
+  cancel: (id) => ipcRenderer.invoke('desktop:site-downloads-cancel', id),
+  onState: (callback) => {
+    const handler = (_event, state) => callback(state);
+    ipcRenderer.on('desktop:site-downloads-changed', handler);
+    return () => ipcRenderer.removeListener('desktop:site-downloads-changed', handler);
+  },
+}));
+
 // Read-only capture metadata. The site still has no shell, filesystem or
 // window-control bridge. The main process accepts this only from its site.
 contextBridge.exposeInMainWorld('maikoScreenAudio', Object.freeze({
