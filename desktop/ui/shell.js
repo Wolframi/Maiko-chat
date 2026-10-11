@@ -27,17 +27,17 @@ function render(state) {
     element('update-status').textContent = update.message;
     element('update-dock').dataset.phase = update.phase;
     element('update-dock').title = update.message;
-    const busy = ['checking', 'downloading', 'installing'].includes(update.phase);
-    const command = update.phase === 'downloaded' || (update.phase === 'error' && update.retryAction === 'install') ? 'install' :
+    const busy = ['checking', 'downloading', 'downloaded', 'applying'].includes(update.phase);
+    const command = update.phase === 'error' && update.retryAction === 'apply' ? 'apply' :
       update.phase === 'available' || (update.phase === 'error' && update.retryAction === 'download') ? 'download' : 'check';
     element('update-action').dataset.command = command;
-    element('update-action').disabled = busy || update.phase === 'disabled';
-    const label = busy ? update.phase === 'checking' ? 'Проверка…' : update.phase === 'installing' ? 'Перезапуск…' : `${update.progress}%` :
-      update.phase === 'error' ? 'Повторить' : command === 'install' ? 'Установить' : command === 'download' ? 'Обновить' : update.phase === 'current' ? 'Обновлено' : 'Проверить';
-    const description = command === 'install' ? `Перезапустить и установить ${update.version}` :
+    element('update-action').disabled = busy || ['disabled', 'staged'].includes(update.phase);
+    const label = busy ? update.phase === 'checking' ? 'Проверка…' : ['downloaded', 'applying'].includes(update.phase) ? 'Применяем…' : `${update.progress}%` :
+      update.phase === 'error' ? 'Повторить' : update.phase === 'staged' ? 'Готово' : command === 'download' ? 'Обновить' : update.phase === 'current' ? 'Обновлено' : 'Проверить';
+    const description = command === 'apply' ? 'Повторить обновление интерфейса' :
       command === 'download' ? `Скачать обновление ${update.version}` : 'Проверить обновления';
     element('update-label').textContent = label;
-    element('update-action').setAttribute('aria-label', busy ? update.message : description);
+    element('update-action').setAttribute('aria-label', busy || update.phase === 'staged' ? update.message : description);
     element('update-action').title = update.phase === 'disabled' ? update.message : `${description}. ${update.message}`;
     element('update-progress').hidden = update.phase !== 'downloading';
     element('update-progress').value = update.progress;

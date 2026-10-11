@@ -5,7 +5,7 @@ const { createUpdates } = require('../updates.cjs');
 
 function fixture(options = {}) {
   const updater = new EventEmitter();
-  let state, installed = 0, stopped = 0;
+  let state, installed = 0, refreshed = 0;
   updater.checkForUpdates = async () => {
     updater.emit('checking-for-update');
     updater.emit('update-available', { version: '1.1.9' });
@@ -14,34 +14,35 @@ function fixture(options = {}) {
     updater.emit('download-progress', { percent: 52.3 });
     updater.emit('update-downloaded', { version: '1.1.9' });
   };
-  updater.quitAndInstall = (silent, restart) => {
-    assert.equal(stopped, 1, 'local server stops before restarting');
-    assert.equal(silent, false); assert.equal(restart, true); installed++;
-  };
+  updater.quitAndInstall = () => { installed++; throw new Error('The current application must remain open'); };
   const controller = createUpdates({ app: { isPackaged: true, getVersion: () => '1.1.8' },
     platform: 'win32', portable: false, getUpdater: () => updater,
     publish: (patch) => { state = patch.update; }, log: () => {},
-    beforeInstall: async () => { stopped++; }, ...options });
-  return { updater, controller, state: () => state, installed: () => installed };
+    applyInterfaceUpdate: async () => { refreshed++; }, ...options });
+  return { updater, controller, state: () => state, installed: () => installed, refreshed: () => refreshed };
 }
 
-test('updates check, download and install only after explicit commands', async () => {
+test('downloads refresh the interface automatically without quitting and defer native installation to normal close', async () => {
   const f = fixture();
   assert.equal(f.updater.autoDownload, false);
-  assert.equal(f.updater.autoInstallOnAppQuit, false);
+  assert.equal(f.updater.autoInstallOnAppQuit, true);
+  assert.equal(f.updater.autoRunAppAfterInstall, false);
+  assert.equal(f.updater.disableWebInstaller, true);
   assert.equal(f.updater.allowDowngrade, false);
   await assert.rejects(f.controller.action('install'));
   await f.controller.action('check');
   assert.equal(f.state().phase, 'available');
   assert.equal(f.installed(), 0);
   await f.controller.action('download');
-  assert.equal(f.state().phase, 'downloaded');
+  assert.equal(f.state().phase, 'staged');
   assert.equal(f.state().progress, 100);
   assert.equal(f.installed(), 0);
+  assert.equal(f.refreshed(), 1);
   await f.controller.action('check');
-  assert.equal(f.state().phase, 'downloaded', 'checks preserve a pending installer');
-  await f.controller.action('install');
-  assert.equal(f.installed(), 1);
+  assert.equal(f.state().phase, 'staged', 'checks preserve the pending native update');
+  assert.equal(f.refreshed(), 1);
+  await assert.rejects(f.controller.action('install'));
+  assert.equal(f.installed(), 0);
   f.controller.dispose();
 });
 
@@ -59,7 +60,9 @@ test('failed downloads can retry and concurrent commands cannot interrupt a down
   assert.equal(f.state().phase, 'downloading');
   f.updater.emit('update-downloaded', { version: '1.1.9' });
   finish(); await download;
-  assert.equal(f.state().phase, 'downloaded');
+  assert.equal(f.state().phase, 'staged');
+  assert.equal(f.refreshed(), 1);
+  assert.equal(f.installed(), 0);
   f.controller.dispose();
 });
 
@@ -76,19 +79,37 @@ test('network check failures recover and disposal removes timers and listeners',
   assert.equal(f.updater.eventNames().length, 0);
 });
 
-test('failed preparation retries the downloaded installer without downloading again', async () => {
+test('failed interface refresh retries in the same process without downloading or launching the installer', async () => {
   let attempts = 0;
-  const f = fixture({ beforeInstall: async () => { if (++attempts === 1) throw new Error('Server stop failed'); } });
+  const f = fixture({ applyInterfaceUpdate: async () => { if (++attempts === 1) throw new Error('Reload failed'); } });
   await f.controller.action('check');
   await f.controller.action('download');
-  await f.controller.action('install');
   assert.equal(f.state().phase, 'error');
-  assert.equal(f.state().retryAction, 'install');
-  f.updater.quitAndInstall = () => {};
+  assert.equal(f.state().retryAction, 'apply');
   f.updater.downloadUpdate = () => { throw new Error('Must not download again'); };
-  await f.controller.action('install');
-  assert.equal(f.state().phase, 'installing');
+  await f.controller.action('apply');
+  assert.equal(f.state().phase, 'staged');
   assert.equal(attempts, 2);
+  assert.equal(f.installed(), 0);
+  f.controller.dispose();
+});
+
+test('interface refresh waits for the completed download and cannot run twice concurrently', async () => {
+  let finish, applied = 0;
+  const f = fixture({ applyInterfaceUpdate: async () => {
+    applied++;
+    await new Promise(resolve => { finish = resolve; });
+  } });
+  await f.controller.action('check');
+  const downloading = f.controller.action('download');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.state().phase, 'applying');
+  await f.controller.action('apply');
+  await f.controller.action('check');
+  assert.equal(applied, 1);
+  assert.equal(f.installed(), 0);
+  finish(); await downloading;
+  assert.equal(f.state().phase, 'staged');
   f.controller.dispose();
 });
 

@@ -262,9 +262,11 @@ else {
       requireShell(event);
       return downloads.action(command, id);
     });
-    updates = createUpdates({ app, publish, log, testing, beforeInstall: async () => {
-      if (localServer?.owned) await localServer.stop();
-      localServer = undefined;
+    updates = createUpdates({ app, publish, log, testing, applyInterfaceUpdate: async () => {
+      // Keep the window, session and process; show the usual startup screen
+      // while the current site reloads. Native files are installed on normal quit.
+      await connect(state.url);
+      if (state.phase === 'error') throw new Error(state.message);
     } });
     ipcMain.handle('desktop:update', (event, action) => { requireShell(event); return updates.action(action); });
     ipcMain.handle('desktop:state', (event) => { requireShell(event); return state; });

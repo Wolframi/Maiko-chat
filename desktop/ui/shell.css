@@ -59,9 +59,9 @@ button:disabled { opacity: .4; cursor: default; }
 .update-dock[data-phase="available"] .update-button, .update-dock[data-phase="downloaded"] .update-button { color: #c1d3f1; background: #6784b72b; }
 .update-dock[data-phase="available"] .update-button:hover, .update-dock[data-phase="downloaded"] .update-button:hover { background: #6784b748; }
 .update-dock[data-phase="error"] .update-button { color: #e3ab8f; }
-.update-dock[data-phase="current"] .update-button { color: #9fb9aa; }
-.update-dock[data-phase="checking"] .update-wheel, .update-dock[data-phase="downloading"] .update-wheel, .update-dock[data-phase="installing"] .update-wheel { animation: spin 1.2s linear infinite; }
-.update-dock[data-phase="checking"] .update-button, .update-dock[data-phase="downloading"] .update-button, .update-dock[data-phase="installing"] .update-button { opacity: 1; color: #a9bde0; }
+.update-dock[data-phase="current"] .update-button, .update-dock[data-phase="staged"] .update-button { color: #9fb9aa; }
+.update-dock[data-phase="checking"] .update-wheel, .update-dock[data-phase="downloading"] .update-wheel, .update-dock[data-phase="applying"] .update-wheel { animation: spin 1.2s linear infinite; }
+.update-dock[data-phase="checking"] .update-button, .update-dock[data-phase="downloading"] .update-button, .update-dock[data-phase="applying"] .update-button { opacity: 1; color: #a9bde0; }
 .update-dock progress { position: absolute; right: 8px; bottom: 0; width: 80px; height: 2px; border: 0; appearance: none; }
 .update-dock progress::-webkit-progress-bar { background: #ffffff0d; border-radius: 2px; }
 .update-dock progress::-webkit-progress-value { background: #a9bde0; border-radius: 2px; }

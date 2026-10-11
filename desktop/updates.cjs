@@ -1,7 +1,7 @@
 const CHECK_INTERVAL = 6 * 60 * 60 * 1000;
 
 // The local shell owns update commands; the remote site never gets this API.
-function createUpdates({ app, publish, log, beforeInstall = async () => {}, testing = false,
+function createUpdates({ app, publish, log, applyInterfaceUpdate = async () => {}, testing = false,
   platform = process.platform, portable = !!(process.env.PORTABLE_EXECUTABLE_DIR || process.env.PORTABLE_EXECUTABLE_FILE),
   getUpdater = () => require('electron-updater').autoUpdater }) {
   let state = { phase: 'idle', currentVersion: app.getVersion(), version: '', progress: 0,
@@ -16,7 +16,9 @@ function createUpdates({ app, publish, log, beforeInstall = async () => {}, test
   }
   const updater = getUpdater();
   updater.autoDownload = false;
-  updater.autoInstallOnAppQuit = false;
+  updater.autoInstallOnAppQuit = true;
+  updater.autoRunAppAfterInstall = false;
+  updater.disableWebInstaller = true;
   updater.allowPrerelease = false;
   updater.allowDowngrade = false;
   updater.logger = { info: log, warn: log, error: log, debug: () => {} };
@@ -25,10 +27,10 @@ function createUpdates({ app, publish, log, beforeInstall = async () => {}, test
     'update-available': (info) => send({ phase: 'available', version: info.version, message: `Доступна версия ${info.version}.` }),
     'update-not-available': () => send({ phase: 'current', version: '', progress: 0, retryAction: '', message: 'Обновлено. Установлена последняя версия.' }),
     'download-progress': (info) => send({ phase: 'downloading', progress: Math.min(100, Math.max(0, Math.round(info.percent))), message: 'Скачиваем обновление…' }),
-    'update-downloaded': (info) => send({ phase: 'downloaded', version: info.version, progress: 100, message: 'Обновление готово. Перезапустите приложение для установки.' }),
+    'update-downloaded': (info) => send({ phase: 'downloaded', version: info.version, progress: 100, message: 'Обновляем интерфейс в текущем окне…' }),
     'error': (error) => {
       log(`Update error: ${error.stack || error.message}`);
-      const retryAction = state.phase === 'installing' ? 'install' : state.phase === 'downloading' ? 'download' : 'check';
+      const retryAction = state.phase === 'applying' ? 'apply' : state.phase === 'downloading' ? 'download' : 'check';
       send({ phase: 'error', retryAction, message: 'Не удалось обновить приложение. Проверьте соединение и повторите.' });
     },
   };
@@ -36,28 +38,32 @@ function createUpdates({ app, publish, log, beforeInstall = async () => {}, test
   send({});
 
   async function action(command) {
-    if (!['check', 'download', 'install'].includes(command)) throw new Error('Неизвестная команда обновления');
+    if (!['check', 'download', 'apply'].includes(command)) throw new Error('Неизвестная команда обновления');
     if (busy) return;
-    if (command === 'check' && ['downloaded', 'installing'].includes(state.phase)) return;
+    if (command === 'check' && ['downloaded', 'applying', 'staged'].includes(state.phase)) return;
     if (command === 'download' && !(state.phase === 'available' || (state.phase === 'error' && state.retryAction === 'download'))) {
       throw new Error('Сначала проверьте наличие обновления.');
     }
-    if (command === 'install' && !(state.phase === 'downloaded' || (state.phase === 'error' && state.retryAction === 'install'))) throw new Error('Обновление ещё не скачано.');
+    if (command === 'apply' && !(state.phase === 'downloaded' || (state.phase === 'error' && state.retryAction === 'apply'))) throw new Error('Обновление ещё не скачано.');
     busy = true;
     try {
       if (command === 'check') await updater.checkForUpdates();
       else if (command === 'download') {
         send({ phase: 'downloading', progress: 0, message: 'Скачиваем обновление…' });
         await updater.downloadUpdate();
+        if (state.phase === 'downloaded') await applyDownloaded();
       } else {
-        send({ phase: 'installing', message: 'Перезапускаем приложение…' });
-        await beforeInstall();
-        updater.quitAndInstall(false, true);
+        await applyDownloaded();
       }
     } catch (error) {
       // electron-updater can both emit and reject the same failure.
       if (state.phase !== 'error') handlers.error(error);
     } finally { busy = false; }
+  }
+  async function applyDownloaded() {
+    send({ phase: 'applying', message: 'Обновляем интерфейс в текущем окне…' });
+    await applyInterfaceUpdate();
+    send({ phase: 'staged', message: 'Интерфейс обновлён. Новая версия приложения установится при обычном закрытии и будет доступна при следующем запуске.' });
   }
   return {
     action,
