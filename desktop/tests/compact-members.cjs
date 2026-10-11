@@ -118,7 +118,23 @@ async function main() {
     await page.evaluate(() => window.memberFixture.setCalling(true));
     await page.locator('.sidebar__call-members').waitFor({ state: 'visible' });
     await page.waitForFunction(() => !document.querySelector('.sidebar__responsive-members'));
-    assert.equal(await page.locator('.sidebar__member').count(), 32, 'Group calls retain their existing member pane');
+    const callMembers = page.locator('.sidebar__call-members');
+    assert.equal(await callMembers.locator('.member-rail__row').count(), 32, 'Group calls show every participant');
+    for (const heading of ['Владелец —', 'В сети —', 'Не в сети —']) {
+      assert.ok(await callMembers.getByText(heading, { exact: false }).isVisible(), 'Call members keep owner and presence groups');
+    }
+    assert.equal(await page.getByRole('separator', { name: 'Изменить высоту каналов и участников' }).count(), 0, 'Call members need no height divider');
+    const ordered = await page.evaluate(() => !!(document.querySelector('[data-guild-anchor="invite"]').compareDocumentPosition(document.querySelector('.sidebar__call-members')) & Node.DOCUMENT_POSITION_FOLLOWING));
+    assert.ok(ordered, 'Call members follow Invite');
+    const lastCallMember = callMembers.locator('.member-rail__row').last();
+    await lastCallMember.scrollIntoViewIfNeeded();
+    assert.ok(await page.locator('.sidebar__list--guild').evaluate(el => el.scrollTop > 0), 'Channels and call members share one scroller');
+    const lastBounds = await lastCallMember.boundingBox();
+    assert.ok(lastBounds.y >= 0 && lastBounds.y + lastBounds.height <= await page.evaluate(() => innerHeight), 'Last call member is reachable');
+    await callMembers.locator('.member-rail__row').first().click();
+    assert.equal(await page.evaluate(() => window.memberFixture.selected.at(-1)), 'profile', 'Selecting self during a call opens the profile');
+    await callMembers.locator('button[title="@member2"]').click();
+    assert.equal(await page.evaluate(() => window.memberFixture.selected.at(-1)), 'user-2', 'Selecting a call member opens their chat');
     console.log('Compact members passed: 1100px boundary, wide/narrow return, legacy and updated React frontend, all members, owner/status groups, scrolling, self/profile and member/chat clicks, live updates, group changes, no duplicate and group calls.');
   } finally {
     if (app) await app.close();

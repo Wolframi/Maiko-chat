@@ -5,7 +5,8 @@ const { createUpdates } = require('../updates.cjs');
 
 function fixture(options = {}) {
   const updater = new EventEmitter();
-  let state, installed = 0, refreshed = 0;
+  let state, prepared = 0;
+  const installs = [];
   updater.checkForUpdates = async () => {
     updater.emit('checking-for-update');
     updater.emit('update-available', { version: '1.1.9' });
@@ -14,55 +15,57 @@ function fixture(options = {}) {
     updater.emit('download-progress', { percent: 52.3 });
     updater.emit('update-downloaded', { version: '1.1.9' });
   };
-  updater.quitAndInstall = () => { installed++; throw new Error('The current application must remain open'); };
+  updater.quitAndInstall = (...args) => {
+    assert.equal(state.phase, 'installing');
+    assert.ok(prepared > 0, 'Prepare the session before starting NSIS');
+    installs.push(args);
+  };
   const controller = createUpdates({ app: { isPackaged: true, getVersion: () => '1.1.8' },
     platform: 'win32', portable: false, getUpdater: () => updater,
     publish: (patch) => { state = patch.update; }, log: () => {},
-    applyInterfaceUpdate: async () => { refreshed++; }, ...options });
-  return { updater, controller, state: () => state, installed: () => installed, refreshed: () => refreshed };
+    ...options, prepareInstall: async () => { await options.prepareInstall?.(); prepared++; } });
+  return { updater, controller, state: () => state, installs, prepared: () => prepared };
 }
 
-test('downloads refresh the interface automatically without quitting and defer native installation to normal close', async () => {
+test('completed downloads automatically install silently and let NSIS launch the new version', async () => {
   const f = fixture();
   assert.equal(f.updater.autoDownload, false);
   assert.equal(f.updater.autoInstallOnAppQuit, true);
-  assert.equal(f.updater.autoRunAppAfterInstall, false);
+  assert.equal(f.updater.autoRunAppAfterInstall, false, 'A normal close must not reopen the app');
   assert.equal(f.updater.disableWebInstaller, true);
   assert.equal(f.updater.allowDowngrade, false);
-  await assert.rejects(f.controller.action('install'));
+  await assert.rejects(f.controller.action('apply'));
   await f.controller.action('check');
   assert.equal(f.state().phase, 'available');
-  assert.equal(f.installed(), 0);
+  assert.equal(f.installs.length, 0);
   await f.controller.action('download');
-  assert.equal(f.state().phase, 'staged');
+  assert.equal(f.state().phase, 'installing');
   assert.equal(f.state().progress, 100);
-  assert.equal(f.installed(), 0);
-  assert.equal(f.refreshed(), 1);
+  assert.equal(f.state().currentVersion, '1.1.8', 'Never report a downloaded version as running');
+  assert.deepEqual(f.installs, [[true, true]], 'Silent install, force run only after replacement');
   await f.controller.action('check');
-  assert.equal(f.state().phase, 'staged', 'checks preserve the pending native update');
-  assert.equal(f.refreshed(), 1);
-  await assert.rejects(f.controller.action('install'));
-  assert.equal(f.installed(), 0);
+  await f.controller.action('apply');
+  await f.controller.action('download');
+  assert.equal(f.installs.length, 1, 'The installer must only start once');
   f.controller.dispose();
 });
 
-test('failed downloads can retry and concurrent commands cannot interrupt a download', async () => {
+test('failed downloads retry and concurrent commands cannot interrupt a download', async () => {
   const f = fixture();
   await f.controller.action('check');
   f.updater.downloadUpdate = async () => { throw new Error('Offline'); };
   await f.controller.action('download');
   assert.equal(f.state().retryAction, 'download');
   let finish, downloads = 0;
-  f.updater.downloadUpdate = () => { downloads++; return new Promise((resolve) => { finish = resolve; }); };
+  f.updater.downloadUpdate = () => { downloads++; return new Promise(resolve => { finish = resolve; }); };
   const download = f.controller.action('download');
   await f.controller.action('check'); await f.controller.action('download');
   assert.equal(downloads, 1);
-  assert.equal(f.state().phase, 'downloading');
+  assert.equal(f.installs.length, 0, 'Never quit before the download finishes');
   f.updater.emit('update-downloaded', { version: '1.1.9' });
   finish(); await download;
-  assert.equal(f.state().phase, 'staged');
-  assert.equal(f.refreshed(), 1);
-  assert.equal(f.installed(), 0);
+  assert.equal(f.state().phase, 'installing');
+  assert.deepEqual(f.installs, [[true, true]]);
   f.controller.dispose();
 });
 
@@ -79,38 +82,66 @@ test('network check failures recover and disposal removes timers and listeners',
   assert.equal(f.updater.eventNames().length, 0);
 });
 
-test('failed interface refresh retries in the same process without downloading or launching the installer', async () => {
+test('failed session preparation retries installation without downloading again', async () => {
   let attempts = 0;
-  const f = fixture({ applyInterfaceUpdate: async () => { if (++attempts === 1) throw new Error('Reload failed'); } });
-  await f.controller.action('check');
-  await f.controller.action('download');
+  const f = fixture({ prepareInstall: async () => { if (++attempts === 1) throw new Error('Flush failed'); } });
+  await f.controller.action('check'); await f.controller.action('download');
   assert.equal(f.state().phase, 'error');
   assert.equal(f.state().retryAction, 'apply');
+  assert.equal(f.installs.length, 0);
   f.updater.downloadUpdate = () => { throw new Error('Must not download again'); };
+  f.updater.checkForUpdates = () => { throw new Error('Must not erase a pending installer'); };
+  await f.controller.action('check');
+  assert.equal(f.state().retryAction, 'apply');
   await f.controller.action('apply');
-  assert.equal(f.state().phase, 'staged');
+  assert.equal(f.state().phase, 'installing');
   assert.equal(attempts, 2);
-  assert.equal(f.installed(), 0);
+  assert.deepEqual(f.installs, [[true, true]]);
   f.controller.dispose();
 });
 
-test('interface refresh waits for the completed download and cannot run twice concurrently', async () => {
-  let finish, applied = 0;
-  const f = fixture({ applyInterfaceUpdate: async () => {
-    applied++;
-    await new Promise(resolve => { finish = resolve; });
-  } });
+test('preparation finishes before quitting and cannot start twice concurrently', async () => {
+  let finish;
+  const f = fixture({ prepareInstall: () => new Promise(resolve => { finish = resolve; }) });
   await f.controller.action('check');
   const downloading = f.controller.action('download');
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(f.state().phase, 'applying');
-  await f.controller.action('apply');
-  await f.controller.action('check');
-  assert.equal(applied, 1);
-  assert.equal(f.installed(), 0);
+  assert.equal(f.state().phase, 'installing');
+  assert.equal(f.installs.length, 0);
+  await f.controller.action('apply'); await f.controller.action('check');
   finish(); await downloading;
-  assert.equal(f.state().phase, 'staged');
+  assert.deepEqual(f.installs, [[true, true]]);
   f.controller.dispose();
+});
+
+test('installer failures keep the downloaded update and allow another install attempt', async () => {
+  for (const emitted of [false, true]) {
+    const f = fixture();
+    const install = f.updater.quitAndInstall;
+    f.updater.quitAndInstall = () => {
+      const error = new Error('Spawn failed');
+      if (emitted) f.updater.emit('error', error);
+      else throw error;
+    };
+    await f.controller.action('check'); await f.controller.action('download');
+    assert.equal(f.state().phase, 'error');
+    assert.equal(f.state().retryAction, 'apply');
+    f.updater.quitAndInstall = install;
+    await f.controller.action('apply');
+    assert.deepEqual(f.installs, [[true, true]]);
+    f.controller.dispose();
+  }
+});
+
+test('NSIS receives --force-run so a silent assisted install launches only after installing', () => {
+  const { NsisUpdater } = require('electron-updater');
+  const updater = new NsisUpdater(null, { version: '1.1.8', isPackaged: true });
+  let invocation;
+  updater._logger = { info() {} };
+  updater.downloadedUpdateHelper = { file: 'C:\\updates\\Maiko-Setup-1.1.9.exe' };
+  updater.spawnLog = async (file, args) => { invocation = { file, args }; };
+  assert.equal(updater.doInstall({ isSilent: true, isForceRunAfter: true, isAdminRightsRequired: false }), true);
+  assert.deepEqual(invocation, { file: 'C:\\updates\\Maiko-Setup-1.1.9.exe', args: ['--updated', '/S', '--force-run'] });
 });
 
 test('development, portable and test runs never instantiate the updater', async () => {

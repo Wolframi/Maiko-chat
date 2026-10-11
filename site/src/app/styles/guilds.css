@@ -245,113 +245,21 @@
   display: contents;
 }
 
-/* During a group call the member list is its own pane under the channel
-   list. Voice users stay under their channel and scroll with that list,
-   so joining does not move the green dock or the call layout. */
-.sidebar__list--guild.has-bottom {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  overflow: hidden;
-}
-
-.sidebar__guild-scroll {
-  flex: 1.2 1 0;
-  min-height: 0;
-  overflow-x: hidden;
-  overflow-y: scroll;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  scrollbar-width: thin;
-}
-
-.sidebar__guild-scroll.is-resized {
-  flex: 0 0 auto;
-}
-
-.sidebar__guild-split {
-  position: relative;
-  z-index: 2;
-  flex: 0 0 10px;
-  display: grid;
-  place-items: center;
-  width: 100%;
-  margin: -1px 0;
-  border: 0;
-  background: #0c0c0e;
-  cursor: row-resize;
-  touch-action: none;
-  user-select: none;
-}
-
-.sidebar__guild-split > span {
-  width: 54px;
-  height: 4px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.2);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
-  transition:
-    width 0.16s ease,
-    background 0.16s ease;
-}
-
-.sidebar__guild-split:hover > span,
-.sidebar__guild-split:focus-visible > span,
-.sidebar__list--guild.is-splitting > .sidebar__guild-split > span {
-  width: 76px;
-  background: color-mix(in srgb, var(--accent) 78%, white);
-}
-
-.sidebar__guild-split:focus-visible {
-  outline: none;
-  background: color-mix(in srgb, var(--accent) 6%, #0c0c0e);
-}
-
-.sidebar__list--guild.is-splitting {
-  cursor: row-resize;
-  user-select: none;
-}
-
-.sidebar__list--guild.is-splitting .sidebar__guild-scroll,
-.sidebar__list--guild.is-splitting .sidebar__guild-bottom {
-  pointer-events: none;
-}
-
-.sidebar__guild-bottom {
-  flex: 1 1 0;
-  min-height: 0;
-  display: block;
-  overflow-x: hidden;
-  overflow-y: scroll;
-  border-top: 0;
-  padding-top: 2px;
-  scrollbar-width: thin;
-}
-
+/* Call members follow Invite and share the channel list's scroller. */
 .sidebar__call-members {
-  display: flex;
-  flex-direction: column;
   min-width: 0;
   margin-top: 4px;
+}
+
+.sidebar__call-members > .member-rail {
+  border: 0;
+  background: transparent;
+}
+
+.sidebar__call-members .member-rail__scroll {
+  flex: none;
   overflow: visible;
-}
-
-.sidebar__call-members-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding-bottom: 8px;
-  overflow: visible;
-}
-
-.sidebar__member {
-  width: 100%;
-  text-align: left;
-}
-
-.sidebar__member.is-offline {
-  opacity: 0.55;
+  padding: 4px 0 8px;
 }
 
 .channel-swipe {

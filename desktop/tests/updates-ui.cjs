@@ -20,82 +20,94 @@ async function main() {
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
     await page.waitForFunction(() => !!window.maikoDesktop, null, { timeout: 60_000 });
     await page.waitForFunction(() => document.body.dataset.phase === 'ready');
-    await page.locator('#update-action').waitFor();
     assert.equal(await page.locator('input[type="url"], #settings-screen, #change-url').count(), 0);
     assert.equal(await page.evaluate(() => typeof window.maikoDesktop.connect), 'undefined');
     assert.equal(await page.locator('#titlebar #app-version').textContent(), `v${version}`);
     assert.equal(await page.locator('#update-action').isDisabled(), true, 'Development updates are disabled');
     const state = await page.evaluate(() => window.maikoDesktop.state());
-    assert.equal(state.phase, 'ready');
     const identity = await app.evaluate(({ BrowserWindow }) => ({ pid: process.pid, windowId: BrowserWindow.getAllWindows()[0].id }));
-    await app.evaluate(({ BrowserWindow, ipcMain, webContents }, { state, version }) => {
+    await app.evaluate(({ app, BrowserWindow, ipcMain }, { state, version }) => {
+      const testRequire = process.getBuiltinModule('module').createRequire(app.getAppPath() + '/package.json');
+      const { EventEmitter } = testRequire('node:events');
+      const { createUpdates } = testRequire('./updates.cjs');
       const win = BrowserWindow.getAllWindows()[0];
       global.updateTestActions = [];
-      const send = (update) => win.webContents.send('desktop:state-changed', { ...state,
-        update: { currentVersion: version, version: '9.9.9', progress: 0, ...update } });
-      global.sendUpdateTestState = send;
+      global.updateTestInstalls = [];
+      global.updateTestPrepared = false;
+      const send = (update) => win.webContents.send('desktop:state-changed', { ...state, update });
+      global.sendUpdateTestState = (update) => send({ currentVersion: version, version: '9.9.9', progress: 0, ...update });
+      const updater = new EventEmitter();
+      updater.checkForUpdates = async () => {
+        updater.emit('checking-for-update');
+        await new Promise(resolve => setTimeout(resolve, 800));
+        updater.emit('update-available', { version: '9.9.9' });
+      };
+      updater.downloadUpdate = async () => {
+        updater.emit('download-progress', { percent: 47 });
+        await new Promise(resolve => setTimeout(resolve, 1200));
+        updater.emit('update-downloaded', { version: '9.9.9' });
+      };
+      updater.quitAndInstall = (...args) => {
+        if (!global.updateTestPrepared) throw new Error('Session was not prepared');
+        global.updateTestInstalls.push(args);
+      };
+      global.updateTestController = createUpdates({ app: { isPackaged: true, getVersion: () => version },
+        platform: 'win32', portable: false, publish: patch => send(patch.update), log: () => {}, getUpdater: () => updater,
+        prepareInstall: async () => {
+          await new Promise(resolve => setTimeout(resolve, 800));
+          global.updateTestPrepared = true;
+        } });
       ipcMain.removeHandler('desktop:update');
       ipcMain.handle('desktop:update', async (_event, action) => {
         global.updateTestActions.push(action);
-        if (action === 'check') {
-          send({ phase: 'checking', message: 'Проверяем обновления…' });
-          await new Promise((resolve) => setTimeout(resolve, 1200));
-          send({ phase: 'available', message: 'Доступна версия 9.9.9.' });
-        }
-        if (action === 'download') {
-          send({ phase: 'downloading', progress: 47, message: 'Скачиваем обновление…' });
-          await new Promise((resolve) => setTimeout(resolve, 1500));
-          send({ phase: 'applying', progress: 100, message: 'Обновляем интерфейс в текущем окне…' });
-          win.webContents.send('desktop:state-changed', { ...state, phase: 'loading', message: 'Подключаемся…',
-            update: { currentVersion: version, phase: 'applying', progress: 100, message: 'Обновляем интерфейс в текущем окне…' } });
-          await new Promise((resolve) => setTimeout(resolve, 1500));
-          const site = webContents.getAllWebContents().find(contents => contents.getURL().startsWith(state.url));
-          await site.loadURL(site.getURL());
-          const deadline = Date.now() + 10000;
-          while ((await win.webContents.executeJavaScript('window.maikoDesktop.state()')).phase !== 'ready') {
-            if (Date.now() > deadline) throw new Error('Reloaded site did not become ready');
-            await new Promise(resolve => setTimeout(resolve, 20));
-          }
-          send({ phase: 'staged', progress: 100, message: 'Интерфейс обновлён. Новая версия приложения установится при обычном закрытии.' });
-        }
+        await global.updateTestController.action(action);
       });
-      send({ phase: 'current', message: 'Обновлено. Установлена последняя версия.' });
+      global.sendUpdateTestState({ phase: 'current', message: 'Обновлено. Установлена последняя версия.' });
     }, { state, version });
     await page.waitForFunction(() => document.querySelector('#update-label').textContent === 'Обновлено');
-    assert.equal(await page.locator('#update-action').isDisabled(), false, 'Current version can be checked again');
-    assert.match(await page.locator('#update-dock').getAttribute('title'), /Установлена последняя версия/);
+    assert.equal(await page.locator('#update-action').isDisabled(), false);
     await page.getByRole('button', { name: 'Проверить обновления', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('#update-dock').dataset.phase === 'checking');
     assert.equal(await page.locator('#update-action').isDisabled(), true);
     assert.equal(await page.locator('#update-label').textContent(), 'Проверка…');
-    await page.getByRole('button', { name: 'Скачать обновление 9.9.9', exact: true }).click();
+    await page.getByRole('button', { name: 'Обновить до версии 9.9.9 с автоматическим перезапуском', exact: true }).click();
     await page.locator('#update-progress:not([hidden])').waitFor();
-    assert.equal(await page.locator('.update-wheel').evaluate((icon) => getComputedStyle(icon).animationName), 'spin');
-    await page.waitForFunction(() => document.querySelector('#update-dock').dataset.phase === 'applying');
-    assert.equal(await page.locator('#connection-screen').isVisible(), true, 'The existing window shows its startup screen');
-    assert.equal(await page.locator('#update-label').textContent(), 'Применяем…');
-    await page.waitForFunction(() => document.querySelector('#update-dock').dataset.phase === 'staged');
-    assert.equal(await page.locator('#update-label').textContent(), 'Готово');
+    assert.equal(await page.locator('.update-wheel').evaluate(icon => getComputedStyle(icon).animationName), 'spin');
+    await page.waitForFunction(() => document.querySelector('#update-dock').dataset.phase === 'installing');
+    assert.equal(await page.locator('#connection-screen').isVisible(), false, 'No redundant site reload before installing');
+    assert.equal(await page.locator('#update-label').textContent(), 'Установка…');
+    assert.equal(await page.locator('#update-action').isDisabled(), true);
+    assert.match(await page.locator('#update-dock').getAttribute('title'), /откроется автоматически после установки/);
+    assert.equal(await page.locator('#titlebar #app-version').textContent(), `v${version}`, 'Do not fake the new version');
     assert.deepEqual(await app.evaluate(({ BrowserWindow }) => ({ pid: process.pid, windowId: BrowserWindow.getAllWindows()[0].id })), identity);
-    assert.equal(await page.locator('#titlebar #app-version').textContent(), `v${version}`);
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setBounds({ width: 800, height: 600 }));
     const dock = await page.locator('#update-dock').boundingBox();
     const controls = await page.locator('[data-action="minimize"]').boundingBox();
-    assert.ok(dock.y >= 0 && dock.y + dock.height <= 42 && dock.x + dock.width <= controls.x, 'Dock fits beside window controls at minimum size');
+    assert.ok(dock.y >= 0 && dock.y + dock.height <= 42 && dock.x + dock.width <= controls.x, 'Dock fits at minimum window size');
     await fs.mkdir(output, { recursive: true });
-    assert.equal(await page.locator('#connection-screen').isVisible(), false, 'Update controls leave the site open');
     await page.screenshot({ path: path.join(output, 'updates.png'), timeout: 60_000 });
+    await app.evaluate(async () => {
+      const deadline = Date.now() + 5000;
+      while (!global.updateTestInstalls.length) {
+        if (Date.now() > deadline) throw new Error('Installer was not invoked');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      await global.updateTestController.action('check');
+    });
+    assert.deepEqual(await app.evaluate(() => global.updateTestInstalls), [[true, true]]);
     assert.deepEqual(await app.evaluate(() => global.updateTestActions), ['check', 'download']);
-    assert.equal(await page.locator('#update-action').isDisabled(), true);
     for (const retryAction of ['check', 'download', 'apply']) {
       await app.evaluate((_electron, retryAction) => global.sendUpdateTestState({ phase: 'error', retryAction, message: 'Ошибка обновления. Повторите попытку.' }), retryAction);
-      await page.waitForFunction((retryAction) => document.querySelector('#update-action').dataset.command === retryAction && document.querySelector('#update-label').textContent === 'Повторить', retryAction);
+      await page.waitForFunction(retryAction => document.querySelector('#update-action').dataset.command === retryAction && document.querySelector('#update-label').textContent === 'Повторить', retryAction);
       assert.equal(await page.locator('#update-action').isDisabled(), false);
     }
-    console.log('Update dock passed in Electron: current, check, download, automatic interface refresh with startup screen, same PID/window, staged update, error retries and minimum window size.');
+    console.log('Update UI passed: real controller, check/download/install, no redundant reload, honest version, silent install and post-install launch, retries and minimum window size. Installer execution is mocked.');
   } finally {
-    if (app) await app.close();
-    await new Promise((resolve) => server.close(resolve));
+    if (app) {
+      await app.evaluate(() => global.updateTestController?.dispose()).catch(() => {});
+      await app.close();
+    }
+    await new Promise(resolve => server.close(resolve));
   }
 }
-main().catch((error) => { console.error(error); process.exitCode = 1; });
+main().catch(error => { console.error(error); process.exitCode = 1; });
