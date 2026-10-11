@@ -16,6 +16,8 @@ import path from "node:path";
 import { parse } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import next from "next";
+import { loadEnvConfig } from "@next/env";
+import { MessageStore } from "./src/server/messageStore";
 import { Server, type Socket } from "socket.io";
 import {
   AccessToken,
@@ -128,6 +130,8 @@ import {
   lanIPv4Addresses,
   listenHostname,
 } from "./src/lib/devHosts";
+
+loadEnvConfig(process.cwd());
 
 const dev = process.env.NODE_ENV !== "production";
 const hostname = listenHostname();
@@ -521,6 +525,9 @@ const clientMsgIds = new Map<string, { id: string; expires: number }>();
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const MESSAGES_FILE = path.join(DATA_DIR, "messages.json");
+const messageStore = process.env.MONGODB_URI
+  ? new MessageStore<ChatMessage>(process.env.MONGODB_URI, process.env.MONGODB_DATABASE)
+  : undefined;
 const READS_FILE = path.join(DATA_DIR, "reads.json");
 const PINS_FILE = path.join(DATA_DIR, "pins.json");
 const LIVE_MEDIA_FILE = path.join(DATA_DIR, "live-media.json");
@@ -598,6 +605,9 @@ function writeMessagesSnapshot() {
           },
         };
       }
+      if (next.files?.length) {
+        next = { ...next, files: next.files.map((file) => ({ ...file, url: bareUploadUrl(file.url) })) };
+      }
       if (!next.file?.url) return next;
       return {
         ...next,
@@ -605,7 +615,8 @@ function writeMessagesSnapshot() {
       };
     });
   }
-  atomicWriteJson(MESSAGES_FILE, payload);
+  if (messageStore) messageStore.save(new Map(Object.entries(payload)));
+  else atomicWriteJson(MESSAGES_FILE, payload);
 }
 
 function writeReadsSnapshot() {
@@ -647,7 +658,9 @@ function writeLiveMediaSnapshot() {
   atomicWriteJson(LIVE_MEDIA_FILE, { at: Date.now(), calls, voice });
 }
 
-const persistMessages = createPersister(writeMessagesSnapshot);
+const persistMessages: Persister = messageStore
+  ? Object.assign(() => writeMessagesSnapshot(), { idle: () => messageStore.idle() })
+  : createPersister(writeMessagesSnapshot);
 const persistReads = createPersister(writeReadsSnapshot);
 const persistPins = createPersister(writePinsSnapshot);
 const persistLiveMedia = createPersister(writeLiveMediaSnapshot);
@@ -661,7 +674,7 @@ function flushAllPersists() {
 
 function loadPersistedState() {
   try {
-    if (existsSync(MESSAGES_FILE)) {
+    if (!messageStore && existsSync(MESSAGES_FILE)) {
       const raw = JSON.parse(readFileSync(MESSAGES_FILE, "utf8")) as Record<
         string,
         ChatMessage[]
@@ -1663,7 +1676,6 @@ function pushMessage(io: Server, chat: ChatMeta, message: ChatMessage) {
     };
   }
   list.push(message);
-  if (list.length > 200) list.shift();
   persistMessages();
 
   // Only the author is auto-marked read; viewers emit chats:read themselves
@@ -1838,7 +1850,6 @@ function pushSystem(room: string, text: string) {
   };
   const list = messagesFor(room);
   list.push(message);
-  if (list.length > 200) list.shift();
   persistMessages();
   return message;
 }
@@ -2010,7 +2021,13 @@ function refreshPresenceName(io: Server, account: AuthAccount) {
   }
 }
 
-app.prepare().then(() => {
+app.prepare().then(async () => {
+  if (messageStore) {
+    await messageStore.connect();
+    const loaded = await messageStore.load();
+    for (const [room, messages] of loaded) chatMessages.set(room, messages);
+    console.log(`[messages] MongoDB ready: ${loaded.size} rooms`);
+  }
   const httpServer = createServer({ maxHeaderSize: 64 * 1024 }, (req, res) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("X-Frame-Options", "DENY");
@@ -2081,10 +2098,14 @@ app.prepare().then(() => {
       return;
     }
     if (url.startsWith("/api/health")) {
-      res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.setHeader("Cache-Control", "no-store");
-      res.end(JSON.stringify({ ok: true, service: "pulse", bootId: APP_BOOT_ID, mediaStorage: s3Enabled ? "s3" : "local" }));
+      const health = async () => {
+        const ok = messageStore ? await messageStore.healthy() : true;
+        res.statusCode = ok ? 200 : 503;
+        res.end(JSON.stringify({ ok, service: "pulse", bootId: APP_BOOT_ID, mediaStorage: s3Enabled ? "s3" : "local", messageStorage: messageStore ? "mongodb" : "json" }));
+      };
+      void health();
       return;
     }
     if (url.startsWith("/api/livekit/token")) {
@@ -2400,6 +2421,26 @@ app.prepare().then(() => {
 
   io.on("connection", (socket) => {
     ioServer = io;
+    if (messageStore) {
+      socket.use(async (packet, nextPacket) => {
+        const ackIndex = packet.length - 1;
+        const acknowledge = packet[ackIndex];
+        if (typeof acknowledge === "function") {
+          packet[ackIndex] = (result: { ok?: boolean; error?: string }) => {
+            if (!result?.ok) { acknowledge(result); return; }
+            void messageStore.idle().then(
+              () => acknowledge(result),
+              () => acknowledge({ ok: false, error: "Не удалось сохранить изменения. Повторите попытку." }),
+            );
+          };
+        }
+        if (/^(message|group:(delete|invite)|invite:|text:delete|call:log)/.test(String(packet[0])) && !await messageStore.healthy()) {
+          if (typeof acknowledge === "function") acknowledge({ ok: false, error: "Хранилище сообщений временно недоступно" });
+          return;
+        }
+        nextPacket();
+      });
+    }
     socket.emit("app:boot", { bootId: APP_BOOT_ID });
     // people list only after auth — see afterAuth / broadcastPeople
 
@@ -5085,33 +5126,28 @@ app.prepare().then(() => {
   const shutdown = () => {
     if (shutdownStarted) return;
     shutdownStarted = true;
-    let finished = false;
-    const finish = () => {
-      if (finished) return;
-      finished = true;
+    httpServer.close();
+    io.close();
+    const deadline = setTimeout(() => {
+      console.error("[shutdown] persistence deadline exceeded");
+      process.exit(1);
+    }, 15_000);
+    void (async () => {
       try {
+        await Promise.all([persistMessages, persistReads, persistPins, persistLiveMedia].map((p) => p.idle()));
         flushAllPersists();
+        if (messageStore) await messageStore.close();
+        clearTimeout(deadline);
+        process.exit(0);
       } catch {
-        /* ignore */
+        console.error("[shutdown] failed to persist state");
+        process.exit(1);
       }
-      process.exit(0);
-    };
-    // Wait for in-flight persister writes so the final sync flush cannot
-    // race them on the same temp files, but never hang shutdown on it.
-    Promise.all(
-      [persistMessages, persistReads, persistPins, persistLiveMedia].map((p) =>
-        p.idle(),
-      ),
-    ).then(finish, finish);
-    setTimeout(finish, 3_000).unref();
+    })();
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
-  process.once("beforeExit", () => {
-    try {
-      flushAllPersists();
-    } catch {
-      /* ignore */
-    }
-  });
+}).catch((error) => {
+  console.error("[startup]", error.message);
+  process.exit(1);
 });

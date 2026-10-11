@@ -26,7 +26,7 @@ async function login(page: Page, username: string, password: string) {
 async function openDm(page: Page, query: string, label: RegExp) {
   const rail = page.getByRole("navigation", { name: "Серверы и группы" });
   await rail.getByRole("button", { name: "Люди" }).click({ force: true });
-  await page.getByRole("textbox", { name: "Поиск людей" }).fill(query);
+  await page.getByRole("textbox", { name: "Поиск людей и групп" }).fill(query);
   const person = page
     .locator(".people-list button, .sidebar button")
     .filter({ hasText: label })
@@ -73,8 +73,8 @@ test.describe("Pulse release polish", () => {
 
     const rail = page.getByRole("navigation", { name: "Серверы и группы" });
     await rail.getByRole("button", { name: "Люди" }).click();
-    await expect(page.getByText("Найти и написать")).toBeVisible();
-    await rail.getByRole("button", { name: "Чаты" }).click({ force: true });
+    await expect(page.getByRole("textbox", { name: "Поиск людей и групп" })).toBeVisible();
+    await rail.getByRole("button", { name: "Майко — чаты" }).click({ force: true });
     await expect(page.getByText("Диалоги").first()).toBeVisible();
 
     await openDm(page, "alice", /Алиса/i);
@@ -85,14 +85,14 @@ test.describe("Pulse release polish", () => {
       timeout: 10_000,
     });
 
-    await page.getByRole("button", { name: "Голосовое сообщение" }).click();
+    await page.getByRole("button", { name: "Записать голосовое" }).click();
     await expect(
       page.getByRole("button", { name: "Удалить запись" }),
     ).toBeVisible({ timeout: 8_000 });
     await page.getByRole("button", { name: "Удалить запись" }).click();
 
     // Offline peer → call buttons disabled (soft UX, no crash).
-    await expect(page.getByRole("button", { name: "Видеозвонок" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Звонок", exact: true })).toBeDisabled();
 
     await page.getByRole("button", { name: "Открыть профиль" }).click();
     await page.getByRole("button", { name: "Выйти" }).click();

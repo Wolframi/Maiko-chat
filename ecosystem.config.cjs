@@ -30,6 +30,7 @@ module.exports = {
       min_uptime: "3s",
       max_restarts: 10,
       restart_delay: 3000,
+      kill_timeout: 20000,
       env: {
         NODE_ENV: "production",
         HOSTNAME: "127.0.0.1",

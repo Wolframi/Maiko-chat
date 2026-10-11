@@ -17,7 +17,7 @@ wrap or freeze at the end of a short clip. The same start survives Strict Mode,
 resizes, and renderer fallback. Reduced motion skips animation.
 
 The supplied FBXs already include the mascot and a 65-bone Mixamo rig. Their
-complete editable scenes are saved through Blenderwright MCP in
+complete editable Blender scenes are saved in
 `output/maiko-intro/maiko-hiphop.blend` and `maiko-samba.blend`. The original
 clips run at 60 fps; the browser palette is sampled at 24 fps and interpolated.
 Horizontal mocap root drift is removed. Each frame is grounded using the
@@ -48,7 +48,7 @@ The lowest visible points are
 clamped to the platform plane, preserving foot contact. Failed assets also release
 the loading screen, and animation work stops while the page is hidden.
 
-Regenerate with Blender from the supplied FBX files or saved MCP scenes:
+Regenerate with Blender from the supplied FBX files or saved Blender scenes:
 
 ```powershell
 & 'D:/Steam/steamapps/common/Blender/blender.exe' --background --python scripts/export-maiko-dance.py -- 'path/to/Wave Hip Hop Dance.fbx' public/models/maiko-hiphop.bin 100

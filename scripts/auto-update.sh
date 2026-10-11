@@ -45,6 +45,24 @@ if [ "$FORCE" != 1 ] && ! git merge-base --is-ancestor HEAD origin/master; then
   exit 0
 fi
 
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  log "skip: refusing to overwrite local tracked changes"
+  exit 1
+fi
+
+if [ -f server.ts ] && git cat-file -e origin/master:site/server.ts 2>/dev/null; then
+  log "skip: moving the live application into site/ requires a manual deployment"
+  exit 1
+fi
+
+if grep -qs '^MONGODB_URI=' .env.local site/.env.local || [ -n "${MONGODB_URI:-}" ]; then
+  if ! git cat-file -e origin/master:src/server/messageStore.ts 2>/dev/null && \
+     ! git cat-file -e origin/master:site/src/server/messageStore.ts 2>/dev/null; then
+    log "skip: incoming version does not support the migrated MongoDB message store"
+    exit 0
+  fi
+fi
+
 log "updating $LOCAL -> $REMOTE"
 git checkout -f master
 git reset --hard origin/master

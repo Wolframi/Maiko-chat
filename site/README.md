@@ -49,3 +49,5 @@ SEED_DEMO=1 NEXT_PUBLIC_DEMO=1 npm start
 VPS (PM2 + nginx): `powershell -File ../scripts/deploy.ps1`
 
 Health check: `GET /api/health`
+
+Хранение сообщений в MongoDB и перенос истории: [docs/mongodb.md](../docs/mongodb.md).

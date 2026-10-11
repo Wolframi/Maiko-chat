@@ -10,6 +10,21 @@ if [ ! -d .git ]; then
 fi
 
 git fetch origin
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "Refusing to overwrite local tracked changes" >&2
+  exit 1
+fi
+if [ -f server.ts ] && git cat-file -e origin/master:site/server.ts 2>/dev/null; then
+  echo "Moving the live application into site/ requires a manual deployment" >&2
+  exit 1
+fi
+if grep -qs '^MONGODB_URI=' .env.local site/.env.local || [ -n "${MONGODB_URI:-}" ]; then
+  if ! git cat-file -e origin/master:src/server/messageStore.ts 2>/dev/null && \
+     ! git cat-file -e origin/master:site/src/server/messageStore.ts 2>/dev/null; then
+    echo "Incoming version does not support the migrated MongoDB message store" >&2
+    exit 1
+  fi
+fi
 git checkout -f master
 git reset --hard origin/master
 # Drop leftover untracked sources; keep data/uploads/secrets (gitignored).

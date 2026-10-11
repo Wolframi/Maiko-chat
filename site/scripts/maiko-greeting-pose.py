@@ -1,4 +1,4 @@
-"""Run inside Blender via MCP, or use from the particle exporter.
+"""Run inside Blender, or use from the particle exporter.
 
 Aim each limb in armature space, preserving bone lengths. The greeting moves
 the forearm along the elbow hinge, retaining its inherited orientation without

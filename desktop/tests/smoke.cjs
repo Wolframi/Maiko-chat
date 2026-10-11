@@ -60,11 +60,12 @@ async function main() {
     assert.equal((await shell.evaluate(() => window.maikoDesktop.state())).maximized, false);
 
     await site.evaluate(() => { localStorage.setItem('maiko-desktop-smoke', 'persisted'); });
+    const pickerReady = app.waitForEvent('window', { predicate: (page) => page !== shell && page !== site, timeout: 20_000 });
     const captureRequest = site.evaluate(async () => {
       try { await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }); return 'unexpected'; }
       catch (error) { return error.name; }
     });
-    const picker = await app.waitForEvent('window', { predicate: (page) => page !== shell && page !== site, timeout: 20_000 });
+    const picker = await pickerReady;
     await picker.getByRole('button', { name: 'Отмена', exact: true }).click();
     assert.ok(['AbortError', 'NotAllowedError'].includes(await captureRequest));
     assert.equal(app.windows().length, 2);
