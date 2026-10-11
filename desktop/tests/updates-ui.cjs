@@ -39,12 +39,12 @@ async function main() {
       const updater = new EventEmitter();
       updater.checkForUpdates = async () => {
         updater.emit('checking-for-update');
-        await new Promise(resolve => setTimeout(resolve, 800));
+        await new Promise(resolve => { global.finishUpdateTestCheck = resolve; });
         updater.emit('update-available', { version: '9.9.9' });
       };
       updater.downloadUpdate = async () => {
         updater.emit('download-progress', { percent: 47 });
-        await new Promise(resolve => setTimeout(resolve, 1200));
+        await new Promise(resolve => { global.finishUpdateTestDownload = resolve; });
         updater.emit('update-downloaded', { version: '9.9.9' });
       };
       updater.quitAndInstall = (...args) => {
@@ -54,7 +54,7 @@ async function main() {
       global.updateTestController = createUpdates({ app: { isPackaged: true, getVersion: () => version },
         platform: 'win32', portable: false, publish: patch => send(patch.update), log: () => {}, getUpdater: () => updater,
         prepareInstall: async () => {
-          await new Promise(resolve => setTimeout(resolve, 800));
+          await new Promise(resolve => { global.finishUpdateTestPreparation = resolve; });
           global.updateTestPrepared = true;
         } });
       ipcMain.removeHandler('desktop:update');
@@ -70,9 +70,11 @@ async function main() {
     await page.waitForFunction(() => document.querySelector('#update-dock').dataset.phase === 'checking');
     assert.equal(await page.locator('#update-action').isDisabled(), true);
     assert.equal(await page.locator('#update-label').textContent(), 'Проверка…');
+    await app.evaluate(() => global.finishUpdateTestCheck());
     await page.getByRole('button', { name: 'Обновить до версии 9.9.9 с автоматическим перезапуском', exact: true }).click();
     await page.locator('#update-progress:not([hidden])').waitFor();
     assert.equal(await page.locator('.update-wheel').evaluate(icon => getComputedStyle(icon).animationName), 'spin');
+    await app.evaluate(() => global.finishUpdateTestDownload());
     await page.waitForFunction(() => document.querySelector('#update-dock').dataset.phase === 'installing');
     assert.equal(await page.locator('#connection-screen').isVisible(), false, 'No redundant site reload before installing');
     assert.equal(await page.locator('#update-label').textContent(), 'Установка…');
@@ -87,6 +89,7 @@ async function main() {
     await fs.mkdir(output, { recursive: true });
     await page.screenshot({ path: path.join(output, 'updates.png'), timeout: 60_000 });
     await app.evaluate(async () => {
+      global.finishUpdateTestPreparation();
       const deadline = Date.now() + 5000;
       while (!global.updateTestInstalls.length) {
         if (Date.now() > deadline) throw new Error('Installer was not invoked');
