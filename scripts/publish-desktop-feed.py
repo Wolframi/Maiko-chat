@@ -3,16 +3,27 @@
 import base64
 import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
 
 DESTINATION = Path('/var/www/maiko-desktop-updates')
 MAX_BYTES = 400 * 1024 * 1024
+
+
+def announce(project, version):
+    directory = project / 'site' / 'data'
+    directory.mkdir(parents=True, exist_ok=True)
+    pending = directory / '.desktop-release.json.pending'
+    pending.write_text(json.dumps({'version': version}) + '\n')
+    pending.chmod(0o644)
+    os.replace(pending, directory / 'desktop-release.json')
 
 
 def metadata(text):
@@ -64,12 +75,28 @@ def publish():
                     raise ValueError('Refusing an older release')
                 if version == old_version and expected_hash != old_hash:
                     raise ValueError('Refusing to replace an existing version')
+            # S3 artifacts are verified and its manifest is published last.
+            # This runs under the same SSH publication lock as the bridge feed.
+            project = Path(__file__).resolve().parent.parent
+            config = project / 'site' / '.desktop-s3-storage.json'
+            if config.exists():
+                subprocess.run(['node', '--import', 'tsx', 'scripts/publish-desktop-s3.ts', str(stage)],
+                               cwd=project / 'site', check=True)
+            elif tuple(map(int, version.split('.'))) >= (1, 1, 14):
+                raise ValueError('Desktop S3 configuration is required for this release')
+            # The server feed stays on the bridge version. Older applications
+            # install it once and then switch to the private S3-backed feed.
+            if tuple(map(int, version.split('.'))) > (1, 1, 14):
+                announce(project, version)
+                print(f'Published desktop update {version} to S3; server bridge remains 1.1.14.')
+                return
             # Keep earlier installers for in-progress and differential downloads.
             for name in [installer, installer + '.blockmap', 'latest.yml']:
                 pending = DESTINATION / ('.' + name + '.pending')
                 shutil.copyfile(stage / name, pending)
                 pending.chmod(0o644)
                 os.replace(pending, DESTINATION / name)
+            announce(project, version)
             print(f'Published desktop update {version}; SHA-512 verified.')
 
 

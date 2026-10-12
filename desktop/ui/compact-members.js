@@ -53,10 +53,12 @@
     scheduled = true;
     requestAnimationFrame(sync);
   }
-  new MutationObserver((records) => {
+  const observer = new MutationObserver((records) => {
     if (records.some((record) => !copy?.contains(record.target))) schedule();
-  }).observe(document.body, { subtree: true, childList: true, characterData: true,
+  });
+  observer.observe(document.body, { subtree: true, childList: true, characterData: true,
     attributes: true, attributeFilter: ['class', 'src', 'title'] });
   narrow.addEventListener('change', schedule);
+  window.addEventListener('pagehide', () => { observer.disconnect(); narrow.removeEventListener('change', schedule); clear(); }, { once: true });
   sync();
 })();

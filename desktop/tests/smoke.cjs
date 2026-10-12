@@ -36,7 +36,15 @@ async function main() {
     const pages = app.windows();
     const site = pages.find((page) => page.url().startsWith('http://127.0.0.1:')) || pages.find((page) => page.url().startsWith('https://'));
     assert.ok(site, 'The site is hosted in a separate WebContentsView');
-    await site.getByRole('textbox', { name: 'Логин', exact: true }).waitFor({ timeout: 60_000 });
+    let ui = site;
+    if (new URL(site.url()).pathname === '/desktop-runtime') {
+      const iframe = site.locator('iframe[data-maiko-desktop-ui]');
+      await iframe.waitFor({ timeout: 60_000 });
+      ui = await (await iframe.elementHandle()).contentFrame();
+      assert.ok(ui, 'The interface is hosted inside the persistent media document');
+    }
+    await ui.getByRole('textbox', { name: 'Логин', exact: true }).waitFor({ timeout: 60_000 });
+    assert.deepEqual(await ui.evaluate(() => ({ node: typeof window.require, bridge: typeof window.maikoDesktop })), { node: 'undefined', bridge: 'undefined' });
     assert.deepEqual(await site.evaluate(() => ({ node: typeof window.require, bridge: typeof window.maikoDesktop })), { node: 'undefined', bridge: 'undefined' });
     const preferences = await app.evaluate(({ webContents }) => {
       const content = webContents.getAllWebContents().find((entry) => /^https?:/.test(entry.getURL()));
@@ -52,10 +60,10 @@ async function main() {
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1000, 700));
     const [contentWidth, contentHeight] = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getContentSize());
     await site.waitForFunction(([width, height]) => window.innerWidth === width && window.innerHeight === height,
-      [contentWidth - 12, contentHeight - 48], { polling: 100 });
+      [contentWidth - 20, contentHeight - 52], { polling: 100 });
     await shell.getByRole('button', { name: 'Развернуть', exact: true }).click();
     assert.equal((await shell.evaluate(() => window.maikoDesktop.state())).maximized, true);
-    assert.deepEqual(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds()), await app.evaluate(({ BrowserWindow, screen }) => screen.getDisplayMatching(BrowserWindow.getAllWindows()[0].getBounds()).workArea));
+    assert.deepEqual(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getContentBounds()), await app.evaluate(({ BrowserWindow, screen }) => screen.getDisplayMatching(BrowserWindow.getAllWindows()[0].getBounds()).workArea));
     await shell.getByRole('button', { name: 'Восстановить', exact: true }).click();
     assert.equal((await shell.evaluate(() => window.maikoDesktop.state())).maximized, false);
 

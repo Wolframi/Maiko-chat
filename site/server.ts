@@ -97,6 +97,8 @@ import {
   sweepOrphanUploads,
 } from "./src/server/uploads";
 import { handleRingtones } from "./src/server/ringtones";
+import { tryServeDesktopUpdate } from "./src/server/desktopUpdates";
+import { configureDesktopUpdateNotifications } from "./src/server/desktopUpdateNotifications";
 import { s3Enabled, s3Origin } from "./src/server/objectStorage";
 import { rateLimit } from "./src/server/rateLimit";
 import { buildIceServers } from "./src/lib/iceServers";
@@ -447,6 +449,10 @@ const callDisconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const RING_TIMEOUT_MS = 45_000;
 const CALL_RECONNECT_GRACE_MS = 25_000;
 const APP_BOOT_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+// Read once: a build in progress must not advertise itself before PM2 starts it.
+const APP_BUILD_ID = dev ? APP_BOOT_ID : readFileSync(path.join(process.cwd(), ".next/BUILD_ID"), "utf8").trim();
+const DEPLOY_RECONNECT_GRACE_MS = 90_000;
+const restoredMediaUntil = Date.now() + DEPLOY_RECONNECT_GRACE_MS;
 const CALL_SIGNAL_MAX_JSON = 64 * 1024;
 const CALL_LOG_RE =
   /^(Звонок без ответа|(Видеозвонок|Звонок) завершён( · \d{1,3}:\d{2})?)$/;
@@ -779,7 +785,7 @@ function loadPersistedState() {
         for (const call of [...callsById.values()]) {
           releaseZombieCall(call);
         }
-      }, 25_000);
+      }, DEPLOY_RECONNECT_GRACE_MS);
     }
     if (Array.isArray(raw.voice)) {
       for (const room of raw.voice) {
@@ -857,7 +863,7 @@ setInterval(() => {
     let changed = false;
     for (const [userId, member] of [...room.entries()]) {
       // Being logged in does not mean the client restored its voice session.
-      if (member.socketId) continue;
+      if (member.socketId || Date.now() < restoredMediaUntil) continue;
       room.delete(userId);
       voiceByUser.delete(userId);
       changed = true;
@@ -2029,8 +2035,9 @@ app.prepare().then(async () => {
     console.log(`[messages] MongoDB ready: ${loaded.size} rooms`);
   }
   const httpServer = createServer({ maxHeaderSize: 64 * 1024 }, (req, res) => {
+    const desktopUi = /^\/\?(?:[^#]*&)?_desktop_ui=1(?:&|$)/.test(req.url || "");
     res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("X-Frame-Options", desktopUi ? "SAMEORIGIN" : "DENY");
     res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
     res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
     res.setHeader(
@@ -2047,7 +2054,7 @@ app.prepare().then(async () => {
         "media-src 'self' blob: https://*.giphy.com https://media.giphy.com",
         `connect-src 'self' blob: ws: wss: stun: turn: turns: https://*.giphy.com https://media.giphy.com https://i.giphy.com${s3Origin ? ` ${s3Origin}` : ""}`,
         "font-src 'self'",
-        "frame-ancestors 'none'",
+        desktopUi ? "frame-ancestors 'self'" : "frame-ancestors 'none'",
         "base-uri 'self'",
         "form-action 'self'",
       ].join("; "),
@@ -2060,6 +2067,7 @@ app.prepare().then(async () => {
     }
 
     const url = req.url || "";
+    if (tryServeDesktopUpdate(req, res)) return;
     if (
       !url.startsWith("/_next/") &&
       !url.startsWith("/uploads") &&
@@ -2103,7 +2111,7 @@ app.prepare().then(async () => {
       const health = async () => {
         const ok = messageStore ? await messageStore.healthy() : true;
         res.statusCode = ok ? 200 : 503;
-        res.end(JSON.stringify({ ok, service: "pulse", bootId: APP_BOOT_ID, mediaStorage: s3Enabled ? "s3" : "local", messageStorage: messageStore ? "mongodb" : "json" }));
+        res.end(JSON.stringify({ ok, service: "pulse", bootId: APP_BOOT_ID, buildId: APP_BUILD_ID, desktopMediaHost: 1, mediaStorage: s3Enabled ? "s3" : "local", messageStorage: messageStore ? "mongodb" : "json" }));
       };
       void health();
       return;
@@ -2382,6 +2390,9 @@ app.prepare().then(async () => {
   },
   });
 
+  const disposeDesktopNotifications = configureDesktopUpdateNotifications(io);
+  httpServer.once("close", disposeDesktopNotifications);
+
   function clientKey(socket: Socket) {
     // Prefer the real TCP peer. Only trust X-Forwarded-For behind a known proxy.
     if (process.env.TRUST_PROXY === "1") {
@@ -2416,7 +2427,7 @@ app.prepare().then(async () => {
   // Keep sending boot id so open tabs reload after PM2 restart even if they
   // missed the first `connection` packet (hung polling, background tab).
   setInterval(() => {
-    io.emit("app:boot", { bootId: APP_BOOT_ID });
+    io.emit("app:boot", { bootId: APP_BOOT_ID, buildId: APP_BUILD_ID });
   }, 3_000);
 
   io.on("connection", (socket) => {
@@ -2441,7 +2452,20 @@ app.prepare().then(async () => {
         nextPacket();
       });
     }
-    socket.emit("app:boot", { bootId: APP_BOOT_ID });
+    socket.emit("app:boot", { bootId: APP_BOOT_ID, buildId: APP_BUILD_ID });
+    socket.on("app:prepare-reload", (payload: { buildId?: string }, ack?: (result: { ok: boolean }) => void) => {
+      const account = requireAccount(socket);
+      if (!account || payload?.buildId !== APP_BUILD_ID) { ack?.({ ok: false }); return; }
+      socket.data.reloadUntil = Date.now() + DEPLOY_RECONNECT_GRACE_MS;
+      const callId = callByUser.get(account.userId);
+      const call = callId ? callsById.get(callId) : undefined;
+      if (call?.status === "active") {
+        emitToUser(io, peerIdOfCall(call, account.userId), "call:reloading", { callId: call.callId });
+      }
+      // Presence and call IDs remain reserved; this is not call:end/voice:leave.
+      persistLiveMedia();
+      ack?.({ ok: true });
+    });
     // people list only after auth — see afterAuth / broadcastPeople
 
     socket.on(
@@ -2458,8 +2482,6 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: "Слишком много попыток, подождите" });
           return;
         }
-        // Unbind first so session rotation does not kick this socket.
-        unbindSocketAuth(socket.id);
         const result = registerUser(
           String(payload?.username || ""),
           String(payload?.password || ""),
@@ -2488,8 +2510,6 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: "Слишком много попыток, подождите" });
           return;
         }
-        // Unbind first so session rotation does not kick this socket.
-        unbindSocketAuth(socket.id);
         const result = loginUser(
           String(payload?.username || ""),
           String(payload?.password || ""),
@@ -2583,7 +2603,7 @@ app.prepare().then(async () => {
           displayName: payload?.displayName,
           bio: payload?.bio,
           avatarUrl,
-        });
+        }, account.token);
 
         if (!result.ok) {
           ack?.({ ok: false, error: result.error });
@@ -4283,12 +4303,14 @@ app.prepare().then(async () => {
           mode?: "audio" | "video";
           chatId?: string;
           reconnect?: boolean;
+          callId?: string;
         },
         ack?: (result: {
           ok: boolean;
           callId?: string;
           resume?: boolean;
           role?: "caller" | "callee";
+          peerPresent?: boolean;
           error?: string;
         }) => void,
       ) => {
@@ -4313,7 +4335,7 @@ app.prepare().then(async () => {
         }
         const onlineSockets = socketsForUser(toUserId);
         const canReachPush = hasPushSubscription(toUserId);
-        if (!onlineSockets.length && !canReachPush) {
+        if (!reconnect && !onlineSockets.length && !canReachPush) {
           ack?.({ ok: false, error: "Собеседник не в сети" });
           return;
         }
@@ -4333,16 +4355,8 @@ app.prepare().then(async () => {
           const canResume =
             reconnect &&
             existingPair.status === "active" &&
-            userIsConnected(toUserId) &&
+            (!payload.callId || payload.callId === existingPair.callId) &&
             callByUser.get(toUserId) === existingPair.callId;
-          if (
-            reconnect &&
-            existingPair.status === "active" &&
-            !userIsConnected(toUserId)
-          ) {
-            ack?.({ ok: false, error: "Собеседник не в сети" });
-            return;
-          }
           if (canResume) {
             cancelCallDisconnectTimer(account.userId);
             callByUser.set(account.userId, existingPair.callId);
@@ -4351,6 +4365,7 @@ app.prepare().then(async () => {
               callId: existingPair.callId,
               resume: true,
               role: existingPair.callerId === account.userId ? "caller" : "callee",
+              peerPresent: userIsConnected(toUserId),
             });
             emitToUser(io, toUserId, "call:renegotiate", {
               callId: existingPair.callId,
@@ -4361,7 +4376,12 @@ app.prepare().then(async () => {
             });
             return;
           }
-          clearCall(existingPair.callId);
+          if (!reconnect) clearCall(existingPair.callId);
+        }
+        if (reconnect) {
+          // A stale reload snapshot must never create a new ringing call.
+          ack?.({ ok: false, error: "Звонок уже завершён" });
+          return;
         }
         releaseBusyUserIfZombie(account.userId);
         releaseBusyUserIfZombie(toUserId);
@@ -5053,7 +5073,7 @@ app.prepare().then(async () => {
               voiceDisconnectTimers.delete(account.userId);
               if (voiceBySocket.get(socket.id) !== voiceChannelId) return;
               leaveVoiceChannel(io, socket, account.userId);
-            }, VOICE_RECONNECT_GRACE_MS),
+            }, Math.max(VOICE_RECONNECT_GRACE_MS, Number(socket.data.reloadUntil || 0) - Date.now())),
           );
         }
         const remaining = socketsForUser(account.userId).filter(
@@ -5084,7 +5104,7 @@ app.prepare().then(async () => {
                   type: ringing ? "end" : "peer-left",
                   data: { reason: "disconnect" },
                 });
-              }, CALL_RECONNECT_GRACE_MS),
+              }, Math.max(CALL_RECONNECT_GRACE_MS, Number(socket.data.reloadUntil || 0) - Date.now())),
             );
           }
         }

@@ -1,6 +1,6 @@
 {
   "name": "maiko-desktop",
-  "version": "1.1.13",
+  "version": "1.1.16",
   "private": true,
   "description": "Майко — приложение для Windows",
   "author": "Maiko",
@@ -21,9 +21,12 @@
     "test:built-icons": "node tests/built-icons.cjs",
     "test:window-animations": "node prepare-native.cjs && node tests/window-animations.cjs",
     "test:viewport": "node tests/viewport.cjs",
+    "test:resize": "node tests/window-resize.cjs",
+    "test:snap": "node tests/window-snap.cjs",
     "test:compact-members": "node tests/compact-members.cjs",
     "test:local": "node tests/local-start.cjs",
     "test:screen-audio": "node prepare-native.cjs && node tests/screen-audio.cjs",
+    "test:persistent-media": "node tests/persistent-media.cjs",
     "verify:release": "node verify-release.cjs",
     "test:updates-ui": "node tests/updates-ui.cjs",
     "test:downloads": "node tests/downloads.cjs"
@@ -84,13 +87,14 @@
     "publish": [
       {
         "provider": "generic",
-        "url": "https://maiko.galacticvps.qzz.io/desktop-updates/",
+        "url": "https://maiko.galacticvps.qzz.io/desktop-updates-s3/",
         "useMultipleRangeRequest": false
       }
     ]
   },
   "dependencies": {
-    "electron-updater": "6.8.10"
+    "electron-updater": "6.8.10",
+    "socket.io-client": "4.8.3"
   },
   "repository": {
     "type": "git",

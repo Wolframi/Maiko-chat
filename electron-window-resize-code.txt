@@ -1,0 +1,631 @@
+﻿Нативное изменение размеров окна Electron — Майко
+Основное окно: frame: false, thickFrame: true, resizable: true, transparent: false, roundedCorners: false.
+Windows управляет изменением размеров, разворачиванием и восстановлением. Ручные обработчики мыши, IPC ресайза и трекер удалены.
+События will-resize и resize подгоняют встроенную страницу под размер окна.
+Полные исходные файлы. Некоторые файлы также содержат код других функций приложения.
+
+================================================================================
+desktop/main.cjs
+================================================================================
+const { app, BrowserWindow, WebContentsView, Menu, ipcMain, shell, session, screen, utilityProcess } = require('electron');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const { normalizeUrl, isSameOrigin, readJson, findProjectRoot, visibleBounds } = require('./config.cjs');
+const { RADIUS, siteBounds, makeWindowRectangular } = require('./window-geometry.cjs');
+const { configureLocalAssets } = require('./local-assets.cjs');
+const { startLocalServer } = require('./local-server.cjs');
+const { configureCapture } = require('./screen-capture.cjs');
+const { createUpdates } = require('./updates.cjs');
+const { createDownloads } = require('./downloads.cjs');
+const { configureDownloadsPanel } = require('./downloads-panel.cjs');
+
+app.setName('Maiko');
+if (process.env.MAIKO_DESKTOP_USER_DATA) {
+  fs.mkdirSync(process.env.MAIKO_DESKTOP_USER_DATA, { recursive: true });
+  app.setPath('userData', process.env.MAIKO_DESKTOP_USER_DATA);
+}
+const testing = process.env.MAIKO_DESKTOP_TEST === '1';
+const defaults = readJson(path.join(__dirname, 'config.json'));
+let win, site, localServer, shuttingDown = false;
+let updates, downloads, downloadsPanel;
+let loadGeneration = 0;
+let layoutExpanded;
+let state = { phase: 'loading', message: 'Запускаем Майко…', url: '', mode: process.argv.includes('--local') ? 'local' : 'remote', maximized: false };
+const uiUrl = pathToFileURL(path.join(__dirname, 'ui', 'index.html')).href;
+const siteLayoutCSS = fs.readFileSync(path.join(__dirname, 'ui/site-layout.css'), 'utf8') + '\n' +
+  fs.readFileSync(path.join(__dirname, 'ui/site-window.css'), 'utf8');
+const compactMembersJS = fs.readFileSync(path.join(__dirname, 'ui/compact-members.js'), 'utf8');
+const downloadProgressJS = fs.readFileSync(path.join(__dirname, 'ui/download-progress.js'), 'utf8');
+const settingsPath = () => path.join(app.getPath('userData'), 'desktop-settings.json');
+function log(message) {
+  try { fs.appendFileSync(path.join(app.getPath('userData'), 'desktop.log'), `${new Date().toISOString()} ${message}\n`); } catch { /* logging is optional */ }
+}
+function publish(patch = {}) {
+  const next = { ...state, ...patch, maximized: !!win && !win.isDestroyed() && (win.isMaximized() || win.isFullScreen()) };
+  if (Object.keys(next).every((key) => next[key] === state[key])) return;
+  state = next;
+  if (win && !win.isDestroyed()) win.webContents.send('desktop:state-changed', state);
+  downloadsPanel?.publish(state.downloads);
+  if (patch.downloads && site && !site.webContents.isDestroyed() && trusted(site.webContents.getURL())) {
+    site.webContents.send('desktop:site-downloads-changed', downloads?.siteProgress() || []);
+  }
+}
+function layout() {
+  if (!win || win.isDestroyed()) return;
+  const expanded = win.isMaximized() || win.isFullScreen();
+  // Keep the native content rectangular in normal and expanded modes.
+  if (layoutExpanded !== expanded) {
+    win.contentView.setBorderRadius(expanded ? 0 : RADIUS);
+    layoutExpanded = expanded;
+  }
+  if (site) {
+    const [width, height] = win.getContentSize();
+    sizeSite(width, height, expanded);
+  }
+  publish();
+}
+function sizeSite(width, height, expanded) {
+  if (!site) return;
+  const next = siteBounds(width, height, expanded);
+  const current = site.getBounds();
+  if (Object.keys(next).some((key) => next[key] !== current[key])) site.setBounds(next);
+}
+function toggleMaximize() {
+  if (win.isFullScreen()) { win.setFullScreen(false); return; }
+  if (win.isMaximized()) win.unmaximize();
+  else win.maximize();
+}
+function trusted(url) { return state.url && isSameOrigin(url, state.url); }
+function requireShell(event) {
+  if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame || event.senderFrame.url !== uiUrl) {
+    throw new Error('Недоступно для этой страницы');
+  }
+}
+function requireSite(event) {
+  if (!site || event.sender !== site.webContents || event.senderFrame !== site.webContents.mainFrame || !trusted(event.senderFrame.url)) {
+    throw new Error('Недоступно для этой страницы');
+  }
+}
+async function openExternal(url) {
+  try {
+    const parsed = new URL(url);
+    if (['https:', 'http:', 'mailto:'].includes(parsed.protocol)) await shell.openExternal(parsed.href);
+  } catch (error) { log(error.message); }
+}
+function createSite() {
+  const view = new WebContentsView({ webPreferences: {
+    partition: 'persist:maiko-site', sandbox: true, contextIsolation: true,
+    preload: path.join(__dirname, 'site-preload.cjs'),
+    nodeIntegration: false, webSecurity: true, backgroundThrottling: false,
+  } });
+  view.setBackgroundColor('#0c0c0e');
+  view.setVisible(false);
+  win.contentView.addChildView(view);
+  const contents = view.webContents;
+  contents.setWindowOpenHandler(({ url }) => {
+    if (trusted(url) && new URL(url).pathname.startsWith('/uploads/') && new URL(url).searchParams.has('download')) contents.downloadURL(url);
+    else void openExternal(url);
+    return { action: 'deny' };
+  });
+  const guardNavigation = (event, url) => {
+    if (!trusted(url)) { event.preventDefault(); void openExternal(url); }
+  };
+  contents.on('will-navigate', guardNavigation);
+  contents.on('will-redirect', guardNavigation);
+  contents.on('will-attach-webview', (event) => event.preventDefault());
+  contents.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
+    if (isMainFrame && !inPlace) publish({ phase: 'loading', message: 'Подключаемся…' });
+  });
+  const showSite = () => {
+    if (!trusted(contents.getURL())) return;
+    publish({ phase: 'ready', message: state.mode === 'local' ? 'Локальный сервер' : 'Подключено' });
+    view.setVisible(true);
+    contents.focus();
+  };
+  contents.on('dom-ready', () => {
+    if (!trusted(contents.getURL())) return;
+    void Promise.all([
+      contents.insertCSS(siteLayoutCSS),
+      contents.executeJavaScriptInIsolatedWorld(1001, [{ code: compactMembersJS }, { code: downloadProgressJS }]),
+    ]).then(showSite).catch((error) => {
+      log(`Desktop layout helpers unavailable: ${error.message}`);
+      showSite();
+    });
+  });
+  contents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
+    if (!isMainFrame || code === -3) return;
+    view.setVisible(false);
+    publish({ phase: 'error', message: `Не удалось открыть Майко (${description}). Проверьте соединение и попробуйте снова.` });
+  });
+  contents.on('render-process-gone', (_event, details) => {
+    view.setVisible(false);
+    publish({ phase: 'error', message: 'Страница закрылась. Нажмите «Повторить».', detail: details.reason });
+  });
+  contents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    if (input.key === 'F5' || ((input.control || input.meta) && input.key.toLowerCase() === 'r')) {
+      event.preventDefault(); void connect(state.url);
+    }
+    if (input.key === 'F11') { event.preventDefault(); win.setFullScreen(!win.isFullScreen()); }
+    if (!app.isPackaged && input.key === 'F12') { event.preventDefault(); contents.toggleDevTools(); }
+  });
+  return view;
+}
+async function connect(url) {
+  const generation = ++loadGeneration;
+  site?.setVisible(false);
+  publish({ phase: 'loading', message: 'Запускаем Майко…' });
+  try {
+    log(`Connecting in ${state.mode} mode`);
+    let target = url;
+    if (state.mode === 'local') {
+      if (!localServer) {
+        const root = findProjectRoot(process.env.MAIKO_PROJECT_DIR || (app.isPackaged ? path.dirname(process.execPath) : __dirname));
+        const port = Number(process.env.MAIKO_LOCAL_PORT || defaults.localPort || 3000);
+        if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('localPort должен быть числом от 1024 до 65535.');
+        localServer = await startLocalServer({ root, port, utilityProcess, onLog: log, dev: process.argv.includes('--dev') });
+      }
+      target = localServer.url;
+    }
+    target = normalizeUrl(target);
+    if (generation !== loadGeneration || !win || win.isDestroyed()) return;
+    publish({ url: target });
+    if (!site) { site = createSite(); layout(); }
+    await site.webContents.loadURL(target);
+  } catch (error) {
+    if (generation !== loadGeneration) return;
+    site?.setVisible(false);
+    log(error.stack || error.message);
+    publish({ phase: 'error', message: error.message });
+  }
+}
+function saveWindow() {
+  if (!win || win.isDestroyed()) return;
+  fs.writeFileSync(settingsPath(), JSON.stringify({ bounds: win.getNormalBounds(), maximized: win.isMaximized() }, null, 2));
+}
+function createWindow() {
+  const saved = readJson(settingsPath());
+  win = new BrowserWindow({
+    ...visibleBounds(saved.bounds, screen.getAllDisplays()),
+    minWidth: 800, minHeight: 600, frame: false, roundedCorners: false,
+    // Windows owns edge hit testing and the native sizing loop.
+    transparent: false, thickFrame: true, resizable: true, backgroundColor: '#0c0c0e', title: 'Майко',
+    // PNG works reliably through NativeImage, including inside app.asar.
+    // The builder uses the multi-size ICO for the executable and shortcuts.
+    icon: path.join(__dirname, 'assets', 'icon.png'), show: false, autoHideMenuBar: true,
+    webPreferences: { preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false },
+  });
+  win.setMenu(null);
+  // Cover newly exposed pixels while Chromium draws its next frame.
+  // The shell and site's native surfaces use the same dark background.
+  win.contentView.setBackgroundColor('#0c0c0e');
+  // The shell's native view needs its own dark fallback while its renderer
+  // catches up during resizing.
+  const shellView = win.contentView.children.find((view) => view.webContents === win.webContents);
+  shellView?.setBackgroundColor('#0c0c0e');
+  layoutExpanded = undefined;
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (event, url) => { if (url !== uiUrl) event.preventDefault(); });
+  win.on('will-resize', (_event, bounds) => {
+    // Lay out the embedded site before Windows presents a larger client area.
+    // The system still owns the window's bounds and the entire sizing gesture.
+    const [width, height] = win.getSize();
+    const [contentWidth, contentHeight] = win.getContentSize();
+    sizeSite(bounds.width - (width - contentWidth), bounds.height - (height - contentHeight), win.isMaximized() || win.isFullScreen());
+  });
+  win.on('resize', layout);
+  win.on('resize', () => downloadsPanel?.hide());
+  win.on('blur', () => downloadsPanel?.hide());
+  for (const event of ['maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen']) win.on(event, layout);
+  win.on('close', () => { saveWindow(); });
+  win.on('closed', () => {
+    loadGeneration++;
+    downloadsPanel?.dispose();
+    if (site && !site.webContents.isDestroyed()) site.webContents.close();
+    site = undefined; win = undefined;
+  });
+  win.once('ready-to-show', () => {
+    if (saved.maximized) toggleMaximize();
+    layout();
+    if (!testing) win.show();
+  });
+  const createdWindow = win;
+  makeWindowRectangular(createdWindow);
+  void createdWindow.loadURL(uiUrl).then(() => {
+    if (createdWindow.isDestroyed()) return;
+    publish();
+    return connect((testing || !app.isPackaged ? process.env.MAIKO_DESKTOP_URL : undefined) || defaults.url);
+  }).catch((error) => { if (win && !win.isDestroyed()) log(error.stack || error.message); });
+}
+
+if (!app.requestSingleInstanceLock()) { app.quit(); }
+else {
+  app.on('second-instance', () => {
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.show(); win.focus();
+  });
+  app.whenReady().then(() => {
+    app.setAppUserModelId('io.maiko.desktop');
+    Menu.setApplicationMenu(null);
+    const siteSession = session.fromPartition('persist:maiko-site');
+    configureLocalAssets({ siteSession, trusted, log });
+    const allowed = new Set(['media', 'notifications', 'display-capture', 'fullscreen', 'clipboard-sanitized-write']);
+    siteSession.setPermissionCheckHandler((contents, permission, origin) =>
+      !!site && contents === site.webContents && trusted(origin) && allowed.has(permission));
+    siteSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+      callback(!!site && contents === site.webContents && trusted(details.requestingUrl || contents.getURL()) && allowed.has(permission));
+    });
+    configureCapture({ siteSession, getWindow: () => win, getSite: () => site, trusted, testing, log });
+    downloads = createDownloads({
+      directory: path.join(testing && process.env.MAIKO_DESKTOP_DOWNLOADS_DIR || app.getPath('downloads'), 'Maiko'),
+      historyPath: path.join(app.getPath('userData'), 'downloads.json'),
+      siteSession, getSite: () => site, trusted, publish, shell, log,
+    });
+    downloadsPanel = configureDownloadsPanel({ ipcMain, getWindow: () => win, requireShell, downloads, log });
+    ipcMain.handle('desktop:site-downloads-state', (event) => { requireSite(event); return downloads.siteProgress(); });
+    ipcMain.handle('desktop:site-downloads-cancel', (event, id) => { requireSite(event); return downloads.action('cancel', id); });
+    ipcMain.handle('desktop:downloads', (event, command, id) => {
+      requireShell(event);
+      return downloads.action(command, id);
+    });
+    updates = createUpdates({ app, publish, log, testing, notificationUrl: defaults.url, prepareInstall: async () => {
+      saveWindow();
+      siteSession.flushStorageData();
+      await siteSession.cookies.flushStore();
+      // Stop an owned server before NSIS starts waiting for our processes.
+      if (localServer?.owned) {
+        await localServer.stop();
+        localServer = undefined;
+      }
+    } });
+    ipcMain.handle('desktop:update', (event, action) => { requireShell(event); return updates.action(action); });
+    ipcMain.handle('desktop:state', (event) => { requireShell(event); return state; });
+    ipcMain.handle('desktop:control', (event, action) => {
+      requireShell(event);
+      if (action === 'minimize') win.minimize();
+      else if (action === 'maximize') {
+        toggleMaximize();
+      }
+      else if (action === 'close') win.close();
+      else if (action === 'reload') void connect(state.url);
+      else if (action === 'logs') void shell.openPath(path.join(app.getPath('userData'), 'desktop.log'));
+      else throw new Error('Неизвестная команда окна');
+    });
+    createWindow();
+    updates.start();
+    app.once('will-quit', () => { updates.dispose(); downloads.dispose(); });
+    app.on('activate', () => { if (!win) createWindow(); });
+  }).catch((error) => { log(error.stack); app.quit(); });
+  app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+  app.on('before-quit', (event) => {
+    if (shuttingDown || !localServer?.owned) return;
+    event.preventDefault(); shuttingDown = true;
+    void localServer.stop().finally(() => app.quit());
+  });
+}
+
+
+================================================================================
+desktop/window-geometry.cjs
+================================================================================
+const INSET = 10;
+const TITLEBAR = 42;
+const RADIUS = 0;
+
+function siteBounds(width, height, expanded) {
+  const inset = expanded ? 0 : INSET;
+  return { x: inset, y: TITLEBAR, width: Math.max(1, width - inset * 2), height: Math.max(1, height - TITLEBAR - inset) };
+}
+
+function makeWindowRectangular(window) {
+  // Native resizable windows need their system hit-test region outside the
+  // client area. Only fixed-size dialogs need an explicit rectangular region.
+  if (process.platform !== 'win32' || window.isResizable()) return;
+  let previousWidth, previousHeight;
+  const sync = () => {
+    if (window.isDestroyed()) return;
+    const [width, height] = window.getSize();
+    if (width === previousWidth && height === previousHeight) return;
+    previousWidth = width; previousHeight = height;
+    // Windows 10 can clip the top corners of a caption-style window even
+    // when roundedCorners is false. An explicit region fills the whole frame.
+    window.setShape([{ x: 0, y: 0, width, height }]);
+  };
+  window.on('resize', sync);
+  sync();
+}
+
+module.exports = { RADIUS, siteBounds, makeWindowRectangular };
+
+
+================================================================================
+desktop/ui/shell.js
+================================================================================
+const api = window.maikoDesktop;
+const element = (id) => document.getElementById(id);
+
+function render(state) {
+  document.body.dataset.phase = state.phase;
+  document.body.classList.toggle('maximized', state.maximized);
+  element('status').textContent = state.phase === 'ready' ? 'Подключено' : state.phase === 'error' ? 'Нет подключения' : 'Подключаемся…';
+  element('message').textContent = state.message;
+  element('heading').textContent = state.phase === 'error' ? 'Не удалось подключиться' : 'Почти на месте';
+  element('loader').hidden = state.phase !== 'loading';
+  element('error-actions').hidden = state.phase !== 'error';
+  element('connection-screen').hidden = state.phase === 'ready';
+  element('maximize').title = state.maximized ? 'Восстановить' : 'Развернуть';
+  element('maximize').setAttribute('aria-label', element('maximize').title);
+  const files = state.downloads?.entries || [];
+  const pending = files.filter((file) => file.phase === 'downloading');
+  element('downloads-count').hidden = pending.length === 0;
+  element('downloads-count').textContent = pending.length;
+  element('downloads-action').title = pending.length ? `Открыть папку загрузок. Скачиваем: ${pending.length}` : 'Открыть папку загрузок';
+  element('downloads-status').textContent = files[0] ? `${files[0].name}: ${files[0].message}` : '';
+  const update = state.update;
+  if (update) {
+    element('app-version').textContent = `v${update.currentVersion}`;
+    element('app-version').title = `Версия приложения ${update.currentVersion}`;
+    element('update-status').textContent = update.message;
+    element('update-dock').dataset.phase = update.phase;
+    element('update-dock').title = update.message;
+    const busy = ['checking', 'downloading', 'downloaded', 'installing'].includes(update.phase);
+    const command = update.phase === 'error' && update.retryAction === 'apply' ? 'apply' :
+      update.phase === 'available' || (update.phase === 'error' && update.retryAction === 'download') ? 'download' : 'check';
+    element('update-action').dataset.command = command;
+    element('update-action').disabled = busy || update.phase === 'disabled';
+    const label = busy ? update.phase === 'checking' ? 'Проверка…' : ['downloaded', 'installing'].includes(update.phase) ? 'Установка…' : `${update.progress}%` :
+      update.phase === 'error' ? 'Повторить' : command === 'download' ? 'Обновить' : update.phase === 'current' ? 'Обновлено' : 'Проверить';
+    const description = command === 'apply' ? 'Повторить установку обновления' :
+      command === 'download' ? `Обновить до версии ${update.version} с автоматическим перезапуском` : 'Проверить обновления';
+    element('update-label').textContent = label;
+    element('update-action').setAttribute('aria-label', busy ? update.message : description);
+    element('update-action').title = update.phase === 'disabled' ? update.message : `${description}. ${update.message}`;
+    element('update-progress').hidden = update.phase !== 'downloading';
+    element('update-progress').value = update.progress;
+  }
+}
+for (const button of document.querySelectorAll('[data-action]')) {
+  button.addEventListener('click', () => {
+    void api.control(button.dataset.action);
+  });
+}
+element('titlebar').addEventListener('dblclick', (event) => {
+  if (!event.target.closest('button')) void api.control('maximize');
+});
+element('update-action').addEventListener('click', async () => {
+  try { await api.update(element('update-action').dataset.command || 'check'); }
+  catch (error) {
+    element('update-status').textContent = error.message;
+    element('update-dock').title = error.message;
+  }
+});
+api.onState(render);
+void api.state().then(render);
+element('downloads-action').addEventListener('click', async () => {
+  try { await api.downloadsPanel(false); await api.downloads('folder'); }
+  catch (error) {
+    element('downloads-status').textContent = error.message;
+    element('downloads-action').title = error.message;
+  }
+});
+const downloadsButton = element('downloads-action');
+function showDownloadsPanel() {
+  const { x, width } = downloadsButton.getBoundingClientRect();
+  void api.downloadsPanel(true, { x, width });
+}
+downloadsButton.addEventListener('pointerenter', showDownloadsPanel);
+downloadsButton.addEventListener('pointerleave', () => void api.downloadsPanel(false));
+downloadsButton.addEventListener('focus', showDownloadsPanel);
+downloadsButton.addEventListener('blur', () => void api.downloadsPanel(false));
+api.onDownloadsPanel((open) => downloadsButton.setAttribute('aria-expanded', String(open)));
+
+
+================================================================================
+desktop/ui/shell.css
+================================================================================
+:root { color-scheme: dark; font-family: "Segoe UI", sans-serif; --bg: #0c0c0e; --line: #ffffff12; --muted: #85858e; --accent: #6784b7; }
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; background: transparent; color: #ececee; overflow: hidden; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+button:focus-visible, input:focus-visible { outline: 2px solid #809acd; outline-offset: 3px; }
+[hidden] { display: none !important; }
+.desktop-frame { position: relative; height: 100%; overflow: hidden; border: 1px solid #ffffff20; border-radius: 0; background: var(--bg); }
+body.maximized .desktop-frame { border-radius: 0; border-color: transparent; }
+.titlebar { height: 41px; display: flex; align-items: center; gap: 18px; padding-left: 15px; user-select: none; app-region: drag; -webkit-app-region: drag; background: #111113; border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 12px; letter-spacing: .25px; }
+.brand img { border-radius: 6px; }
+.connection { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; flex: 1; }
+.status-dot { width: 5px; height: 5px; border-radius: 50%; background: #8e8e96; }
+body[data-phase="ready"] .status-dot { background: #81aa95; }
+body[data-phase="error"] .status-dot { background: #c96b6b; }
+.window-actions { display: flex; margin-left: auto; height: 100%; app-region: no-drag; -webkit-app-region: no-drag; }
+.window-actions button { width: 44px; height: 100%; display: grid; place-items: center; color: #b9b9c0; background: transparent; border: 0; transition: background .15s, color .15s; }
+.window-actions button:hover { background: #ffffff0c; color: white; }
+.window-actions .close-button:hover { background: #ba4d57; color: white; }
+svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.connection-screen { height: calc(100% - 41px); display: grid; place-items: safe center; padding: 40px; overflow-y: auto; overscroll-behavior-y: contain; background: radial-gradient(ellipse at 50% 35%, #19233355, transparent 60%); }
+.connection-card { width: min(100%, 420px); text-align: center; }
+.app-icon { border-radius: 22px; margin-bottom: 30px; box-shadow: 0 12px 45px #0005; }
+.eyebrow { font-size: 10px; letter-spacing: 2px; color: #8798b6; margin-bottom: 12px; }
+h1 { font-size: 30px; font-weight: 600; letter-spacing: -.8px; margin: 0 0 14px; }
+.description { color: #96969f; font-size: 14px; line-height: 1.65; margin: 0 0 24px; overflow-wrap: anywhere; }
+.loader { width: 22px; height: 22px; border: 2px solid #ffffff14; border-top-color: #809acd; border-radius: 50%; margin: 30px auto; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.primary, .secondary { border-radius: 10px; padding: 11px 20px; border: 1px solid var(--line); font-size: 13px; color: #ececee; }
+.primary { background: #4c6da9; border-color: transparent; }
+.primary:hover { background: #5c7db9; }
+.secondary { background: #ffffff06; }
+.secondary:hover { background: #ffffff0d; }
+.text-button { display: block; margin: 16px auto 0; color: var(--muted); background: transparent; border: 0; font-size: 12px; }
+.text-button:hover { color: #ececee; }
+label { display: block; text-align: left; font-size: 12px; color: #b0b0b9; margin-bottom: 9px; }
+.hint { color: #62626b; font-size: 11px; margin-top: 24px; }
+@media (prefers-reduced-motion: reduce) { .loader { animation: none; } }
+/* Screen/window chooser */
+.capture-frame { height: 100%; border: 1px solid #ffffff20; border-radius: 0; display: flex; flex-direction: column; background: #141416; overflow: hidden; }
+.capture-header { flex-shrink: 0; padding: 24px 28px 10px; app-region: drag; -webkit-app-region: drag; }
+.capture-header h1 { font-size: 22px; margin-bottom: 7px; }
+.capture-header p { font-size: 13px; color: var(--muted); margin: 0; }
+.sources { flex: 1; min-height: 0; overflow: auto; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-content: start; gap: 12px; padding: 18px 28px; }
+.source { text-align: left; padding: 5px; border: 2px solid transparent; border-radius: 10px; color: #b5b5bd; background: #ffffff05; }
+.source:hover { background: #ffffff0d; }
+.source[aria-pressed="true"] { border-color: #6784b7; background: #6784b718; color: white; }
+.source img { display: block; width: 100%; height: 102px; object-fit: contain; background: #080809; border-radius: 5px; }
+.source span { display: block; padding: 9px 5px; font-size: 11px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.capture-footer { flex-shrink: 0; padding: 16px 28px 22px; border-top: 1px solid var(--line); }
+.capture-footer label { display: flex; gap: 9px; align-items: center; margin: 0; }
+.capture-footer input { accent-color: #6784b7; }
+.capture-footer .hint { text-align: left; margin: 8px 0 0; }
+button:disabled { opacity: .4; cursor: default; }
+.update-dock { position: relative; display: flex; align-items: center; gap: 9px; margin: 6px 12px 6px 0; padding-left: 12px; border-left: 1px solid var(--line); }
+.app-version { color: #7f8490; font-size: 10px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.window-actions .update-button { display: flex; justify-content: center; gap: 7px; width: auto; min-width: 95px; height: 29px; padding: 0 10px; border-radius: 7px; font-size: 11px; white-space: nowrap; }
+.update-dock[data-phase="available"] .update-button, .update-dock[data-phase="downloaded"] .update-button { color: #c1d3f1; background: #6784b72b; }
+.update-dock[data-phase="available"] .update-button:hover, .update-dock[data-phase="downloaded"] .update-button:hover { background: #6784b748; }
+.update-dock[data-phase="error"] .update-button { color: #e3ab8f; }
+.update-dock[data-phase="current"] .update-button { color: #9fb9aa; }
+.update-dock[data-phase="checking"] .update-wheel, .update-dock[data-phase="downloading"] .update-wheel, .update-dock[data-phase="installing"] .update-wheel { animation: spin 1.2s linear infinite; }
+.update-dock[data-phase="checking"] .update-button, .update-dock[data-phase="downloading"] .update-button, .update-dock[data-phase="installing"] .update-button { opacity: 1; color: #a9bde0; }
+.update-dock progress { position: absolute; right: 8px; bottom: 0; width: 80px; height: 2px; border: 0; appearance: none; }
+.update-dock progress::-webkit-progress-bar { background: #ffffff0d; border-radius: 2px; }
+.update-dock progress::-webkit-progress-value { background: #a9bde0; border-radius: 2px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.downloads-dock { display: flex; align-items: center; gap: 2px; margin-right: 8px; }
+.window-actions #downloads-action { position: relative; width: 38px; }
+#downloads-count { position: absolute; right: 1px; top: 5px; min-width: 13px; height: 13px; padding: 0 3px; border-radius: 8px; background: #6784b7; color: white; font-size: 9px; line-height: 13px; }
+@media (prefers-reduced-motion: reduce) { .update-dock[data-phase] .update-wheel { animation: none; } }
+
+
+================================================================================
+desktop/preload.cjs
+================================================================================
+const { contextBridge, ipcRenderer } = require('electron');
+
+// Only local shell/picker pages have this preload. The site has no Node bridge.
+contextBridge.exposeInMainWorld('maikoDesktop', Object.freeze({
+  state: () => ipcRenderer.invoke('desktop:state'),
+  control: (action) => ipcRenderer.invoke('desktop:control', action),
+  update: (action) => ipcRenderer.invoke('desktop:update', action),
+  downloads: (command, id) => ipcRenderer.invoke('desktop:downloads', command, id),
+  downloadsPanel: (open, anchor) => ipcRenderer.invoke('desktop:downloads-panel', open, anchor),
+  onDownloadsPanel: (callback) => {
+    const handler = (_event, open) => callback(open);
+    ipcRenderer.on('desktop:downloads-panel-visible', handler);
+    return () => ipcRenderer.removeListener('desktop:downloads-panel-visible', handler);
+  },
+  captureSources: () => ipcRenderer.invoke('desktop:capture-sources'),
+  captureSelect: (choice) => ipcRenderer.invoke('desktop:capture-select', choice),
+  onState: (callback) => {
+    const handler = (_event, state) => callback(state);
+    ipcRenderer.on('desktop:state-changed', handler);
+    return () => ipcRenderer.removeListener('desktop:state-changed', handler);
+  },
+}));
+
+
+================================================================================
+desktop/screen-capture.cjs
+================================================================================
+const { BrowserWindow, desktopCapturer, ipcMain } = require('electron');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const { RADIUS, makeWindowRectangular } = require('./window-geometry.cjs');
+const { windowProcesses, audioPolicy } = require('./capture-audio.cjs');
+
+function configureCapture({ siteSession, getWindow, getSite, trusted, testing, log }) {
+  let pending;
+  let choosing = false, completedAudioPolicy;
+  const pickerUrl = pathToFileURL(path.join(__dirname, 'ui', 'capture.html')).href;
+  function requirePicker(event) {
+    if (!pending || event.sender !== pending.window.webContents || event.senderFrame !== event.sender.mainFrame || event.senderFrame.url !== pickerUrl) {
+      throw new Error('Нет активного выбора экрана');
+    }
+  }
+  ipcMain.handle('desktop:capture-sources', (event) => {
+    requirePicker(event);
+    return { sources: pending.sources.map((source) => ({
+      id: source.id, name: source.name, thumbnail: source.thumbnail.toDataURL(),
+      audioKind: pending.audioRequested ? pending.policies.get(source.id)?.kind || null : null,
+    })), audioAvailable: pending.audioRequested };
+  });
+  ipcMain.handle('desktop:capture-select', async (event, choice) => {
+    requirePicker(event);
+    const selection = pending;
+    if (selection.selecting && choice !== null) return;
+    const source = pending.sources.find((entry) => entry.id === choice?.id);
+    if (choice !== null && !source) throw new Error('Источник больше не доступен');
+    if (!source) { pending.finish(null); return; }
+    selection.selecting = true;
+    // Refresh the owning process at selection time: a window may have closed
+    // or its HWND may have been reused while the chooser was open.
+    let policy = null;
+    if (choice.audio === true && pending.audioRequested) {
+      try { policy = audioPolicy(source, await windowProcesses([source])); }
+      catch (error) { log(`Screen audio unavailable: ${error.message}`); }
+    }
+    if (pending !== selection) return;
+    completedAudioPolicy = policy ? { isolated: true, kind: policy.kind } : null;
+    pending.finish({ video: source, ...(policy ? { audio: policy.device } : {}) });
+  });
+  ipcMain.handle('desktop:capture-audio-policy', (event) => {
+    if (event.sender !== getSite()?.webContents || event.senderFrame !== event.sender.mainFrame || !trusted(event.senderFrame.url)) {
+      throw new Error('Недоступно для этой страницы');
+    }
+    const policy = completedAudioPolicy;
+    completedAudioPolicy = undefined;
+    return policy || null;
+  });
+  siteSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    if (choosing || !request.frame || request.frame !== getSite()?.webContents.mainFrame || !trusted(request.securityOrigin)) {
+      callback(null); return;
+    }
+    choosing = true;
+    completedAudioPolicy = undefined;
+    try {
+      const sources = await desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: { width: 320, height: 180 }, fetchWindowIcons: false });
+      if (!sources.length || !request.frame || request.frame !== getSite()?.webContents.mainFrame) { choosing = false; callback(null); return; }
+      let owners = {};
+      if (request.audioRequested) {
+        try { owners = await windowProcesses(sources); }
+        catch (error) { log(`Window audio lookup: ${error.message}`); }
+      }
+      const policies = new Map(sources.map((source) => [source.id, audioPolicy(source, owners)]));
+      const picker = new BrowserWindow({
+        parent: getWindow(), modal: true, width: 780, height: 600,
+        frame: false, roundedCorners: false, transparent: false, thickFrame: false, backgroundColor: '#141416',
+        resizable: false, minimizable: false, maximizable: false, show: false,
+        title: 'Демонстрация экрана — Майко',
+        webPreferences: { preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false },
+      });
+      makeWindowRectangular(picker);
+      let finished = false;
+      const finish = (streams) => {
+        if (finished) return;
+        finished = true;
+        choosing = false;
+        pending = undefined;
+        if (!streams) completedAudioPolicy = undefined;
+        if (!picker.isDestroyed()) picker.close();
+        try { callback(request.frame && !getSite()?.webContents.isDestroyed() ? streams : null); }
+        catch (error) { log(error.message); }
+      };
+      pending = { window: picker, sources, policies, finish, audioRequested: request.audioRequested && process.platform === 'win32' };
+      picker.on('closed', () => finish(null));
+      picker.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+      picker.webContents.on('will-navigate', (event, url) => { if (url !== pickerUrl) event.preventDefault(); });
+      picker.contentView.setBackgroundColor('#141416');
+      picker.contentView.setBorderRadius(RADIUS);
+      picker.once('ready-to-show', () => { if (!testing) picker.show(); });
+      await picker.loadURL(pickerUrl);
+    } catch (error) {
+      log(error.message);
+      choosing = false;
+      if (pending) pending.finish(null); else callback(null);
+    }
+  });
+}
+
+module.exports = { configureCapture };

@@ -1,12 +1,22 @@
-const CHECK_INTERVAL = 6 * 60 * 60 * 1000;
+const CHECK_INTERVAL = 30 * 60 * 1000;
+function newerVersion(value, current) {
+  if (typeof value !== 'string' || !/^\d+\.\d+\.\d+$/.test(value)) return false;
+  const next = value.split('.').map(Number), previous = current.split('.').map(Number);
+  const different = next.findIndex((number, index) => number !== previous[index]);
+  return different >= 0 && next[different] > previous[different];
+}
 
 // The local shell owns update commands; the remote site never gets this API.
 function createUpdates({ app, publish, log, prepareInstall = async () => {}, testing = false,
+  notificationUrl,
+  getUpdateSocket = (url) => require('socket.io-client').io(new URL('/desktop-updates', url).href,
+    { path: '/api/socket', transports: ['websocket'], reconnection: true }),
   platform = process.platform, portable = !!(process.env.PORTABLE_EXECUTABLE_DIR || process.env.PORTABLE_EXECUTABLE_FILE),
   getUpdater = () => require('electron-updater').autoUpdater }) {
   let state = { phase: 'idle', currentVersion: app.getVersion(), version: '', progress: 0,
     message: 'Проверяем новые версии автоматически.' };
-  let busy = false, downloadedVersion = '', installStarted = false, startupTimer, interval;
+  let busy = false, downloadedVersion = '', installStarted = false, interval, socket;
+  let started = false, disposed = false, pendingPushCheck = false;
   const send = (patch) => { state = { ...state, ...patch }; publish({ update: { ...state } }); };
   if (!app.isPackaged || testing || platform !== 'win32' || portable) {
     send({ phase: 'disabled', message: portable
@@ -19,6 +29,7 @@ function createUpdates({ app, publish, log, prepareInstall = async () => {}, tes
   updater.autoInstallOnAppQuit = true;
   updater.autoRunAppAfterInstall = false;
   updater.disableWebInstaller = true;
+  updater.disableDifferentialDownload = false;
   updater.allowPrerelease = false;
   updater.allowDowngrade = false;
   updater.logger = { info: log, warn: log, error: log, debug: () => {} };
@@ -45,7 +56,7 @@ function createUpdates({ app, publish, log, prepareInstall = async () => {}, tes
 
   async function action(command) {
     if (!['check', 'download', 'apply'].includes(command)) throw new Error('Неизвестная команда обновления');
-    if (busy || installStarted) return;
+    if (disposed || busy || installStarted) return;
     if (command === 'check' && downloadedVersion) return;
     if (command === 'download' && !(state.phase === 'available' || (state.phase === 'error' && state.retryAction === 'download'))) {
       throw new Error('Сначала проверьте наличие обновления.');
@@ -64,7 +75,13 @@ function createUpdates({ app, publish, log, prepareInstall = async () => {}, tes
     } catch (error) {
       // electron-updater can both emit and reject the same failure.
       if (state.phase !== 'error') handlers.error(error);
-    } finally { busy = false; }
+    } finally {
+      busy = false;
+      if (pendingPushCheck && !disposed && !downloadedVersion && !installStarted) {
+        pendingPushCheck = false;
+        void action('check');
+      }
+    }
   }
   async function installDownloaded() {
     send({ phase: 'installing', retryAction: '', message: `Устанавливаем версию ${downloadedVersion}. Майко откроется автоматически после установки.` });
@@ -77,15 +94,30 @@ function createUpdates({ app, publish, log, prepareInstall = async () => {}, tes
   return {
     action,
     start() {
-      if (startupTimer || interval) return;
-      startupTimer = setTimeout(() => { void action('check'); }, 20_000);
+      if (started || disposed) return;
+      started = true;
+      void action('check');
       interval = setInterval(() => { void action('check'); }, CHECK_INTERVAL);
-      startupTimer.unref?.(); interval.unref?.();
+      interval.unref?.();
+      if (notificationUrl) {
+        try {
+          socket = getUpdateSocket(notificationUrl);
+          socket.on('desktop:update-available', (notice) => {
+            if (!newerVersion(notice?.version, app.getVersion()) || notice.version === state.version || downloadedVersion || installStarted) return;
+            // The push is only a hint. Validate the release through the pinned
+            // electron-updater feed, never a URL supplied by a socket message.
+            if (busy) pendingPushCheck = true;
+            else void action('check');
+          });
+        } catch (error) { log(`Update notifications unavailable: ${error.message}`); }
+      }
     },
     dispose() {
-      clearTimeout(startupTimer); clearInterval(interval);
+      disposed = true;
+      clearInterval(interval);
+      socket?.removeAllListeners(); socket?.disconnect();
       for (const [event, handler] of Object.entries(handlers)) updater.removeListener(event, handler);
     },
   };
 }
-module.exports = { createUpdates };
+module.exports = { createUpdates, CHECK_INTERVAL };

@@ -1,8 +1,15 @@
 /* Desktop has no mobile keyboard reducing visualViewport. Use viewport units
    during the layout pass itself, rather than the site's later resize effect. */
 :root {
+  color-scheme: dark;
   --app-height: 100dvh !important;
   --vv-top: 0px !important;
+}
+
+/* Keep the document canvas and the persistent media host's child surface
+   opaque while Chromium repaints newly exposed pixels during resizing. */
+html, body, iframe[data-maiko-desktop-ui] {
+  background-color: var(--bg, #0c0c0e);
 }
 
 /* The desktop titlebar owns the connection label. The idle heading and brief

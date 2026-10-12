@@ -23,8 +23,6 @@ export type StoredUser = {
   username: string;
   passwordHash: string;
   createdAt: number;
-  token?: string;
-  tokenIssuedAt?: number;
   displayName?: string;
   avatarUrl?: string;
   bio?: string;
@@ -57,8 +55,13 @@ const DATA_DIR = path.join(process.cwd(), "data");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json");
 
+type StoredSession = {
+  userId: string;
+  issuedAt: number;
+};
+
 const usersByName = new Map<string, StoredUser>();
-const sessionsByToken = new Map<string, AuthAccount>();
+const sessionsByToken = new Map<string, StoredSession>();
 const socketTokens = new Map<string, string>();
 
 function displayOf(user: StoredUser) {
@@ -144,13 +147,9 @@ function saveUsers() {
 
 function saveSessions() {
   const rows: { token: string; userId: string; issuedAt: number }[] = [];
-  for (const user of usersByName.values()) {
-    if (!user.token) continue;
-    rows.push({
-      token: user.token,
-      userId: user.id,
-      issuedAt: user.tokenIssuedAt || Date.now(),
-    });
+  for (const [token, session] of sessionsByToken) {
+    if (isSessionExpired(session.issuedAt)) continue;
+    rows.push({ token, ...session });
   }
   atomicWriteJson(SESSIONS_FILE, rows);
 }
@@ -163,9 +162,10 @@ function persistAuth() {
 function loadUsers() {
   if (!existsSync(USERS_FILE)) return false;
   let hadLegacyTokens = false;
-  let raw: StoredUser[];
+  type LegacyUser = StoredUser & { token?: string; tokenIssuedAt?: number };
+  let raw: LegacyUser[];
   try {
-    raw = JSON.parse(readFileSync(USERS_FILE, "utf8")) as StoredUser[];
+    raw = JSON.parse(readFileSync(USERS_FILE, "utf8")) as LegacyUser[];
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(
@@ -180,9 +180,14 @@ function loadUsers() {
   for (const user of raw) {
     if (user.token) hadLegacyTokens = true;
     usersByName.set(user.username.toLowerCase(), user);
-    if (user.token) {
-      sessionsByToken.set(user.token, toAccount(user, user.token));
+    if (user.token && !isSessionExpired(user.tokenIssuedAt)) {
+      sessionsByToken.set(user.token, {
+        userId: user.id,
+        issuedAt: user.tokenIssuedAt || Date.now(),
+      });
     }
+    delete user.token;
+    delete user.tokenIssuedAt;
   }
   return hadLegacyTokens;
 }
@@ -202,9 +207,10 @@ function loadSessions() {
       const user = findUserById(userId);
       if (!user) continue;
       if (isSessionExpired(row.issuedAt)) continue;
-      user.token = token;
-      user.tokenIssuedAt = row.issuedAt || Date.now();
-      sessionsByToken.set(token, toAccount(user, token));
+      sessionsByToken.set(token, {
+        userId: user.id,
+        issuedAt: row.issuedAt || Date.now(),
+      });
     }
   } catch {
     /* ignore */
@@ -289,28 +295,18 @@ export function socketIdsForToken(token: string) {
   return ids;
 }
 
-function clearSession(user: StoredUser) {
-  if (user.token) {
-    const revokedToken = user.token;
-    sessionsByToken.delete(user.token);
-    sessionRevokeHandler?.({
-      userId: user.id,
-      revokedToken,
-    });
-  }
-  user.token = undefined;
-  user.tokenIssuedAt = undefined;
+function clearSession(token: string) {
+  const session = sessionsByToken.get(token);
+  if (!session) return;
+  sessionsByToken.delete(token);
+  sessionRevokeHandler?.({ userId: session.userId, revokedToken: token });
 }
 
 function issueSession(user: StoredUser): AuthAccount {
-  clearSession(user);
-
   const token = randomUUID();
   const account = toAccount(user, token);
-  user.token = token;
-  user.tokenIssuedAt = Date.now();
   usersByName.set(user.username.toLowerCase(), user);
-  sessionsByToken.set(token, account);
+  sessionsByToken.set(token, { userId: user.id, issuedAt: Date.now() });
   persistAuth();
   return account;
 }
@@ -323,12 +319,6 @@ function validatePassword(password: string) {
     return `Пароль не длиннее ${MAX_PASSWORD} символов`;
   }
   return null;
-}
-
-function refreshSessionsForUser(user: StoredUser) {
-  if (!user.token) return;
-  const account = toAccount(user, user.token);
-  sessionsByToken.set(user.token, account);
 }
 
 /** Fixed dummy hash so missing-user logins still spend scrypt time. */
@@ -456,42 +446,15 @@ export function loginUser(usernameRaw: string, passwordRaw: string): AuthResult 
 export function restoreSession(token?: string): AuthResult {
   if (!token) return { ok: false, error: "Нет сессии" };
 
-  const live = sessionsByToken.get(token);
-  if (live) {
-    const user = findUserById(live.userId);
-    if (user && user.token === token) {
-      if (isSessionExpired(user.tokenIssuedAt)) {
-        clearSession(user);
-        persistAuth();
-        return { ok: false, error: "Сессия устарела" };
-      }
-      if (!user.tokenIssuedAt) {
-        user.tokenIssuedAt = Date.now();
-        persistAuth();
-      }
-      return { ok: true, account: toAccount(user, token) };
-    }
-    sessionsByToken.delete(token);
+  const session = sessionsByToken.get(token);
+  if (!session) return { ok: false, error: "Сессия устарела" };
+  const user = findUserById(session.userId);
+  if (!user || isSessionExpired(session.issuedAt)) {
+    clearSession(token);
+    saveSessions();
+    return { ok: false, error: "Сессия устарела" };
   }
-
-  for (const user of usersByName.values()) {
-    if (user.token === token) {
-      if (isSessionExpired(user.tokenIssuedAt)) {
-        clearSession(user);
-        persistAuth();
-        return { ok: false, error: "Сессия устарела" };
-      }
-      if (!user.tokenIssuedAt) {
-        user.tokenIssuedAt = Date.now();
-        persistAuth();
-      }
-      const account = toAccount(user, token);
-      sessionsByToken.set(token, account);
-      return { ok: true, account };
-    }
-  }
-
-  return { ok: false, error: "Сессия устарела" };
+  return { ok: true, account: toAccount(user, token) };
 }
 
 export function updateProfile(
@@ -501,9 +464,17 @@ export function updateProfile(
     bio?: string;
     avatarUrl?: string | null;
   },
+  token = "",
 ): AuthResult {
   const user = findUserById(userId);
   if (!user) return { ok: false, error: "Пользователь не найден" };
+  if (token) {
+    const session = restoreSession(token);
+    if (!session.ok) return session;
+    if (session.account.userId !== userId) {
+      return { ok: false, error: "Нет доступа" };
+    }
+  }
 
   if (patch.displayName !== undefined) {
     const displayName = normalizeDisplayName(patch.displayName, user.username);
@@ -531,17 +502,9 @@ export function updateProfile(
   }
 
   usersByName.set(user.username.toLowerCase(), user);
-  refreshSessionsForUser(user);
   persistAuth();
 
-  if (!user.token) {
-    return {
-      ok: true,
-      account: toAccount(user, ""),
-    };
-  }
-
-  return { ok: true, account: toAccount(user, user.token) };
+  return { ok: true, account: toAccount(user, token) };
 }
 
 export function bindSocketAuth(socketId: string, token: string) {
@@ -564,16 +527,9 @@ export function getSocketAccount(socketId: string): AuthAccount | null {
 }
 
 export function logoutToken(token?: string) {
-  if (!token) return;
-  sessionsByToken.delete(token);
-  for (const [key, user] of usersByName.entries()) {
-    if (user.token === token) {
-      clearSession(user);
-      usersByName.set(key, user);
-      persistAuth();
-      break;
-    }
-  }
+  if (!token || !sessionsByToken.has(token)) return;
+  clearSession(token);
+  saveSessions();
 }
 
 export function getUserById(userId: string) {

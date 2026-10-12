@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { createUpdates } = require('../updates.cjs');
+const { createUpdates, CHECK_INTERVAL } = require('../updates.cjs');
 
 function fixture(options = {}) {
   const updater = new EventEmitter();
@@ -33,6 +33,7 @@ test('completed downloads automatically install silently and let NSIS launch the
   assert.equal(f.updater.autoInstallOnAppQuit, true);
   assert.equal(f.updater.autoRunAppAfterInstall, false, 'A normal close must not reopen the app');
   assert.equal(f.updater.disableWebInstaller, true);
+  assert.equal(f.updater.disableDifferentialDownload, false);
   assert.equal(f.updater.allowDowngrade, false);
   await assert.rejects(f.controller.action('apply'));
   await f.controller.action('check');
@@ -47,6 +48,18 @@ test('completed downloads automatically install silently and let NSIS launch the
   await f.controller.action('apply');
   await f.controller.action('download');
   assert.equal(f.installs.length, 1, 'The installer must only start once');
+  f.controller.dispose();
+});
+
+test('an invalid update signature blocks installation and preserves the running application', async () => {
+  const f = fixture();
+  await f.controller.action('check');
+  f.updater.downloadUpdate = async () => { throw Object.assign(new Error('Invalid publisher signature'), { code: 'ERR_UPDATER_INVALID_SIGNATURE' }); };
+  await f.controller.action('download');
+  assert.equal(f.state().phase, 'error');
+  assert.equal(f.installs.length, 0);
+  assert.equal(f.prepared(), 0);
+  await assert.rejects(f.controller.action('apply'), /ещё не скачано/);
   f.controller.dispose();
 });
 
@@ -152,4 +165,58 @@ test('development, portable and test runs never instantiate the updater', async 
     await assert.rejects(f.controller.action('check'));
     f.controller.start(); f.controller.dispose();
   }
+});
+
+test('startup checks immediately and checks every 30 minutes, stopping on disposal', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = fixture();
+  let checks = 0;
+  f.updater.checkForUpdates = async () => { checks++; f.updater.emit('update-not-available'); };
+  f.controller.start(); f.controller.start();
+  await Promise.resolve();
+  assert.equal(checks, 1, 'Check at startup without a delay; start is idempotent');
+  assert.equal(CHECK_INTERVAL, 30 * 60 * 1000);
+  t.mock.timers.tick(CHECK_INTERVAL - 1);
+  assert.equal(checks, 1);
+  t.mock.timers.tick(1);
+  await Promise.resolve();
+  assert.equal(checks, 2);
+  f.controller.dispose();
+  t.mock.timers.tick(CHECK_INTERVAL);
+  assert.equal(checks, 2);
+});
+
+test('WebSocket announcements check the fixed feed, deduplicate known versions, and disconnect on disposal', async () => {
+  const socket = new EventEmitter();
+  let disconnected = false, checks = 0;
+  socket.disconnect = () => { disconnected = true; };
+  const f = fixture({ notificationUrl: 'https://maiko.test', getUpdateSocket: (url) => {
+    assert.equal(url, 'https://maiko.test'); return socket;
+  } });
+  f.updater.checkForUpdates = async () => { checks++; f.updater.emit('update-not-available'); };
+  f.controller.start(); await Promise.resolve();
+  for (const version of ['1.1.8', '1.0.0', 'invalid', undefined]) socket.emit('desktop:update-available', { version });
+  assert.equal(checks, 1);
+  socket.emit('desktop:update-available', { version: '1.1.9', url: 'https://ignored.test/evil.exe' });
+  await Promise.resolve();
+  assert.equal(checks, 2, 'A push only runs checkForUpdates');
+  f.updater.emit('update-available', { version: '1.1.9' });
+  socket.emit('desktop:update-available', { version: '1.1.9' });
+  assert.equal(checks, 2, 'The already displayed release is not checked again');
+  assert.deepEqual(f.installs, []);
+  f.controller.dispose();
+  assert.equal(disconnected, true); assert.equal(socket.listenerCount('desktop:update-available'), 0);
+});
+
+test('an announcement during a pending check is checked after the current request finishes', async () => {
+  const socket = Object.assign(new EventEmitter(), { disconnect() {} });
+  const f = fixture({ notificationUrl: 'https://maiko.test', getUpdateSocket: () => socket });
+  let finish, checks = 0;
+  f.updater.checkForUpdates = async () => { checks++; if (checks === 1) await new Promise(resolve => { finish = resolve; }); };
+  f.controller.start();
+  socket.emit('desktop:update-available', { version: '1.1.9' });
+  assert.equal(checks, 1);
+  finish(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(checks, 2, 'A publication during the first check is not lost');
+  f.controller.dispose();
 });

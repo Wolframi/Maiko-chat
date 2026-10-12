@@ -133,7 +133,7 @@ async function main() {
     assert.equal(await site.locator('.bubble__image-btn .download-ring').count(), 1, 'Media previews show the same circular indicator');
     await site.screenshot({path:path.join(output,'message-download-ring.png')});
     await messageRing.click();
-    await waitState(shell, s => s.downloads.entries[0]?.phase === 'cancelled');
+    await waitState(shell, s => !s.downloads.entries.some(entry => entry.id === pending.downloads.entries[0].id));
     await site.waitForFunction(() => document.querySelectorAll('.download-ring').length === 0);
     assert.equal(await site.locator('.bubble__file-link .bubble__file-icon').first().isVisible(), true);
     await assert.rejects(fs.stat(partialPath), {code:'ENOENT'});
@@ -153,7 +153,7 @@ async function main() {
     await folderButton.hover();
     await panel.getByRole('button', { name: 'Отменить скачивание' }).hover();
     await panel.getByRole('button', { name: 'Отменить скачивание' }).click();
-    await waitState(shell, (s) => s.downloads.entries[0]?.phase === 'cancelled');
+    await waitState(shell, s => !s.downloads.entries.some(entry => entry.id === secondPending.downloads.entries[0].id));
     await assert.rejects(fs.stat(secondPending.downloads.entries[0].path), { code: 'ENOENT' });
     await site.getByRole('link', { name: 'Ошибка соединения' }).click();
     await waitState(shell, (s) => s.downloads.entries[0]?.phase === 'error');

@@ -11,6 +11,8 @@ class NativeResize {
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+    [DllImport("dwmapi.dll")] static extern int DwmFlush();
+    [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")] static extern int DwmGetFrameBounds(IntPtr window, int attribute, out Rect value, int size);
     static int Main(string[] args) {
         try {
             long handle;
@@ -25,8 +27,11 @@ class NativeResize {
             using (var bitmap = new Bitmap(1, 1))
             using (var graphics = Graphics.FromImage(bitmap)) {
                 for (int i = 0; i < 200; i++) {
+                    // GetWindowRect can advance before DWM presents the new
+                    // bounds. Synchronize before sampling the displayed window.
+                    DwmFlush();
                     Rect rect;
-                    if (!GetWindowRect(window, out rect)) return 1;
+                    if (DwmGetFrameBounds(window, 9, out rect, Marshal.SizeOf(typeof(Rect))) < 0 && !GetWindowRect(window, out rect)) return 1;
                     foreach (var point in new [] { new Point(rect.right - 24, rect.top + 200), new Point(rect.left + 400, rect.bottom - 24) }) {
                         graphics.CopyFromScreen(point.X, point.Y, 0, 0, bitmap.Size);
                         var c = bitmap.GetPixel(0, 0); samples++;

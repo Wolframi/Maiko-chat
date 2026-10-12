@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { normalizeUrl, isSameOrigin, visibleBounds, findProjectRoot } = require('../config.cjs');
-const { resizedBounds, siteBounds } = require('../window-geometry.cjs');
+const { siteBounds } = require('../window-geometry.cjs');
 const path = require('node:path');
 
 test('server addresses allow HTTPS and local HTTP, rejecting executable schemes and credentials', () => {
@@ -20,16 +20,12 @@ test('a window from a disconnected monitor returns to a visible screen', () => {
   const displays = [{ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }];
   assert.deepEqual(visibleBounds({ x: 4000, y: 0, width: 900, height: 650 }, displays), { width: 900, height: 650 });
   assert.deepEqual(visibleBounds({ x: 50, y: 60, width: 900, height: 650 }, displays), { width: 900, height: 650, x: 50, y: 60 });
-  assert.deepEqual(visibleBounds({ width: -1, height: 100000 }, displays), { width: 800, height: 2160 });
+  assert.deepEqual(visibleBounds({ width: -1, height: 100000 }, displays), { width: 500, height: 2160 });
+  assert.deepEqual(visibleBounds({ x: 50, y: 60, width: 500, height: 360 }, displays), { width: 500, height: 360, x: 50, y: 60 });
   assert.equal(findProjectRoot(__dirname), path.resolve(__dirname, '../../site'));
 });
 
-test('shrinking from north/west anchors the opposite edges and respects the minimum', () => {
-  const bounds = { x: 100, y: 100, width: 1000, height: 700 };
-  assert.deepEqual(resizedBounds(bounds, 'nw', 300, 200), { x: 300, y: 200, width: 800, height: 600 });
-  assert.deepEqual(resizedBounds(bounds, 'se', -300, -200), { x: 100, y: 100, width: 800, height: 600 });
-  assert.deepEqual(resizedBounds(bounds, 'ne', 100, -100), { x: 100, y: 0, width: 1100, height: 800 });
-  assert.deepEqual(resizedBounds(bounds, 'sw', -100, 100), { x: 0, y: 100, width: 1100, height: 800 });
-  assert.deepEqual(siteBounds(1000, 700, false), { x: 6, y: 42, width: 988, height: 652 });
+test('site layout reserves the toolbar and keeps equal normal-window gutters', () => {
+  assert.deepEqual(siteBounds(1000, 700, false), { x: 10, y: 42, width: 980, height: 648 });
   assert.deepEqual(siteBounds(1000, 700, true), { x: 0, y: 42, width: 1000, height: 658 });
 });

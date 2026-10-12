@@ -54,6 +54,7 @@ test('downloads never overwrite names; reveal only completed files and restore s
     await assert.rejects(controller.action('reveal', state.entries[0].id), /ещё не скачан/);
     const secondId = state.entries[0].id;
     await controller.action('cancel', secondId);
+    assert.equal(state.entries.some((entry) => entry.id === secondId), false, 'Cancelled downloads immediately leave the recent list');
     assert.equal(controller.siteProgress().length, 1);
     assert.equal(fs.existsSync(second.target), false);
     first.emit('done', {}, 'completed');
@@ -87,6 +88,13 @@ test('downloads never overwrite names; reveal only completed files and restore s
     assert.equal(state.entries.at(-1).name, 'Файл 2.pdf');
     assert.equal(JSON.parse(fs.readFileSync(historyPath, 'utf8')).length, 15);
     for (let index = 0; index < paths.length; index++) assert.equal(fs.readFileSync(paths[index], 'utf8'), `saved-${index}`);
+    const savedIds = state.entries.map((entry) => entry.id);
+    for (let index = 0; index < 17; index++) {
+      const cancelled = download(`cancel-${index}.pdf`);
+      await controller.action('cancel', state.entries[0].id);
+      assert.equal(fs.existsSync(cancelled.target), false);
+    }
+    assert.deepEqual(state.entries.map((entry) => entry.id), savedIds, 'Repeated cancellations do not evict any of the 15 saved files');
     controller.dispose(); controller = createDownloads(options);
     assert.equal(state.entries.length, 15);
     assert.equal(state.entries.at(-1).name, 'Файл 2.pdf');

@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Socket } from "socket.io-client";
 import type { VoiceChannelUser } from "@/lib/types";
 import { useVoiceChannelLiveKit } from "@/hooks/useVoiceChannelLiveKit";
+import { useDesktopMedia } from "@/hooks/useDesktopMedia";
+import { getDesktopMediaRuntime } from "@/lib/desktopMedia";
 import {
   clearMediaResume,
   peekMediaResume,
@@ -45,7 +47,18 @@ type MediaControls = {
  * Group voice is always self-hosted LiveKit SFU (this VM), never LiveKit Cloud
  * and never P2P mesh. 1:1 calls stay in `useCall` (P2P).
  */
-export function useVoiceChannel({
+export function useVoiceChannel(options: UseVoiceChannelOptions) {
+  const desktop = useDesktopMedia({ selfId: options.selfId, selfName: options.selfName, token: options.token ?? undefined });
+  const native = useBrowserVoiceChannel(getDesktopMediaRuntime() ? { socket: null } : options);
+  useEffect(() => {
+    if (!desktop) return;
+    setLiveMediaSession("voice", Boolean(desktop.voice.active));
+    return () => setLiveMediaSession("voice", false);
+  }, [desktop]);
+  return desktop ? desktop.voice : native;
+}
+
+export function useBrowserVoiceChannel({
   socket,
   selfId,
   selfName,
@@ -409,9 +422,9 @@ export function useVoiceChannel({
   }, [leave, sfu.error, sfu.linkPhase]);
 
   useEffect(() => {
-    setLiveMediaSession("voice", Boolean(active));
+    setLiveMediaSession("voice", Boolean(active), !joining && !sfuJoining && hasRoom() && !sfu.mediaBusy);
     return () => setLiveMediaSession("voice", false);
-  }, [active]);
+  }, [active, joining, sfuJoining, hasRoom, sfu.mediaBusy]);
 
   useEffect(() => {
     if (!active || joining || sfuJoining || !hasRoom()) return;
@@ -424,6 +437,7 @@ export function useVoiceChannel({
         muted,
         deafened,
         cameraOff,
+        sharingScreen: sfuApiRef.current?.sharingScreen ?? false,
       });
     persist();
     const unbind = registerMediaResumePersist(persist);
@@ -432,7 +446,7 @@ export function useVoiceChannel({
       unbind();
       window.clearInterval(timer);
     };
-  }, [active, joining, sfuJoining, hasRoom, muted, deafened, cameraOff]);
+  }, [active, joining, sfuJoining, hasRoom, muted, deafened, cameraOff, sfu.sharingScreen]);
 
   useEffect(
     () => () => {

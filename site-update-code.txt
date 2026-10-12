@@ -1,0 +1,2784 @@
+КОД ОБНОВЛЕНИЯ САЙТА В БРАУЗЕРЕ И ELECTRON
+
+# Обновление сайта в браузере и приложении
+
+После `npm run build` и запуска новой сборки сервер отправляет `app:boot` с `buildId` через Socket.IO. Интерфейс сравнивает его с ID загруженного JavaScript. Запасная проверка `/api/health` работает каждые 1,5 секунды; после потери связи проверка временно учащается. Простое перезапускание той же сборки не перезагружает страницы.
+
+## Приложение: демонстрация сохраняется
+
+Статус обновления сайта находится в верхней панели приложения: «Сайт обновляется…», затем «Сайт обновлён». Сообщение об успешном обновлении исчезает через 6 секунд. Повторный сигнал готовности не отменяет таймер. При ошибке загрузки панель показывает «Не удалось обновить сайт» и кнопку повторной попытки. Текст под моделькой внутри приложения убран; сама анимация остаётся.
+
+Новый Electron-клиент проверяет `desktopMediaHost: 1` в `/api/health` и открывает постоянный документ `/desktop-runtime`. В нём живут микрофон, камера, захват экрана, WebRTC/LiveKit, сигнальный сокет и воспроизведение звука. Сам интерфейс находится в iframe того же origin. Его можно перезагрузить, не уничтожая медиадокумент. UI получает живые состояния и MediaStream через `maikoMediaRuntime` версии 1, а его кнопки вызывают методы владельца сессии. Треки не пересоздаются и не передаются через дополнительное WebRTC-соединение.
+
+При обновлении сайта перезагружается только интерфейс: демонстрация и звонок продолжают работать, а новая страница повторно подписывается на существующую сессию. F5 и кнопка обновления оболочки тоже обновляют только UI. Старые подписки удаляются при `pagehide`. Аудиоэлемент остаётся в постоянном документе, поэтому обновление не обрывает воспроизведение и не создаёт его второй экземпляр. Выбор экрана по-прежнему выполняет защищённый Electron-обработчик только для главного медиадокумента.
+
+Микрофон, устройство вывода, шумодав и громкость демонстраций синхронизируются между UI и медиадокументом через изменения общего `localStorage`. Desktop-стили, адаптер списка участников и индикаторы скачивания устанавливаются в каждый новый документ интерфейса. Node.js в страницах и iframe отключён, sandbox и contextIsolation включены. Встраивание разрешено только для `/?_desktop_ui=1` и только внутри того же origin; остальные страницы сохраняют запрет встраивания.
+
+Для этой схемы нужна новая сборка приложения с обновлёнными `main.cjs` и `site-preload.cjs`, а также новая версия сайта. Если сервер ещё не поддерживает `/desktop-runtime`, новый клиент открывает обычный сайт. Обновление EXE с перезапуском всего приложения отличается от обновления веб-интерфейса: закрытие приложения завершает захват. Код владельца медиасессии обновляется при новом запуске приложения, поэтому публичный протокол версии 1 должен оставаться совместимым при обновлении UI.
+
+## Браузер: уведомление во время демонстрации
+
+Если пользователь демонстрирует экран, появляется «Сайт обновился — обновите сайт» с кнопкой «Обновить сайт» и пояснением, что перезагрузка остановит демонстрацию. Автоматической перезагрузки нет. Даже после окончания демонстрации уведомление остаётся, пока пользователь сам не нажмёт кнопку. Кнопка проверяет готовность сервера, резервирует участие в звонке и загружает новую страницу. При недоступности сервера уведомление предлагает повторить попытку.
+
+Сборку выполняйте через `npm run build` в корне или `site/`: `site/scripts/build-site.mjs` задаёт один UUID для всех процессов сборки, `NEXT_PUBLIC_SITE_VERSION` и `.next/BUILD_ID`. Сервер читает этот файл один раз при запуске. Сборка, которая ещё не запущена, не объявляется готовым обновлением.
+
+Во время установленного звонка клиент сохраняет его ID, собеседника, чат, микрофон, наушники, камеру и время начала в `sessionStorage`, затем отправляет `app:prepare-reload`. Авторизованный сервер резервирует участие на 90 секунд и сообщает собеседнику о перезагрузке. После проверки готовности сервера браузер загружает страницу с параметрами `_b` и `_t`, восстанавливает авторизацию и возвращается в тот же звонок. Включается существующая анимация модельки Майко. Микрофон остаётся выключенным до публикации трека, если пользователь выключил его раньше.
+
+Голосовой канал восстанавливается с прежними настройками. Сервер сохраняет звонки и участников каналов в `data/live-media.json` при штатном завершении и восстанавливает их после перезапуска. Участникам даётся 90 секунд на возвращение. Если звонок уже завершён, восстановление не создаёт новый входящий вызов.
+
+В браузере входящий/исходящий вызов, который ещё не установлен, и незавершённое подключение откладывают автоматическую перезагрузку до безопасного момента. Захват экрана браузер разрешает запустить только по действию пользователя, поэтому во время демонстрации требуется решение пользователя через уведомление. Если `sessionStorage` недоступен, во время звонка автоматическая перезагрузка тоже откладывается.
+
+Полная перезагрузка браузерного документа уничтожает WebRTC-соединения. В браузере сохраняется сам звонок и выполняется автоматическое переподключение; возможна короткая пауза звука и видео. В новом приложении медиадокумент не перезагружается. Отдельный сервер LiveKit не следует перезапускать при обновлении сайта.
+
+После первого развёртывания открытые страницы со старым кодом используют прежнее поведение и дождутся окончания звонка. Новый механизм начинает действовать после загрузки этой версии сайта.
+
+Полный механизм обновления и относящиеся к нему фрагменты звонков собраны в `site-update-code.txt`. Чтобы пересобрать этот файл после дальнейших изменений:
+
+```sh
+node scripts/export-site-update-code.mjs
+```
+
+Проверки: `npm --prefix site test`, `npm --prefix site run build`, `npm --prefix desktop test`, а также `site/e2e/site-reload.spec.ts`, `site/e2e/voice-resume.spec.ts` и `site/e2e/call-media.spec.ts`. `npm --prefix desktop run test:persistent-media` проверяет реальный звонок и захват дисплея, затем смену сборки и ручное обновление UI: ID звонка, исходный MediaStreamTrack и аудиоэлемент должны остаться прежними. Для проверок реального звонка нужны локальный сервер, тестовые аккаунты с `SEED_DEMO=1` и браузер Edge. Тест демонстрации не сохраняет кадры.
+
+
+==============================================================================
+site/scripts/build-site.mjs
+==============================================================================
+
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+// One ID for every build worker, the browser bundle and .next/BUILD_ID.
+const version = randomUUID();
+const child = spawn(process.execPath, [require.resolve("next/dist/bin/next"), "build", ...process.argv.slice(2)], {
+  stdio: "inherit",
+  windowsHide: true,
+  env: { ...process.env, NEXT_PUBLIC_SITE_VERSION: version },
+});
+child.on("error", (error) => { console.error(error); process.exit(1); });
+child.on("exit", (code) => process.exit(code ?? 1));
+
+
+==============================================================================
+site/next.config.ts
+==============================================================================
+
+import type { NextConfig } from "next";
+import { randomUUID } from "node:crypto";
+import { lanDevHosts } from "./src/lib/devHosts";
+
+const nextConfig: NextConfig = {
+  generateBuildId: async () => process.env.NEXT_PUBLIC_SITE_VERSION || randomUUID(),
+  env: { NEXT_PUBLIC_SITE_VERSION: process.env.NEXT_PUBLIC_SITE_VERSION || "" },
+  // The Electron client has its own lockfile; keep the web workspace explicit.
+  turbopack: { root: process.cwd() },
+  async headers() {
+    return ["runtime.wasm", "model-1.tflite", "model-2.tflite"].map((asset) => ({
+      source: `/audio/dtln-0.1.1/${asset}`,
+      headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
+    }));
+  },
+  // Dev HMR/assets when opening via LAN IP, 127.0.0.1, or Cloudflare tunnels
+  allowedDevOrigins: [
+    "127.0.0.1",
+    "localhost",
+    "*.local",
+    "*.trycloudflare.com",
+    ...lanDevHosts(),
+  ],
+  transpilePackages: [
+    "react-voice-recorder-kit",
+    "@wavesurfer/react",
+    "wavesurfer.js",
+    "emoji-mart",
+    "@emoji-mart/react",
+    "@emoji-mart/data",
+    "emojibase-data",
+    "yet-another-react-lightbox",
+    "sonner",
+    "linkify-react",
+    "linkifyjs",
+    "lucide-react",
+    "react-textarea-autosize",
+    "vaul",
+  ],
+};
+
+if (process.env.NODE_ENV !== "production") {
+  nextConfig.webpack = (config, { dev }) => {
+    if (dev) {
+      const extra = ["**/uploads/**", "**/data/**"];
+      const prev = config.watchOptions?.ignored;
+      const ignored =
+        typeof prev === "function"
+          ? (file: string) =>
+              prev(file) || /(?:^|[/\\])(?:uploads|data)(?:[/\\]|$)/.test(file)
+          : [
+              ...(Array.isArray(prev)
+                ? prev
+                : prev
+                  ? [prev]
+                  : ["**/node_modules/**"]),
+              ...extra,
+            ];
+      config.watchOptions = {
+        ...config.watchOptions,
+        ignored,
+      };
+    }
+    return config;
+  };
+}
+
+export default nextConfig;
+
+
+==============================================================================
+site/src/lib/liveReload.ts
+==============================================================================
+
+import {
+  canReloadLiveMedia,
+  hasLiveMediaSession,
+  markPageUnloading,
+  persistLiveMediaNow,
+} from "@/lib/mediaResume";
+import { getDesktopMediaRuntime, isDesktopMediaOwner } from "@/lib/desktopMedia";
+
+const BOOT_KEY = "pulse-boot-id";
+const PENDING_KEY = "pulse-boot-pending";
+const BOOT_QUERY = "_b";
+const RELOAD_NOTICE_KEY = "pulse-site-reloaded";
+const MANUAL_KEY = "pulse-site-update-manual";
+export type SiteUpdateNotice = { version: string; busy: boolean; error?: string };
+let updateNotice: SiteUpdateNotice | null = null;
+const noticeListeners = new Set<() => void>();
+export const getSiteUpdateNotice = () => updateNotice;
+export function subscribeSiteUpdateNotice(listener: () => void) {
+  noticeListeners.add(listener);
+  return () => { noticeListeners.delete(listener); };
+}
+function publishNotice(next: SiteUpdateNotice | null) {
+  if (JSON.stringify(next) === JSON.stringify(updateNotice)) return;
+  updateNotice = next;
+  for (const listener of noticeListeners) listener();
+}
+function manualUpdateRequired() {
+  if (updateNotice) return true;
+  try { return Boolean(sessionStorage.getItem(MANUAL_KEY)); } catch { return false; }
+}
+function requireManualUpdate(version: string) {
+  writePendingBootId(version);
+  try { sessionStorage.setItem(MANUAL_KEY, version); } catch { /* memory notice remains */ }
+  publishNotice({ version, busy: false });
+}
+export function requestPendingSiteReload() {
+  const version = pendingBootId();
+  if (version) void reloadNow(version, true);
+}
+
+export function consumeSiteReloadNotice() {
+  try {
+    const at = Number(sessionStorage.getItem(RELOAD_NOTICE_KEY));
+    sessionStorage.removeItem(RELOAD_NOTICE_KEY);
+    return at > 0 && Date.now() - at < 90_000;
+  } catch { return false; }
+}
+
+/** In-memory copy so a blocked/empty sessionStorage cannot skip reloads forever. */
+let memoryBootId = "";
+let memoryPendingId = "";
+let reloadInProgress = false;
+let bootSocket: BootSocket | null = null;
+let pollerBound = false;
+let pollInFlight: AbortController | null = null;
+let burstUntil = 0;
+let burstTimer: number | null = null;
+
+function storedBootId() {
+  try {
+    return sessionStorage.getItem(BOOT_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writeBootId(bootId: string) {
+  memoryBootId = bootId;
+  try {
+    sessionStorage.setItem(BOOT_KEY, bootId);
+  } catch {
+    /* ignore */
+  }
+}
+
+function pendingBootId() {
+  if (memoryPendingId) return memoryPendingId;
+  try {
+    return sessionStorage.getItem(PENDING_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writePendingBootId(bootId: string) {
+  memoryPendingId = bootId;
+  try {
+    sessionStorage.setItem(PENDING_KEY, bootId);
+  } catch {
+    /* ignore */
+  }
+}
+
+function clearPendingBootId() {
+  memoryPendingId = "";
+  try {
+    sessionStorage.removeItem(PENDING_KEY);
+    sessionStorage.removeItem(MANUAL_KEY);
+  } catch {
+    /* ignore */
+  }
+  publishNotice(null);
+}
+
+function knownBootId() {
+  // The loaded bundle is authoritative, including when a stale tab's first
+  // health request arrives only AFTER a deployment. Storage alone is not.
+  return process.env.NEXT_PUBLIC_SITE_VERSION || memoryBootId || storedBootId();
+}
+
+function stripBootQuery() {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has(BOOT_QUERY) && !url.searchParams.has("_t")) return;
+  url.searchParams.delete(BOOT_QUERY);
+  url.searchParams.delete("_t");
+  const search = url.searchParams.toString();
+  window.history.replaceState(
+    null,
+    "",
+    `${url.pathname}${search ? `?${search}` : ""}${url.hash}`,
+  );
+}
+
+async function reloadNow(bootId: string, manual = false) {
+  if (reloadInProgress) return;
+  persistLiveMediaNow();
+  const persistent = Boolean(getDesktopMediaRuntime());
+  if (!persistent && !manual && manualUpdateRequired()) {
+    requireManualUpdate(bootId);
+    return;
+  }
+  if (!persistent && !manual && !canReloadLiveMedia()) {
+    writePendingBootId(bootId);
+    // Browsers cannot preserve display capture across document navigation.
+    // Once notified, let the user decide even if sharing ends later.
+    try {
+      const saved = sessionStorage.getItem("pulse-media-resume");
+      if (hasLiveMediaSession() && saved && JSON.parse(saved).sharingScreen) requireManualUpdate(bootId);
+    } catch { /* no reliable snapshot: keep protecting the current session */ }
+    return;
+  }
+  // Wait for authenticated signaling to rebind after the server restart.
+  // The server reserves presence before the old document is destroyed.
+  if (!persistent && hasLiveMediaSession() && !bootSocket?.connected) {
+    writePendingBootId(bootId);
+    return;
+  }
+  reloadInProgress = true;
+  if (manual) publishNotice({ version: bootId, busy: true });
+  let navigating = false;
+  try {
+    if (!persistent && hasLiveMediaSession()) {
+      const socket = bootSocket;
+      const prepared = await new Promise<boolean>((resolve) => {
+        const timer = window.setTimeout(() => resolve(false), 2500);
+        socket?.emit?.("app:prepare-reload", { buildId: bootId }, (result) => {
+          window.clearTimeout(timer);
+          resolve(Boolean(result?.ok));
+        });
+      });
+      if (!prepared) { writePendingBootId(bootId); return; }
+    }
+    // Verify readiness even for a socket notification: never navigate into
+    // a restarting server, an unhealthy deployment or a different version.
+    const response = await fetch("/api/health", { cache: "no-store", signal: AbortSignal.timeout(2500) });
+    if (!response.ok) { writePendingBootId(bootId); return; }
+    const health = await response.json() as BootNotice;
+    if (versionOf(health) !== bootId) { writePendingBootId(versionOf(health) || bootId); return; }
+    persistLiveMediaNow();
+    if (!persistent && !manual && !canReloadLiveMedia()) { writePendingBootId(bootId); return; }
+    if (persistent) getDesktopMediaRuntime()?.reportSiteUpdate("loading");
+    markPageUnloading();
+    writeBootId(bootId);
+    clearPendingBootId();
+    try { sessionStorage.setItem(RELOAD_NOTICE_KEY, String(Date.now())); } catch { /* optional UI notice */ }
+    const url = new URL(window.location.href);
+    url.searchParams.set(BOOT_QUERY, bootId);
+    url.searchParams.set("_t", String(Date.now()));
+    navigating = true;
+    window.location.replace(`${url.pathname}${url.search}${url.hash}`);
+  } catch {
+    writePendingBootId(bootId);
+  } finally {
+    if (!navigating) {
+      reloadInProgress = false;
+      if (manual) publishNotice({ version: pendingBootId() || bootId, busy: false, error: "Сервер пока недоступен. Попробуйте ещё раз." });
+    }
+  }
+}
+
+/** Reload a ready deployment and restore the existing media session. */
+export function applyBootId(bootId: string) {
+  if (!bootId || typeof window === "undefined") return;
+  const prev = knownBootId();
+  if (!prev) {
+    writeBootId(bootId);
+    return;
+  }
+  if (prev === bootId) {
+    memoryBootId = bootId;
+    clearPendingBootId();
+    return;
+  }
+  void reloadNow(bootId);
+}
+
+/** Retry once ringing, screen sharing or a pending media join has ended. */
+export function flushPendingBootReload() {
+  if (typeof window === "undefined") return;
+  const pending = pendingBootId();
+  if (!pending) return;
+  if (pending === knownBootId()) {
+    clearPendingBootId();
+    return;
+  }
+  void reloadNow(pending);
+}
+
+type BootNotice = { bootId?: string; buildId?: string };
+function versionOf(notice: BootNotice) {
+  const value = notice.buildId || notice.bootId || "";
+  return typeof value === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(value) ? value : "";
+}
+
+async function pollHealth() {
+  if (pollInFlight) return;
+  // Hidden tabs don't need the reload-deploy ping every 1.5s.
+  if (typeof document !== "undefined" && document.hidden) return;
+  const ac = new AbortController();
+  pollInFlight = ac;
+  const timeout = window.setTimeout(() => ac.abort(), 2500);
+  try {
+    const res = await fetch("/api/health", {
+      cache: "no-store",
+      headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+      signal: ac.signal,
+    });
+    if (!res.ok) return;
+    const data = (await res.json()) as BootNotice;
+    const version = versionOf(data);
+    if (version) applyBootId(version);
+    flushPendingBootReload();
+  } catch {
+    /* server is bouncing — burst poll will retry */
+  } finally {
+    window.clearTimeout(timeout);
+    if (pollInFlight === ac) pollInFlight = null;
+  }
+}
+
+function startBurstPoll() {
+  burstUntil = Date.now() + 45_000;
+  if (burstTimer != null) return;
+  const tick = () => {
+    void pollHealth();
+    if (Date.now() < burstUntil) {
+      burstTimer = window.setTimeout(tick, 400);
+    } else {
+      burstTimer = null;
+    }
+  };
+  tick();
+}
+
+function onVisible() {
+  if (typeof document !== "undefined" && document.hidden) return;
+  startBurstPoll();
+}
+
+function ensurePoller() {
+  if (pollerBound || typeof window === "undefined") return;
+  pollerBound = true;
+  stripBootQuery();
+  document.addEventListener("visibilitychange", onVisible);
+  window.addEventListener("online", onVisible);
+  window.addEventListener("focus", onVisible);
+  window.addEventListener("pageshow", onVisible);
+  void pollHealth();
+  window.setInterval(() => {
+    void pollHealth();
+  }, 1_500);
+}
+
+type BootSocket = {
+  connected?: boolean;
+  emit?: (event: "app:prepare-reload", payload: { buildId: string }, ack: (result?: { ok?: boolean }) => void) => void;
+  on: (
+    event: "app:boot" | "connect" | "disconnect",
+    fn: (payload?: BootNotice) => void,
+  ) => void;
+  off: (
+    event: "app:boot" | "connect" | "disconnect",
+    fn: (payload?: BootNotice) => void,
+  ) => void;
+};
+
+export function watchAppBoot(socket: BootSocket | null) {
+  // The media owner survives deployments; only its child UI checks versions.
+  if (isDesktopMediaOwner()) return () => {};
+  ensurePoller();
+  if (socket) bootSocket = socket;
+
+  const onBoot = (payload: BootNotice | undefined) => {
+    const version = payload && versionOf(payload);
+    if (version) applyBootId(version);
+  };
+  const onConnect = () => {
+    void pollHealth();
+  };
+  const onDisconnect = () => {
+    startBurstPoll();
+  };
+
+  socket?.on("app:boot", onBoot);
+  socket?.on("connect", onConnect);
+  socket?.on("disconnect", onDisconnect);
+
+  return () => {
+    if (socket && bootSocket === socket) bootSocket = null;
+    socket?.off("app:boot", onBoot);
+    socket?.off("connect", onConnect);
+    socket?.off("disconnect", onDisconnect);
+  };
+}
+
+
+==============================================================================
+site/src/lib/mediaResume.ts
+==============================================================================
+
+const KEY = "pulse-media-resume";
+const ROOM_KEY = "pulse-last-room";
+const MAX_AGE_MS = 10 * 60_000;
+
+export type MediaResume =
+  | {
+      kind: "call";
+      peerId: string;
+      peerName: string;
+      chatId: string;
+      mode: "audio" | "video";
+      muted: boolean;
+      cameraOff: boolean;
+      deafened?: boolean;
+      callId?: string;
+      connectedAt?: number;
+      sharingScreen?: boolean;
+      at: number;
+    }
+  | {
+      kind: "voice";
+      channelId: string;
+      groupId: string;
+      title: string;
+      muted: boolean;
+      deafened: boolean;
+      cameraOff: boolean;
+      sharingScreen?: boolean;
+      at: number;
+    };
+
+type CallResumeInput = Omit<Extract<MediaResume, { kind: "call" }>, "at">;
+type VoiceResumeInput = Omit<Extract<MediaResume, { kind: "voice" }>, "at">;
+
+let pageUnloading = false;
+const liveMedia = { call: false, voice: false };
+const reloadBlocked = { call: false, voice: false };
+
+const persistHooks = new Set<() => void>();
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => {
+    pageUnloading = true;
+  });
+}
+
+/** Keep resume snapshot through a deploy reload. */
+export function markPageUnloading() {
+  pageUnloading = true;
+}
+
+export function registerMediaResumePersist(fn: () => void) {
+  persistHooks.add(fn);
+  return () => {
+    persistHooks.delete(fn);
+  };
+}
+
+export function persistLiveMediaNow() {
+  for (const fn of persistHooks) {
+    try {
+      fn();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+export function isPageUnloading() {
+  return pageUnloading;
+}
+
+/** True while a 1:1 call or group voice session is open in this tab. */
+export function setLiveMediaSession(kind: "call" | "voice", on: boolean, reloadable = true) {
+  liveMedia[kind] = on;
+  reloadBlocked[kind] = on && !reloadable;
+}
+
+export function hasLiveMediaSession() {
+  return liveMedia.call || liveMedia.voice;
+}
+
+/** Screen capture requires a fresh user gesture; ringing must not auto-answer. */
+export function canReloadLiveMedia() {
+  if (!hasLiveMediaSession()) return true;
+  if (reloadBlocked.call || reloadBlocked.voice) return false;
+  const resume = peekMediaResume();
+  if (!resume || resume.sharingScreen) return false;
+  if (liveMedia.call) return resume.kind === "call" && Boolean(resume.callId && resume.connectedAt);
+  return resume.kind === "voice";
+}
+
+export function saveMediaResume(session: CallResumeInput | VoiceResumeInput) {
+  if (typeof window === "undefined") return;
+  try {
+    const payload = { ...session, at: Date.now() } as MediaResume;
+    sessionStorage.setItem(KEY, JSON.stringify(payload));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function peekMediaResume(): MediaResume | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = sessionStorage.getItem(KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as MediaResume;
+    if (!parsed || (parsed.kind !== "call" && parsed.kind !== "voice")) {
+      sessionStorage.removeItem(KEY);
+      return null;
+    }
+    if (!parsed.at || Date.now() - parsed.at > MAX_AGE_MS) {
+      sessionStorage.removeItem(KEY);
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export type LastRoom = {
+  chatId: string;
+  panel?: string;
+};
+
+export function saveLastRoom(chatId: string, panel?: string) {
+  if (typeof window === "undefined" || !chatId) return;
+  try {
+    const payload: LastRoom & { at: number } = {
+      chatId,
+      panel,
+      at: Date.now(),
+    };
+    sessionStorage.setItem(ROOM_KEY, JSON.stringify(payload));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function peekLastRoom(): LastRoom | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = sessionStorage.getItem(ROOM_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as LastRoom;
+    if (!parsed?.chatId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function clearMediaResume() {
+  if (typeof window === "undefined") return;
+  if (pageUnloading) return;
+  try {
+    sessionStorage.removeItem(KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+
+==============================================================================
+site/src/components/chat/BootPoller.tsx
+==============================================================================
+
+"use client";
+
+import { useEffect } from "react";
+import { watchAppBoot } from "@/lib/liveReload";
+import { SiteUpdateNotice } from "@/components/chat/SiteUpdateNotice";
+
+/** Starts deploy-reload polling even if the socket effect remounts. */
+export function BootPoller() {
+  useEffect(() => watchAppBoot(null), []);
+  return <SiteUpdateNotice />;
+}
+
+
+==============================================================================
+site/src/components/chat/SiteUpdateNotice.tsx
+==============================================================================
+
+"use client";
+
+import { useSyncExternalStore } from "react";
+import { getSiteUpdateNotice, requestPendingSiteReload, subscribeSiteUpdateNotice } from "@/lib/liveReload";
+
+const serverSnapshot = () => null;
+export function SiteUpdateNotice() {
+  const notice = useSyncExternalStore(subscribeSiteUpdateNotice, getSiteUpdateNotice, serverSnapshot);
+  if (!notice) return null;
+  return <aside className="site-update-notice" role="status" aria-label="Обновление сайта">
+    <div>
+      <strong>Сайт обновился — обновите сайт</strong>
+      <p>{notice.error || "При перезагрузке демонстрация остановится. Можно обновить после её завершения."}</p>
+    </div>
+    <button type="button" onClick={requestPendingSiteReload} disabled={notice.busy}>
+      {notice.busy ? "Обновляем…" : "Обновить сайт"}
+    </button>
+  </aside>;
+}
+
+
+==============================================================================
+site/src/lib/desktopMedia.ts
+==============================================================================
+
+import type { useBrowserCall } from "@/hooks/useCall";
+import type { useBrowserVoiceChannel } from "@/hooks/useVoiceChannel";
+
+export type DesktopMediaSession = { selfId: string; token: string; selfName?: string };
+export type DesktopMediaSnapshot = {
+  call: ReturnType<typeof useBrowserCall>;
+  voice: ReturnType<typeof useBrowserVoiceChannel>;
+};
+export type DesktopMediaRuntime = {
+  version: 1;
+  getSnapshot: () => DesktopMediaSnapshot | null;
+  subscribe: (listener: () => void) => () => void;
+  configureSession: (session: DesktopMediaSession) => void;
+  refresh: () => void;
+  reportSiteUpdate: (phase: "loading" | "ready" | "error") => void;
+};
+
+declare global {
+  interface Window {
+    maikoMediaShell?: { version: 1; onRefresh: (listener: () => void) => () => void;
+      siteUpdate: (phase: "loading" | "ready" | "error") => Promise<void> };
+    maikoMediaRuntime?: DesktopMediaRuntime;
+  }
+}
+
+/** Same-origin child only. The permanent owner never proxies its own hooks. */
+export function getDesktopMediaRuntime(): DesktopMediaRuntime | null {
+  if (typeof window === "undefined" || window.parent === window) return null;
+  try {
+    if (window.parent.location.origin !== window.location.origin) return null;
+    const runtime = window.parent.maikoMediaRuntime;
+    return runtime?.version === 1 ? runtime : null;
+  } catch { return null; }
+}
+
+export function isDesktopMediaOwner() {
+  return typeof window !== "undefined" && window.parent === window &&
+    window.location.pathname === "/desktop-runtime" && window.maikoMediaShell?.version === 1;
+}
+
+
+==============================================================================
+site/src/hooks/useDesktopMedia.ts
+==============================================================================
+
+"use client";
+
+import { useEffect, useSyncExternalStore } from "react";
+import { getDesktopMediaRuntime, type DesktopMediaSession } from "@/lib/desktopMedia";
+
+const getSnapshot = () => getDesktopMediaRuntime()?.getSnapshot() ?? null;
+const serverSnapshot = () => null;
+function subscribe(listener: () => void) {
+  const stop = getDesktopMediaRuntime()?.subscribe(listener) ?? (() => {});
+  // Navigation does not unmount a React tree. Remove the old frame's closures
+  // from the permanent owner's subscriptions before destroying the document.
+  window.addEventListener("pagehide", stop, { once: true });
+  return () => { stop(); window.removeEventListener("pagehide", stop); };
+}
+
+export function useDesktopMedia(session: Partial<DesktopMediaSession>) {
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, serverSnapshot);
+  useEffect(() => {
+    if (!session.token || !session.selfId) return;
+    getDesktopMediaRuntime()?.configureSession({ token: session.token, selfId: session.selfId, selfName: session.selfName });
+  }, [session.token, session.selfId, session.selfName]);
+  return snapshot;
+}
+
+
+==============================================================================
+site/src/components/chat/DesktopMediaHost.tsx
+==============================================================================
+
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { io, type Socket } from "socket.io-client";
+import { useBrowserCall } from "@/hooks/useCall";
+import { useBrowserVoiceChannel } from "@/hooks/useVoiceChannel";
+import { isDesktopMediaOwner, type DesktopMediaRuntime, type DesktopMediaSession, type DesktopMediaSnapshot } from "@/lib/desktopMedia";
+import { configureCallAudioCapture } from "@/lib/webrtcMedia";
+
+export function DesktopMediaHost() {
+  const [enabled, setEnabled] = useState(false);
+  const [session, setSession] = useState<DesktopMediaSession | null>(null);
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const [revision, setRevision] = useState(0);
+  const listeners = useRef(new Set<() => void>());
+  const snapshot = useRef<DesktopMediaSnapshot | null>(null);
+  const reportSiteUpdate = useCallback((phase: "loading" | "ready" | "error") => {
+    void window.maikoMediaShell?.siteUpdate(phase).catch(() => {});
+  }, []);
+  const refresh = useCallback(() => {
+    reportSiteUpdate("loading");
+    setRevision(value => value + 1);
+  }, [reportSiteUpdate]);
+  const [runtime] = useState<DesktopMediaRuntime>(() => ({
+    version: 1, getSnapshot: () => snapshot.current,
+    subscribe(listener) { listeners.current.add(listener); return () => { listeners.current.delete(listener); }; },
+    configureSession(next) { setSession(previous => previous?.token === next.token && previous.selfId === next.selfId && previous.selfName === next.selfName ? previous : next); },
+    refresh,
+    reportSiteUpdate,
+  }));
+  const transport = useRef<Socket | null>(null);
+  const call = useBrowserCall({ socket, selfId: session?.selfId, token: session?.token,
+    onLog: useCallback((chatId: string, text: string) => transport.current?.emit("call:log", { chatId, text }), []),
+  });
+  const voice = useBrowserVoiceChannel({ socket, selfId: session?.selfId, selfName: session?.selfName,
+    token: session?.token, callBusy: Boolean(call.active || call.incoming) });
+
+  useEffect(() => {
+    if (!isDesktopMediaOwner()) return;
+    setEnabled(true);
+    window.maikoMediaRuntime = runtime;
+    const stopRefresh = window.maikoMediaShell!.onRefresh(refresh);
+    return () => { stopRefresh(); delete window.maikoMediaRuntime; };
+  }, [runtime, refresh]);
+
+  useEffect(() => {
+    snapshot.current = { call, voice };
+    for (const listener of listeners.current) listener();
+  }, [call, voice]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const client = io({ path: "/api/socket", autoConnect: false, transports: ["polling", "websocket"],
+      rememberUpgrade: true, reconnectionDelay: 700, reconnectionDelayMax: 8000 });
+    transport.current = client;
+    const restore = () => {
+      const token = localStorage.getItem("pulse-chat-token");
+      if (!token) return;
+      client.emit("auth:restore", { token }, (result: { ok?: boolean; account?: { userId: string; displayName?: string; username: string } }) => {
+        if (localStorage.getItem("pulse-chat-token") !== token) return;
+        if (!result.ok || !result.account) { setSession(null); setSocket(null); return; }
+        setSession(previous => previous?.token === token ? previous : { token, selfId: result.account!.userId,
+          selfName: result.account!.displayName || result.account!.username });
+        setSocket(client);
+      });
+    };
+    client.on("connect", restore);
+    client.on("disconnect", reason => { if (reason === "io server disconnect") client.connect(); });
+    const changed = (event: StorageEvent) => {
+      if (event.key !== "pulse-chat-token") return;
+      if (!event.newValue) { setSession(null); setSocket(null); }
+      else restore();
+    };
+    window.addEventListener("storage", changed);
+    client.connect();
+    return () => { window.removeEventListener("storage", changed); client.disconnect(); transport.current = null; };
+  }, [enabled]);
+
+  useEffect(() => {
+    const client = transport.current;
+    if (!session?.token || !client?.connected) return;
+    client.emit("auth:restore", { token: session.token }, (result: { ok?: boolean }) => {
+      if (localStorage.getItem("pulse-chat-token") !== session.token) return;
+      if (result.ok) setSocket(client);
+    });
+  }, [session?.token]);
+
+  useEffect(() => {
+    configureCallAudioCapture(Boolean(call.active || voice.active));
+    return () => configureCallAudioCapture(false);
+  }, [call.active, voice.active]);
+
+  if (!enabled) return <p>Эта страница используется приложением Майко.</p>;
+  return <>
+    <audio ref={call.remoteAudioRef} autoPlay playsInline hidden />
+    <iframe key={revision} data-maiko-desktop-ui title="Майко" src="/?_desktop_ui=1"
+      allow="camera; microphone; display-capture; autoplay; clipboard-read; clipboard-write"
+      style={{ position: "fixed", inset: 0, width: "100%", height: "100%", border: 0 }} />
+  </>;
+}
+
+
+==============================================================================
+site/src/app/desktop-runtime/page.tsx
+==============================================================================
+
+import { DesktopMediaHost } from "@/components/chat/DesktopMediaHost";
+
+export default function DesktopRuntimePage() {
+  return <DesktopMediaHost />;
+}
+
+
+==============================================================================
+site/src/app/layout.tsx
+==============================================================================
+
+import type { Metadata, Viewport } from "next";
+import { Manrope, Space_Grotesk } from "next/font/google";
+import { BootPoller } from "@/components/chat/BootPoller";
+import "./globals.css";
+
+const display = Space_Grotesk({
+  variable: "--font-space",
+  subsets: ["latin"],
+});
+
+const body = Manrope({
+  variable: "--font-dm",
+  subsets: ["latin", "cyrillic"],
+});
+
+export const metadata: Metadata = {
+  title: "Майко — чат",
+  description: "Минималистичный онлайн-чат: ЛС, группы и каналы",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: {
+    capable: true,
+    title: "Майко",
+    statusBarStyle: "black-translucent",
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#0b0c10",
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  interactiveWidget: "resizes-content",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html
+      lang="ru"
+      className={`${display.variable} ${body.variable} h-full`}
+      suppressHydrationWarning
+    >
+      <body className="min-h-full antialiased" suppressHydrationWarning>
+        <BootPoller />
+        {children}
+      </body>
+    </html>
+  );
+}
+
+
+==============================================================================
+desktop/main.cjs
+==============================================================================
+
+const { app, BrowserWindow, WebContentsView, Menu, ipcMain, shell, session, screen, utilityProcess } = require('electron');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const { normalizeUrl, isSameOrigin, readJson, findProjectRoot, visibleBounds } = require('./config.cjs');
+const { RADIUS, siteBounds, makeWindowRectangular } = require('./window-geometry.cjs');
+const { configureLocalAssets } = require('./local-assets.cjs');
+const { startLocalServer } = require('./local-server.cjs');
+const { configureCapture } = require('./screen-capture.cjs');
+const { createUpdates } = require('./updates.cjs');
+const { createDownloads } = require('./downloads.cjs');
+const { configureDownloadsPanel } = require('./downloads-panel.cjs');
+
+app.setName('Maiko');
+if (process.env.MAIKO_DESKTOP_USER_DATA) {
+  fs.mkdirSync(process.env.MAIKO_DESKTOP_USER_DATA, { recursive: true });
+  app.setPath('userData', process.env.MAIKO_DESKTOP_USER_DATA);
+}
+const testing = process.env.MAIKO_DESKTOP_TEST === '1';
+const defaults = readJson(path.join(__dirname, 'config.json'));
+let win, site, localServer, shuttingDown = false;
+let updates, downloads, downloadsPanel;
+let loadGeneration = 0;
+let layoutExpanded;
+let siteUpdateTimer;
+let state = { phase: 'loading', message: 'Запускаем Майко…', url: '', mode: process.argv.includes('--local') ? 'local' : 'remote', maximized: false };
+const uiUrl = pathToFileURL(path.join(__dirname, 'ui', 'index.html')).href;
+const siteLayoutCSS = fs.readFileSync(path.join(__dirname, 'ui/site-layout.css'), 'utf8') + '\n' +
+  fs.readFileSync(path.join(__dirname, 'ui/site-window.css'), 'utf8');
+const compactMembersJS = fs.readFileSync(path.join(__dirname, 'ui/compact-members.js'), 'utf8');
+const downloadProgressJS = fs.readFileSync(path.join(__dirname, 'ui/download-progress.js'), 'utf8');
+const settingsPath = () => path.join(app.getPath('userData'), 'desktop-settings.json');
+function log(message) {
+  try { fs.appendFileSync(path.join(app.getPath('userData'), 'desktop.log'), `${new Date().toISOString()} ${message}\n`); } catch { /* logging is optional */ }
+}
+function publish(patch = {}) {
+  const next = { ...state, ...patch, maximized: !!win && !win.isDestroyed() && (win.isMaximized() || win.isFullScreen()) };
+  if (Object.keys(next).every((key) => next[key] === state[key])) return;
+  state = next;
+  if (win && !win.isDestroyed()) win.webContents.send('desktop:state-changed', state);
+  downloadsPanel?.publish(state.downloads);
+  if (patch.downloads && site && !site.webContents.isDestroyed() && trusted(site.webContents.getURL())) {
+    site.webContents.send('desktop:site-downloads-changed', downloads?.siteProgress() || []);
+  }
+}
+function layout() {
+  if (!win || win.isDestroyed()) return;
+  const expanded = win.isMaximized() || win.isFullScreen();
+  // Keep the native content rectangular in normal and expanded modes.
+  if (layoutExpanded !== expanded) {
+    win.contentView.setBorderRadius(expanded ? 0 : RADIUS);
+    layoutExpanded = expanded;
+  }
+  if (site) {
+    const [width, height] = win.getContentSize();
+    sizeSite(width, height, expanded);
+  }
+  publish();
+}
+function sizeSite(width, height, expanded) {
+  if (!site) return;
+  const next = siteBounds(width, height, expanded);
+  const current = site.getBounds();
+  if (Object.keys(next).some((key) => next[key] !== current[key])) site.setBounds(next);
+}
+function toggleMaximize() {
+  if (win.isFullScreen()) { win.setFullScreen(false); return; }
+  if (win.isMaximized()) win.unmaximize();
+  else win.maximize();
+}
+function trusted(url) { return state.url && isSameOrigin(url, state.url); }
+function requireShell(event) {
+  if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame || event.senderFrame.url !== uiUrl) {
+    throw new Error('Недоступно для этой страницы');
+  }
+}
+function requireSite(event) {
+  if (!site || event.sender !== site.webContents || event.senderFrame !== site.webContents.mainFrame || !trusted(event.senderFrame.url)) {
+    throw new Error('Недоступно для этой страницы');
+  }
+}
+function refreshInterface() {
+  if (site && trusted(site.webContents.getURL()) && new URL(site.webContents.getURL()).pathname === '/desktop-runtime') {
+    site.webContents.send('desktop:refresh-interface');
+  } else void connect(state.url);
+}
+function siteUpdateState(phase) {
+  if (phase === 'ready' && !['loading', 'error'].includes(state.siteUpdatePhase)) return;
+  clearTimeout(siteUpdateTimer);
+  publish({ siteUpdatePhase: phase });
+  if (phase === 'ready') siteUpdateTimer = setTimeout(() => publish({ siteUpdatePhase: 'idle' }), 6000);
+}
+
+async function siteEntryUrl(target) {
+  // Keep compatibility with deployed frontends that do not have a media
+  // owner yet; fixtures and old servers continue to open their normal URL.
+  if (new URL(target).pathname !== '/') return target;
+  try {
+    const response = await fetch(new URL('/api/health', target), { signal: AbortSignal.timeout(5000) });
+    if (response.ok && (await response.json()).desktopMediaHost === 1) return new URL('/desktop-runtime', target).href;
+  } catch { /* loading the normal site still reports connection errors */ }
+  return target;
+}
+async function openExternal(url) {
+  try {
+    const parsed = new URL(url);
+    if (['https:', 'http:', 'mailto:'].includes(parsed.protocol)) await shell.openExternal(parsed.href);
+  } catch (error) { log(error.message); }
+}
+function createSite() {
+  const view = new WebContentsView({ webPreferences: {
+    partition: 'persist:maiko-site', sandbox: true, contextIsolation: true,
+    preload: path.join(__dirname, 'site-preload.cjs'),
+    nodeIntegration: false, webSecurity: true, backgroundThrottling: false,
+  } });
+  view.setBackgroundColor('#0c0c0e');
+  view.setVisible(false);
+  win.contentView.addChildView(view);
+  const contents = view.webContents;
+  contents.setWindowOpenHandler(({ url }) => {
+    if (trusted(url) && new URL(url).pathname.startsWith('/uploads/') && new URL(url).searchParams.has('download')) contents.downloadURL(url);
+    else void openExternal(url);
+    return { action: 'deny' };
+  });
+  const guardNavigation = (event, url) => {
+    if (!trusted(url)) { event.preventDefault(); void openExternal(url); }
+  };
+  contents.on('will-navigate', guardNavigation);
+  contents.on('will-redirect', guardNavigation);
+  contents.on('will-frame-navigate', (event) => {
+    if (!trusted(event.url)) { event.preventDefault(); void openExternal(event.url); }
+  });
+  contents.on('will-attach-webview', (event) => event.preventDefault());
+  contents.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
+    if (isMainFrame && !inPlace) publish({ phase: 'loading', message: 'Подключаемся…' });
+  });
+  const showSite = () => {
+    if (!trusted(contents.getURL())) return;
+    publish({ phase: 'ready', message: state.mode === 'local' ? 'Локальный сервер' : 'Подключено' });
+    view.setVisible(true);
+    contents.focus();
+  };
+  contents.on('dom-ready', () => {
+    if (!trusted(contents.getURL())) return;
+    void Promise.all([
+      contents.insertCSS(siteLayoutCSS),
+      contents.executeJavaScriptInIsolatedWorld(1001, [{ code: new URL(contents.getURL()).pathname === '/desktop-runtime' ? `
+        (() => {
+          const install = (frame) => {
+            const inject = () => {
+              try {
+                if (frame.contentWindow.location.origin !== location.origin) return;
+                const childDocument = frame.contentDocument;
+                if (!childDocument?.body || childDocument.querySelector('[data-maiko-layout]')) return;
+                const style = childDocument.createElement('style');
+                style.dataset.maikoLayout = '';
+                style.textContent = ${JSON.stringify(siteLayoutCSS)};
+                childDocument.head.append(style);
+                ((document, window, globalThis, location, matchMedia, requestAnimationFrame, maikoDownloadProgress) => {
+                  ${compactMembersJS}
+                  ${downloadProgressJS.replace('const api = window.maikoDownloadProgress;', 'const api = maikoDownloadProgress;')}
+                })(childDocument, frame.contentWindow, frame.contentWindow, frame.contentWindow.location,
+                  frame.contentWindow.matchMedia.bind(frame.contentWindow), frame.contentWindow.requestAnimationFrame.bind(frame.contentWindow), window.maikoDownloadProgress);
+              } catch { /* Do not grant anything to a cross-origin frame. */ }
+            };
+            frame.addEventListener('load', inject);
+            inject();
+          };
+          const frame = document.querySelector('iframe[data-maiko-desktop-ui]');
+          if (frame) install(frame);
+          new MutationObserver(records => {
+            for (const record of records) for (const node of record.addedNodes)
+              if (node instanceof HTMLIFrameElement && node.hasAttribute('data-maiko-desktop-ui')) install(node);
+          }).observe(document.body, { childList: true, subtree: true });
+        })();
+      ` : compactMembersJS + '\n' + downloadProgressJS }]),
+    ]).then(showSite).catch((error) => {
+      log(`Desktop layout helpers unavailable: ${error.message}`);
+      showSite();
+    });
+  });
+  contents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
+    if (code === -3) return;
+    if (!isMainFrame) { siteUpdateState('error'); return; }
+    view.setVisible(false);
+    publish({ phase: 'error', message: `Не удалось открыть Майко (${description}). Проверьте соединение и попробуйте снова.` });
+  });
+  contents.on('render-process-gone', (_event, details) => {
+    view.setVisible(false);
+    publish({ phase: 'error', message: 'Страница закрылась. Нажмите «Повторить».', detail: details.reason });
+  });
+  contents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    if (input.key === 'F5' || ((input.control || input.meta) && input.key.toLowerCase() === 'r')) {
+      event.preventDefault(); refreshInterface();
+    }
+    if (input.key === 'F11') { event.preventDefault(); win.setFullScreen(!win.isFullScreen()); }
+    if (!app.isPackaged && input.key === 'F12') { event.preventDefault(); contents.toggleDevTools(); }
+  });
+  return view;
+}
+async function connect(url) {
+  const generation = ++loadGeneration;
+  site?.setVisible(false);
+  publish({ phase: 'loading', message: 'Запускаем Майко…' });
+  try {
+    log(`Connecting in ${state.mode} mode`);
+    let target = url;
+    if (state.mode === 'local') {
+      if (!localServer) {
+        const root = findProjectRoot(process.env.MAIKO_PROJECT_DIR || (app.isPackaged ? path.dirname(process.execPath) : __dirname));
+        const port = Number(process.env.MAIKO_LOCAL_PORT || defaults.localPort || 3000);
+        if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('localPort должен быть числом от 1024 до 65535.');
+        localServer = await startLocalServer({ root, port, utilityProcess, onLog: log, dev: process.argv.includes('--dev') });
+      }
+      target = localServer.url;
+    }
+    target = normalizeUrl(target);
+    if (generation !== loadGeneration || !win || win.isDestroyed()) return;
+    publish({ url: target });
+    if (!site) { site = createSite(); layout(); }
+    const entry = await siteEntryUrl(target);
+    if (generation !== loadGeneration || !win || win.isDestroyed()) return;
+    await site.webContents.loadURL(entry);
+  } catch (error) {
+    if (generation !== loadGeneration) return;
+    site?.setVisible(false);
+    log(error.stack || error.message);
+    publish({ phase: 'error', message: error.message });
+  }
+}
+function saveWindow() {
+  if (!win || win.isDestroyed()) return;
+  fs.writeFileSync(settingsPath(), JSON.stringify({ bounds: win.getNormalBounds(), maximized: win.isMaximized() }, null, 2));
+}
+function createWindow() {
+  const saved = readJson(settingsPath());
+  win = new BrowserWindow({
+    ...visibleBounds(saved.bounds, screen.getAllDisplays()),
+    minWidth: 800, minHeight: 600, frame: false, roundedCorners: false,
+    // Windows owns edge hit testing and the native sizing loop.
+    transparent: false, thickFrame: true, resizable: true, backgroundColor: '#0c0c0e', title: 'Майко',
+    // PNG works reliably through NativeImage, including inside app.asar.
+    // The builder uses the multi-size ICO for the executable and shortcuts.
+    icon: path.join(__dirname, 'assets', 'icon.png'), show: false, autoHideMenuBar: true,
+    webPreferences: { preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false },
+  });
+  win.setMenu(null);
+  // Cover newly exposed pixels while Chromium draws its next frame.
+  // The shell and site's native surfaces use the same dark background.
+  win.contentView.setBackgroundColor('#0c0c0e');
+  // The shell's native view needs its own dark fallback while its renderer
+  // catches up during resizing.
+  const shellView = win.contentView.children.find((view) => view.webContents === win.webContents);
+  shellView?.setBackgroundColor('#0c0c0e');
+  layoutExpanded = undefined;
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (event, url) => { if (url !== uiUrl) event.preventDefault(); });
+  win.on('will-resize', (_event, bounds) => {
+    // Lay out the embedded site before Windows presents a larger client area.
+    // The system still owns the window's bounds and the entire sizing gesture.
+    const [width, height] = win.getSize();
+    const [contentWidth, contentHeight] = win.getContentSize();
+    sizeSite(bounds.width - (width - contentWidth), bounds.height - (height - contentHeight), win.isMaximized() || win.isFullScreen());
+  });
+  win.on('resize', layout);
+  win.on('resize', () => downloadsPanel?.hide());
+  win.on('blur', () => downloadsPanel?.hide());
+  for (const event of ['maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen']) win.on(event, layout);
+  win.on('close', () => { saveWindow(); });
+  win.on('closed', () => {
+    clearTimeout(siteUpdateTimer);
+    loadGeneration++;
+    downloadsPanel?.dispose();
+    if (site && !site.webContents.isDestroyed()) site.webContents.close();
+    site = undefined; win = undefined;
+  });
+  win.once('ready-to-show', () => {
+    if (saved.maximized) toggleMaximize();
+    layout();
+    if (!testing) win.show();
+  });
+  const createdWindow = win;
+  makeWindowRectangular(createdWindow);
+  void createdWindow.loadURL(uiUrl).then(() => {
+    if (createdWindow.isDestroyed()) return;
+    publish();
+    return connect((testing || !app.isPackaged ? process.env.MAIKO_DESKTOP_URL : undefined) || defaults.url);
+  }).catch((error) => { if (win && !win.isDestroyed()) log(error.stack || error.message); });
+}
+
+if (!app.requestSingleInstanceLock()) { app.quit(); }
+else {
+  app.on('second-instance', () => {
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.show(); win.focus();
+  });
+  app.whenReady().then(() => {
+    app.setAppUserModelId('io.maiko.desktop');
+    Menu.setApplicationMenu(null);
+    const siteSession = session.fromPartition('persist:maiko-site');
+    configureLocalAssets({ siteSession, trusted, log });
+    const allowed = new Set(['media', 'notifications', 'display-capture', 'fullscreen', 'clipboard-sanitized-write']);
+    siteSession.setPermissionCheckHandler((contents, permission, origin) =>
+      !!site && contents === site.webContents && trusted(origin) && allowed.has(permission));
+    siteSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+      callback(!!site && contents === site.webContents && trusted(details.requestingUrl || contents.getURL()) && allowed.has(permission));
+    });
+    configureCapture({ siteSession, getWindow: () => win, getSite: () => site, trusted, testing, log });
+    downloads = createDownloads({
+      directory: path.join(testing && process.env.MAIKO_DESKTOP_DOWNLOADS_DIR || app.getPath('downloads'), 'Maiko'),
+      historyPath: path.join(app.getPath('userData'), 'downloads.json'),
+      siteSession, getSite: () => site, trusted, publish, shell, log,
+    });
+    downloadsPanel = configureDownloadsPanel({ ipcMain, getWindow: () => win, requireShell, downloads, log });
+    ipcMain.handle('desktop:site-downloads-state', (event) => { requireSite(event); return downloads.siteProgress(); });
+    ipcMain.handle('desktop:site-downloads-cancel', (event, id) => { requireSite(event); return downloads.action('cancel', id); });
+    ipcMain.handle('desktop:site-update-state', (event, phase) => {
+      requireSite(event);
+      if (new URL(event.senderFrame.url).pathname !== '/desktop-runtime' || !['loading', 'ready', 'error'].includes(phase)) {
+        throw new Error('Недоступное состояние обновления');
+      }
+      siteUpdateState(phase);
+    });
+    ipcMain.handle('desktop:downloads', (event, command, id) => {
+      requireShell(event);
+      return downloads.action(command, id);
+    });
+    updates = createUpdates({ app, publish, log, testing, notificationUrl: defaults.url, prepareInstall: async () => {
+      saveWindow();
+      siteSession.flushStorageData();
+      await siteSession.cookies.flushStore();
+      // Stop an owned server before NSIS starts waiting for our processes.
+      if (localServer?.owned) {
+        await localServer.stop();
+        localServer = undefined;
+      }
+    } });
+    ipcMain.handle('desktop:update', (event, action) => { requireShell(event); return updates.action(action); });
+    ipcMain.handle('desktop:state', (event) => { requireShell(event); return state; });
+    ipcMain.handle('desktop:control', (event, action) => {
+      requireShell(event);
+      if (action === 'minimize') win.minimize();
+      else if (action === 'maximize') {
+        toggleMaximize();
+      }
+      else if (action === 'close') win.close();
+      else if (action === 'reload') refreshInterface();
+      else if (action === 'logs') void shell.openPath(path.join(app.getPath('userData'), 'desktop.log'));
+      else throw new Error('Неизвестная команда окна');
+    });
+    createWindow();
+    updates.start();
+    app.once('will-quit', () => { updates.dispose(); downloads.dispose(); });
+    app.on('activate', () => { if (!win) createWindow(); });
+  }).catch((error) => { log(error.stack); app.quit(); });
+  app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+  app.on('before-quit', (event) => {
+    if (shuttingDown || !localServer?.owned) return;
+    event.preventDefault(); shuttingDown = true;
+    void localServer.stop().finally(() => app.quit());
+  });
+}
+
+
+==============================================================================
+desktop/site-preload.cjs
+==============================================================================
+
+const { contextBridge, ipcRenderer } = require('electron');
+
+// No renderer controls or IPC primitives are exposed. This signal only lets
+// the trusted site's permanent media document refresh its own child UI.
+contextBridge.exposeInMainWorld('maikoMediaShell', Object.freeze({
+  version: 1,
+  siteUpdate: (phase) => ipcRenderer.invoke('desktop:site-update-state', phase),
+  onRefresh: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('desktop:refresh-interface', handler);
+    return () => ipcRenderer.removeListener('desktop:refresh-interface', handler);
+  },
+}));
+
+// Only our isolated DOM helper can see this bridge. No filesystem paths or
+// folder-opening commands are exposed to the remotely loaded messenger.
+contextBridge.exposeInIsolatedWorld(1001, 'maikoDownloadProgress', Object.freeze({
+  state: () => ipcRenderer.invoke('desktop:site-downloads-state'),
+  cancel: (id) => ipcRenderer.invoke('desktop:site-downloads-cancel', id),
+  onState: (callback) => {
+    const handler = (_event, state) => callback(state);
+    ipcRenderer.on('desktop:site-downloads-changed', handler);
+    return () => ipcRenderer.removeListener('desktop:site-downloads-changed', handler);
+  },
+}));
+
+// Read-only capture metadata. The site still has no shell, filesystem or
+// window-control bridge. The main process accepts this only from its site.
+contextBridge.exposeInMainWorld('maikoScreenAudio', Object.freeze({
+  takePolicy: () => ipcRenderer.invoke('desktop:capture-audio-policy'),
+}));
+
+contextBridge.executeInMainWorld({ func: () => {
+  const devices = navigator.mediaDevices;
+  if (!devices?.getDisplayMedia) return;
+  const capture = devices.getDisplayMedia.bind(devices);
+  let capturing = false;
+  function describeIsolatedTrack(track) {
+    const settings = track.getSettings.bind(track);
+    const clone = track.clone.bind(track);
+    // Chromium on Windows 10 reports restrictOwnAudio=false even for its
+    // native process-isolated devices. Report the policy actually applied by
+    // the desktop handler, so the deployed site's safety check accepts it.
+    // This changes metadata only; filtering happens natively before encoding.
+    Object.defineProperty(track, 'getSettings', {
+      value: () => ({ ...settings(), restrictOwnAudio: true }),
+    });
+    Object.defineProperty(track, 'clone', {
+      value: () => { const cloned = clone(); describeIsolatedTrack(cloned); return cloned; },
+    });
+  }
+  Object.defineProperty(devices, 'getDisplayMedia', {
+    value: async (options) => {
+      if (capturing) throw new DOMException('Демонстрация уже выбирается', 'InvalidStateError');
+      capturing = true;
+      let stream;
+      try {
+        stream = await capture(options);
+        const policy = await window.maikoScreenAudio.takePolicy();
+        if (policy?.isolated === true) {
+          for (const track of stream.getAudioTracks()) describeIsolatedTrack(track);
+        } else {
+          // A missing policy must never produce an unfiltered call loopback.
+          for (const track of stream.getAudioTracks()) { track.stop(); stream.removeTrack(track); }
+        }
+        return stream;
+      } catch (error) {
+        stream?.getTracks().forEach((track) => track.stop());
+        throw error;
+      } finally { capturing = false; }
+    },
+  });
+} });
+
+
+==============================================================================
+desktop/ui/index.html
+==============================================================================
+
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Майко</title>
+  <link rel="stylesheet" href="shell.css">
+  <script src="shell.js" defer></script>
+</head>
+<body>
+  <div class="desktop-frame">
+    <header class="titlebar" id="titlebar">
+      <div class="brand"><img src="../assets/icon.png" alt="" width="22" height="22"><span>Майко</span></div>
+      <span class="connection" aria-live="polite"><span class="status-dot"></span><span id="status">Запускаем…</span></span>
+      <div class="site-update-dock" id="site-update-dock" data-phase="idle" hidden>
+        <svg class="site-update-wheel" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/></svg>
+        <span id="site-update-label" role="status" aria-live="polite"></span>
+        <button id="site-update-retry" data-action="reload" aria-label="Повторить обновление сайта" title="Повторить обновление сайта" hidden>↻</button>
+      </div>
+      <div class="window-actions">
+        <div class="downloads-dock">
+          <button id="downloads-action" title="Открыть папку загрузок" aria-label="Открыть папку загрузок" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v11H3ZM3 7V4h7l2 3"/></svg><span id="downloads-count" hidden></span></button>
+          <span class="sr-only" id="downloads-status" role="status" aria-live="polite"></span>
+        </div>
+        <div class="update-dock" id="update-dock" data-phase="idle">
+          <span class="app-version" id="app-version" aria-label="Версия приложения"></span>
+          <button id="update-action" class="update-button" aria-label="Проверить обновления" title="Проверить обновления">
+            <svg class="update-wheel" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/></svg>
+            <span id="update-label">Проверить</span>
+          </button>
+          <progress id="update-progress" max="100" value="0" aria-label="Скачивание обновления" hidden></progress>
+          <span class="sr-only" id="update-status" role="status" aria-live="polite"></span>
+        </div>
+        <button data-action="minimize" title="Свернуть" aria-label="Свернуть"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+        <button data-action="maximize" id="maximize" title="Развернуть" aria-label="Развернуть"><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1"/></svg></button>
+        <button data-action="close" class="close-button" title="Закрыть" aria-label="Закрыть"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </div>
+    </header>
+    <main class="connection-screen" id="connection-screen">
+      <section class="connection-card" aria-live="polite">
+        <img class="app-icon" src="../assets/icon.png" width="72" height="72" alt="Майко">
+        <p class="eyebrow">ВАШИ ЛЮДИ. ВАШ МАЙКО.</p>
+        <h1 id="heading">Почти на месте</h1>
+        <p class="description" id="message">Запускаем приложение…</p>
+        <div class="loader" id="loader" aria-label="Загрузка"></div>
+        <div class="error-actions" id="error-actions" hidden>
+          <button class="primary" data-action="reload">Повторить</button>
+          <button class="text-button" data-action="logs">Открыть журнал</button>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
+
+
+==============================================================================
+desktop/ui/shell.js
+==============================================================================
+
+const api = window.maikoDesktop;
+const element = (id) => document.getElementById(id);
+
+function render(state) {
+  document.body.dataset.phase = state.phase;
+  document.body.classList.toggle('maximized', state.maximized);
+  element('status').textContent = state.phase === 'ready' ? 'Подключено' : state.phase === 'error' ? 'Нет подключения' : 'Подключаемся…';
+  element('message').textContent = state.message;
+  element('heading').textContent = state.phase === 'error' ? 'Не удалось подключиться' : 'Почти на месте';
+  element('loader').hidden = state.phase !== 'loading';
+  element('error-actions').hidden = state.phase !== 'error';
+  element('connection-screen').hidden = state.phase === 'ready';
+  const sitePhase = state.siteUpdatePhase || 'idle';
+  element('site-update-dock').hidden = sitePhase === 'idle';
+  element('site-update-dock').dataset.phase = sitePhase;
+  element('site-update-label').textContent = sitePhase === 'loading' ? 'Сайт обновляется…' : sitePhase === 'ready' ? 'Сайт обновлён' : sitePhase === 'error' ? 'Не удалось обновить сайт' : '';
+  element('site-update-retry').hidden = sitePhase !== 'error';
+  element('maximize').title = state.maximized ? 'Восстановить' : 'Развернуть';
+  element('maximize').setAttribute('aria-label', element('maximize').title);
+  const files = state.downloads?.entries || [];
+  const pending = files.filter((file) => file.phase === 'downloading');
+  element('downloads-count').hidden = pending.length === 0;
+  element('downloads-count').textContent = pending.length;
+  element('downloads-action').title = pending.length ? `Открыть папку загрузок. Скачиваем: ${pending.length}` : 'Открыть папку загрузок';
+  element('downloads-status').textContent = files[0] ? `${files[0].name}: ${files[0].message}` : '';
+  const update = state.update;
+  if (update) {
+    element('app-version').textContent = `v${update.currentVersion}`;
+    element('app-version').title = `Версия приложения ${update.currentVersion}`;
+    element('update-status').textContent = update.message;
+    element('update-dock').dataset.phase = update.phase;
+    element('update-dock').title = update.message;
+    const busy = ['checking', 'downloading', 'downloaded', 'installing'].includes(update.phase);
+    const command = update.phase === 'error' && update.retryAction === 'apply' ? 'apply' :
+      update.phase === 'available' || (update.phase === 'error' && update.retryAction === 'download') ? 'download' : 'check';
+    element('update-action').dataset.command = command;
+    element('update-action').disabled = busy || update.phase === 'disabled';
+    const label = busy ? update.phase === 'checking' ? 'Проверка…' : ['downloaded', 'installing'].includes(update.phase) ? 'Установка…' : `${update.progress}%` :
+      update.phase === 'error' ? 'Повторить' : command === 'download' ? 'Обновить' : update.phase === 'current' ? 'Обновлено' : 'Проверить';
+    const description = command === 'apply' ? 'Повторить установку обновления' :
+      command === 'download' ? `Обновить до версии ${update.version} с автоматическим перезапуском` : 'Проверить обновления';
+    element('update-label').textContent = label;
+    element('update-action').setAttribute('aria-label', busy ? update.message : description);
+    element('update-action').title = update.phase === 'disabled' ? update.message : `${description}. ${update.message}`;
+    element('update-progress').hidden = update.phase !== 'downloading';
+    element('update-progress').value = update.progress;
+  }
+}
+for (const button of document.querySelectorAll('[data-action]')) {
+  button.addEventListener('click', () => {
+    void api.control(button.dataset.action);
+  });
+}
+element('titlebar').addEventListener('dblclick', (event) => {
+  if (!event.target.closest('button')) void api.control('maximize');
+});
+element('update-action').addEventListener('click', async () => {
+  try { await api.update(element('update-action').dataset.command || 'check'); }
+  catch (error) {
+    element('update-status').textContent = error.message;
+    element('update-dock').title = error.message;
+  }
+});
+api.onState(render);
+void api.state().then(render);
+element('downloads-action').addEventListener('click', async () => {
+  try { await api.downloadsPanel(false); await api.downloads('folder'); }
+  catch (error) {
+    element('downloads-status').textContent = error.message;
+    element('downloads-action').title = error.message;
+  }
+});
+const downloadsButton = element('downloads-action');
+function showDownloadsPanel() {
+  const { x, width } = downloadsButton.getBoundingClientRect();
+  void api.downloadsPanel(true, { x, width });
+}
+downloadsButton.addEventListener('pointerenter', showDownloadsPanel);
+downloadsButton.addEventListener('pointerleave', () => void api.downloadsPanel(false));
+downloadsButton.addEventListener('focus', showDownloadsPanel);
+downloadsButton.addEventListener('blur', () => void api.downloadsPanel(false));
+api.onDownloadsPanel((open) => downloadsButton.setAttribute('aria-expanded', String(open)));
+
+
+==============================================================================
+desktop/ui/shell.css
+==============================================================================
+
+:root { color-scheme: dark; font-family: "Segoe UI", sans-serif; --bg: #0c0c0e; --line: #ffffff12; --muted: #85858e; --accent: #6784b7; }
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; background: transparent; color: #ececee; overflow: hidden; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+button:focus-visible, input:focus-visible { outline: 2px solid #809acd; outline-offset: 3px; }
+[hidden] { display: none !important; }
+.desktop-frame { position: relative; height: 100%; overflow: hidden; border: 1px solid #ffffff20; border-radius: 0; background: var(--bg); }
+body.maximized .desktop-frame { border-radius: 0; border-color: transparent; }
+.titlebar { height: 41px; display: flex; align-items: center; gap: 18px; padding-left: 15px; user-select: none; app-region: drag; -webkit-app-region: drag; background: #111113; border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 12px; letter-spacing: .25px; }
+.brand img { border-radius: 6px; }
+.connection { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; flex: 1; }
+.site-update-dock { display: flex; align-items: center; gap: 6px; font-size: 10px; white-space: nowrap; color: #a9bde0; }
+.site-update-wheel { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.site-update-dock[data-phase="loading"] .site-update-wheel { animation: spin 1.2s linear infinite; }
+.site-update-dock[data-phase="ready"] { color: #9fb9aa; }
+.site-update-dock[data-phase="error"] { color: #e3ab8f; }
+.site-update-dock button { app-region: no-drag; -webkit-app-region: no-drag; border: 0; background: transparent; color: inherit; padding: 2px 4px; }
+@media (prefers-reduced-motion: reduce) { .site-update-wheel { animation: none !important; } }
+.status-dot { width: 5px; height: 5px; border-radius: 50%; background: #8e8e96; }
+body[data-phase="ready"] .status-dot { background: #81aa95; }
+body[data-phase="error"] .status-dot { background: #c96b6b; }
+.window-actions { display: flex; margin-left: auto; height: 100%; app-region: no-drag; -webkit-app-region: no-drag; }
+.window-actions button { width: 44px; height: 100%; display: grid; place-items: center; color: #b9b9c0; background: transparent; border: 0; transition: background .15s, color .15s; }
+.window-actions button:hover { background: #ffffff0c; color: white; }
+.window-actions .close-button:hover { background: #ba4d57; color: white; }
+svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.connection-screen { height: calc(100% - 41px); display: grid; place-items: safe center; padding: 40px; overflow-y: auto; overscroll-behavior-y: contain; background: radial-gradient(ellipse at 50% 35%, #19233355, transparent 60%); }
+.connection-card { width: min(100%, 420px); text-align: center; }
+.app-icon { border-radius: 22px; margin-bottom: 30px; box-shadow: 0 12px 45px #0005; }
+.eyebrow { font-size: 10px; letter-spacing: 2px; color: #8798b6; margin-bottom: 12px; }
+h1 { font-size: 30px; font-weight: 600; letter-spacing: -.8px; margin: 0 0 14px; }
+.description { color: #96969f; font-size: 14px; line-height: 1.65; margin: 0 0 24px; overflow-wrap: anywhere; }
+.loader { width: 22px; height: 22px; border: 2px solid #ffffff14; border-top-color: #809acd; border-radius: 50%; margin: 30px auto; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.primary, .secondary { border-radius: 10px; padding: 11px 20px; border: 1px solid var(--line); font-size: 13px; color: #ececee; }
+.primary { background: #4c6da9; border-color: transparent; }
+.primary:hover { background: #5c7db9; }
+.secondary { background: #ffffff06; }
+.secondary:hover { background: #ffffff0d; }
+.text-button { display: block; margin: 16px auto 0; color: var(--muted); background: transparent; border: 0; font-size: 12px; }
+.text-button:hover { color: #ececee; }
+label { display: block; text-align: left; font-size: 12px; color: #b0b0b9; margin-bottom: 9px; }
+.hint { color: #62626b; font-size: 11px; margin-top: 24px; }
+@media (prefers-reduced-motion: reduce) { .loader { animation: none; } }
+/* Screen/window chooser */
+.capture-frame { height: 100%; border: 1px solid #ffffff20; border-radius: 0; display: flex; flex-direction: column; background: #141416; overflow: hidden; }
+.capture-header { flex-shrink: 0; padding: 24px 28px 10px; app-region: drag; -webkit-app-region: drag; }
+.capture-header h1 { font-size: 22px; margin-bottom: 7px; }
+.capture-header p { font-size: 13px; color: var(--muted); margin: 0; }
+.sources { flex: 1; min-height: 0; overflow: auto; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-content: start; gap: 12px; padding: 18px 28px; }
+.source { text-align: left; padding: 5px; border: 2px solid transparent; border-radius: 10px; color: #b5b5bd; background: #ffffff05; }
+.source:hover { background: #ffffff0d; }
+.source[aria-pressed="true"] { border-color: #6784b7; background: #6784b718; color: white; }
+.source img { display: block; width: 100%; height: 102px; object-fit: contain; background: #080809; border-radius: 5px; }
+.source span { display: block; padding: 9px 5px; font-size: 11px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.capture-footer { flex-shrink: 0; padding: 16px 28px 22px; border-top: 1px solid var(--line); }
+.capture-footer label { display: flex; gap: 9px; align-items: center; margin: 0; }
+.capture-footer input { accent-color: #6784b7; }
+.capture-footer .hint { text-align: left; margin: 8px 0 0; }
+button:disabled { opacity: .4; cursor: default; }
+.update-dock { position: relative; display: flex; align-items: center; gap: 9px; margin: 6px 12px 6px 0; padding-left: 12px; border-left: 1px solid var(--line); }
+.app-version { color: #7f8490; font-size: 10px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.window-actions .update-button { display: flex; justify-content: center; gap: 7px; width: auto; min-width: 95px; height: 29px; padding: 0 10px; border-radius: 7px; font-size: 11px; white-space: nowrap; }
+.update-dock[data-phase="available"] .update-button, .update-dock[data-phase="downloaded"] .update-button { color: #c1d3f1; background: #6784b72b; }
+.update-dock[data-phase="available"] .update-button:hover, .update-dock[data-phase="downloaded"] .update-button:hover { background: #6784b748; }
+.update-dock[data-phase="error"] .update-button { color: #e3ab8f; }
+.update-dock[data-phase="current"] .update-button { color: #9fb9aa; }
+.update-dock[data-phase="checking"] .update-wheel, .update-dock[data-phase="downloading"] .update-wheel, .update-dock[data-phase="installing"] .update-wheel { animation: spin 1.2s linear infinite; }
+.update-dock[data-phase="checking"] .update-button, .update-dock[data-phase="downloading"] .update-button, .update-dock[data-phase="installing"] .update-button { opacity: 1; color: #a9bde0; }
+.update-dock progress { position: absolute; right: 8px; bottom: 0; width: 80px; height: 2px; border: 0; appearance: none; }
+.update-dock progress::-webkit-progress-bar { background: #ffffff0d; border-radius: 2px; }
+.update-dock progress::-webkit-progress-value { background: #a9bde0; border-radius: 2px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.downloads-dock { display: flex; align-items: center; gap: 2px; margin-right: 8px; }
+.window-actions #downloads-action { position: relative; width: 38px; }
+#downloads-count { position: absolute; right: 1px; top: 5px; min-width: 13px; height: 13px; padding: 0 3px; border-radius: 8px; background: #6784b7; color: white; font-size: 9px; line-height: 13px; }
+@media (prefers-reduced-motion: reduce) { .update-dock[data-phase] .update-wheel { animation: none; } }
+
+
+==============================================================================
+site/server.ts — идентификаторы сборки и время восстановления
+==============================================================================
+
+const APP_BOOT_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+// Read once: a build in progress must not advertise itself before PM2 starts it.
+const APP_BUILD_ID = dev ? APP_BOOT_ID : readFileSync(path.join(process.cwd(), ".next/BUILD_ID"), "utf8").trim();
+const DEPLOY_RECONNECT_GRACE_MS = 90_000;
+const restoredMediaUntil = Date.now() + DEPLOY_RECONNECT_GRACE_MS;
+const CALL_SIGNAL_MAX_JSON = 64 * 1024;
+const CALL_LOG_RE =
+  /^(Звонок без ответа|(Видеозвонок|Звонок) завершён( · \d{1,3}:\d{2})?)$/;
+
+
+
+==============================================================================
+site/server.ts — проверка готовности
+==============================================================================
+
+    if (url.startsWith("/api/health")) {
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Cache-Control", "no-store");
+      const health = async () => {
+        const ok = messageStore ? await messageStore.healthy() : true;
+        res.statusCode = ok ? 200 : 503;
+        res.end(JSON.stringify({ ok, service: "pulse", bootId: APP_BOOT_ID, buildId: APP_BUILD_ID, desktopMediaHost: 1, mediaStorage: s3Enabled ? "s3" : "local", messageStorage: messageStore ? "mongodb" : "json" }));
+      };
+      void health();
+      return;
+    }
+
+
+==============================================================================
+site/server.ts — рассылка с сервера и резервирование звонка перед перезагрузкой
+==============================================================================
+
+  // Keep sending boot id so open tabs reload after PM2 restart even if they
+  // missed the first `connection` packet (hung polling, background tab).
+  setInterval(() => {
+    io.emit("app:boot", { bootId: APP_BOOT_ID, buildId: APP_BUILD_ID });
+  }, 3_000);
+
+  io.on("connection", (socket) => {
+    ioServer = io;
+    if (messageStore) {
+      socket.use(async (packet, nextPacket) => {
+        const ackIndex = packet.length - 1;
+        const acknowledge = packet[ackIndex];
+        if (typeof acknowledge === "function") {
+          packet[ackIndex] = (result: { ok?: boolean; error?: string }) => {
+            if (!result?.ok) { acknowledge(result); return; }
+            void messageStore.idle().then(
+              () => acknowledge(result),
+              () => acknowledge({ ok: false, error: "Не удалось сохранить изменения. Повторите попытку." }),
+            );
+          };
+        }
+        if (/^(message|group:(delete|invite)|invite:|text:delete|call:log)/.test(String(packet[0])) && !await messageStore.healthy()) {
+          if (typeof acknowledge === "function") acknowledge({ ok: false, error: "Хранилище сообщений временно недоступно" });
+          return;
+        }
+        nextPacket();
+      });
+    }
+    socket.emit("app:boot", { bootId: APP_BOOT_ID, buildId: APP_BUILD_ID });
+    socket.on("app:prepare-reload", (payload: { buildId?: string }, ack?: (result: { ok: boolean }) => void) => {
+      const account = requireAccount(socket);
+      if (!account || payload?.buildId !== APP_BUILD_ID) { ack?.({ ok: false }); return; }
+      socket.data.reloadUntil = Date.now() + DEPLOY_RECONNECT_GRACE_MS;
+      const callId = callByUser.get(account.userId);
+      const call = callId ? callsById.get(callId) : undefined;
+      if (call?.status === "active") {
+        emitToUser(io, peerIdOfCall(call, account.userId), "call:reloading", { callId: call.callId });
+      }
+      // Presence and call IDs remain reserved; this is not call:end/voice:leave.
+      persistLiveMedia();
+      ack?.({ ok: true });
+    });
+
+
+==============================================================================
+site/server.ts — возвращение в прежний звонок после авторизации
+==============================================================================
+
+function afterAuth(io: Server, socket: Socket, account: AuthAccount) {
+  cancelCallDisconnectTimer(account.userId);
+  const voiceGrace = voiceDisconnectTimers.get(account.userId);
+  if (voiceGrace) {
+    clearTimeout(voiceGrace);
+    voiceDisconnectTimers.delete(account.userId);
+  }
+  const existing = usersBySocket.get(socket.id);
+  usersBySocket.set(socket.id, {
+    userId: account.userId,
+    name: labelOf(account),
+    room: existing?.room ?? null,
+  });
+  emitChats(socket, account.userId);
+  broadcastPeople(io);
+
+  // Re-deliver ringing call after phone woke / tab reconnected.
+  const ringing = ringingCallForUser(account.userId);
+  if (ringing) {
+    const caller = getUserById(ringing.callerId);
+    socket.emit("call:incoming", {
+      callId: ringing.callId,
+      fromUserId: ringing.callerId,
+      fromName: caller?.displayName || caller?.username || "Майко",
+      mode: ringing.mode,
+      chatId: ringing.chatId,
+    });
+  }
+
+  const liveCallId = callByUser.get(account.userId);
+  const liveCall = liveCallId ? callsById.get(liveCallId) : null;
+  if (liveCall && liveCall.status === "active") {
+    const peerId =
+      liveCall.callerId === account.userId ? liveCall.calleeId : liveCall.callerId;
+    const peer = getUserById(peerId);
+    if (callByUser.get(peerId) !== liveCall.callId) {
+      // Peer already left this call — it's a ghost. Kill it instead of
+      // resuming a call that only exists in stale state.
+      clearCall(liveCall.callId);
+    } else {
+      const peerPresent = userIsConnected(peerId);
+      socket.emit("call:resume", {
+        callId: liveCall.callId,
+        peerId,
+        peerName: peer?.displayName || peer?.username || "Майко",
+        mode: liveCall.mode,
+        chatId: liveCall.chatId,
+        role: liveCall.callerId === account.userId ? "caller" : "callee",
+        peerPresent,
+      });
+      if (peerPresent && socketsForUser(account.userId).length <= 1) {
+        emitToUser(io, peerId, "call:resume", {
+          callId: liveCall.callId,
+          peerId: account.userId,
+          peerName: labelOf(account),
+          mode: liveCall.mode,
+          chatId: liveCall.chatId,
+          role: liveCall.callerId === peerId ? "caller" : "callee",
+          peerPresent: true,
+        });
+      }
+    }
+  }
+}
+
+
+
+==============================================================================
+site/server.ts — сохранение участия при временном отключении
+==============================================================================
+
+    socket.on("disconnect", () => {
+      const account = requireAccount(socket);
+      if (account) {
+        const voiceChannelId = voiceBySocket.get(socket.id);
+        if (voiceChannelId) {
+          const existingVoiceTimer = voiceDisconnectTimers.get(account.userId);
+          if (existingVoiceTimer) clearTimeout(existingVoiceTimer);
+          voiceDisconnectTimers.set(
+            account.userId,
+            setTimeout(() => {
+              voiceDisconnectTimers.delete(account.userId);
+              if (voiceBySocket.get(socket.id) !== voiceChannelId) return;
+              leaveVoiceChannel(io, socket, account.userId);
+            }, Math.max(VOICE_RECONNECT_GRACE_MS, Number(socket.data.reloadUntil || 0) - Date.now())),
+          );
+        }
+        const remaining = socketsForUser(account.userId).filter(
+          (id) => id !== socket.id,
+        );
+        if (remaining.length === 0) {
+          const callId = callByUser.get(account.userId);
+          const call = callId ? callsById.get(callId) : null;
+          if (call) {
+            const existingTimer = callDisconnectTimers.get(account.userId);
+            if (existingTimer) clearTimeout(existingTimer);
+            callDisconnectTimers.set(
+              account.userId,
+              setTimeout(() => {
+                callDisconnectTimers.delete(account.userId);
+                if (socketsForUser(account.userId).length > 0) return;
+                const still = callsById.get(call.callId);
+                if (!still) return;
+                allowCallLog(account.userId, still.chatId);
+                allowCallLog(peerIdOfCall(still, account.userId), still.chatId);
+                const ringing = still.status === "ringing";
+                const remainingId = leaveCallParticipant(still, account.userId);
+                if (!remainingId) return;
+                emitToUser(io, remainingId, "call:signal", {
+                  callId: still.callId,
+                  fromUserId: account.userId,
+                  fromName: labelOf(account),
+                  type: ringing ? "end" : "peer-left",
+                  data: { reason: "disconnect" },
+                });
+              }, Math.max(CALL_RECONNECT_GRACE_MS, Number(socket.data.reloadUntil || 0) - Date.now())),
+            );
+          }
+        }
+        touchLastSeen(account.userId);
+      }
+      leaveCurrentRoom(io, socket);
+      usersBySocket.delete(socket.id);
+      unbindSocketAuth(socket.id);
+      broadcastPeople(io);
+    });
+  });
+
+
+
+==============================================================================
+site/src/hooks/useCall.ts — восстановление микрофона, наушников и камеры
+==============================================================================
+
+  const prepareResumeControls = useCallback((peerId: string, chatId: string, callId?: string) => {
+    if (localStreamRef.current) return;
+    const saved = peekMediaResume();
+    if (saved?.kind !== "call" || saved.peerId !== peerId || saved.chatId !== chatId ||
+      (callId && saved.callId && saved.callId !== callId)) return;
+    resumeControlsRef.current = saved;
+    resumedConnectedAtRef.current = saved.connectedAt || null;
+    mutedRef.current = saved.muted;
+    deafenedRef.current = Boolean(saved.deafened);
+    setMuted(saved.muted);
+    setDeafened(Boolean(saved.deafened));
+    setCameraOff(saved.cameraOff);
+  }, []);
+
+  const getMedia = useCallback(async (_mode: CallMode) => {
+    const saved = resumeControlsRef.current;
+    const { filter, stream } = await captureFilteredMic();
+    // Apply mute BEFORE publishing any track: reload must never expose audio
+    // from a microphone that the user had muted.
+    setMicEnabled(stream, !mutedRef.current, filter.sourceTrack);
+    noiseFilterRef.current = filter;
+    setNoiseFilterEnabled(getNeuralNoiseEnabled());
+    setNoiseFilterKind(filter.kind);
+    setCameraOff(true);
+    localCameraOffRef.current = true;
+    localSharingScreenRef.current = false;
+    cameraWasOffRef.current = true;
+    cameraTrackRef.current = null;
+    localStreamRef.current = stream;
+    if (saved && !saved.cameraOff) {
+      try {
+        const camera = await openCameraStream(cameraFacingRef.current);
+        const track = camera.getVideoTracks()[0];
+        if (track) {
+          prepareCameraTrack(track);
+          cameraTrackRef.current = track;
+          stream.addTrack(track);
+          cameraWasOffRef.current = false;
+          localCameraOffRef.current = false;
+          setCameraOff(false);
+          track.onended = () => {
+            if (cameraTrackRef.current !== track) return;
+            cameraTrackRef.current = null;
+            cameraWasOffRef.current = true;
+            localCameraOffRef.current = true;
+            setCameraOff(true);
+            publishLocalVideos();
+          };
+        }
+      } catch { setStatus("Нет доступа к камере"); }
+    }
+    resumeControlsRef.current = null;
+    setLocalStream(stream);
+    return stream;
+  }, [publishLocalVideos]);
+
+
+
+==============================================================================
+site/src/hooks/useCall.ts — снимок звонка и запрос на восстановление вместо нового вызова
+==============================================================================
+
+    if (!active || !active.callId || resumeControlsRef.current) return;
+    const persist = () =>
+      saveMediaResume({
+        kind: "call",
+        peerId: active.peerId,
+        peerName: active.peerName,
+        chatId: active.chatId,
+        mode: active.mode,
+        muted,
+        deafened,
+        cameraOff,
+        callId: active.callId,
+        connectedAt: connectedAtRef.current || resumedConnectedAtRef.current || undefined,
+        sharingScreen,
+      });
+    persist();
+    const unbind = registerMediaResumePersist(persist);
+    const timer = window.setInterval(persist, 15_000);
+    return () => {
+      unbind();
+      window.clearInterval(timer);
+    };
+  }, [active, muted, deafened, cameraOff, sharingScreen, localStream]);
+
+  const startCall = useCallback(
+    async (
+      peerId: string,
+      peerName: string,
+      mode: CallMode,
+      chatId: string,
+      opts?: { reconnect?: boolean },
+    ) => {
+      if (!socket || !selfId) return;
+      if (busyRef.current) {
+        if (!opts?.reconnect) setStatus("Уже есть активный звонок");
+        return;
+      }
+
+      busyRef.current = true;
+      const saved = opts?.reconnect ? peekMediaResume() : null;
+      if (opts?.reconnect) prepareResumeControls(peerId, chatId);
+      outboundRef.current = true;
+      peerLeftRef.current = false;
+      setMinimized(false);
+      setActive({
+        peerId,
+        peerName,
+        mode,
+        chatId,
+        outbound: true,
+        callId: "",
+      });
+      if (!opts?.reconnect) setStatus("Звоним…");
+
+      try {
+        await ensureIceServers();
+        await getMedia(mode);
+      } catch (error) {
+        const message =
+          error instanceof Error && /микрофон|microphone|NotAllowed|Permission/i.test(error.message)
+            ? "Нет доступа к микрофону"
+            : "Не удалось начать звонок";
+        setStatus(message);
+        scheduleCleanup(1400);
+        return;
+      }
+
+      if (!opts?.reconnect) {
+        startRingTimer(() => {
+          setStatus("Нет ответа");
+          clearMediaResume();
+          if (peerRef.current) {
+            emitSignal(peerId, "end");
+            onLog?.(chatId, "Звонок без ответа");
+          }
+          scheduleCleanup(1400);
+        });
+      }
+
+      const inviteOnce = () =>
+        new Promise<{
+          ok: boolean;
+          callId?: string;
+          resume?: boolean;
+          role?: "caller" | "callee";
+          peerPresent?: boolean;
+          error?: string;
+        }>((resolve) => {
+          socket.emit(
+            "call:invite",
+            { toUserId: peerId, mode, chatId, reconnect: Boolean(opts?.reconnect),
+              callId: saved?.kind === "call" ? saved.callId : undefined },
+            (result: {
+              ok: boolean;
+              callId?: string;
+              resume?: boolean;
+              role?: "caller" | "callee";
+              peerPresent?: boolean;
+              error?: string;
+            }) => resolve(result || { ok: false }),
+          );
+        });
+
+      let result = await inviteOnce();
+      if (opts?.reconnect) {
+        for (let attempt = 0; attempt < 16 && !result.ok; attempt += 1) {
+          if (result.error && result.error !== "Собеседник не в сети") break;
+          await new Promise((resolve) => window.setTimeout(resolve, 900));
+          if (!busyRef.current) return;
+          result = await inviteOnce();
+        }
+      }
+
+      if (!result?.ok || !result.callId) {
+        setStatus(result?.error || "Не удалось позвонить");
+        if (!opts?.reconnect) clearMediaResume();
+        scheduleCleanup(1400);
+        return;
+      }
+      callIdRef.current = result.callId;
+      peerRef.current = { peerId, chatId, mode, callId: result.callId };
+      setActive((prev) =>
+        prev ? { ...prev, callId: result.callId!, outbound: result.role !== "callee" } : prev,
+      );
+
+      if (result.resume) {
+        if (ringTimerRef.current) {
+          clearTimeout(ringTimerRef.current);
+          ringTimerRef.current = null;
+        }
+        setStatus("Переподключение…");
+        if (result.peerPresent === false) return;
+        try {
+          if (result.role === "callee") {
+            acceptReadyRef.current = true;
+            emitSignal(peerId, "accept");
+          } else {
+            await createOffer(peerId, mode, { resetPc: true });
+          }
+        } catch {
+          setStatus("Не удалось переподключить звонок");
+        }
+      }
+    },
+    [socket, selfId, startRingTimer, onLog, scheduleCleanup, emitSignal, getMedia, ensureIceServers, createOffer, prepareResumeControls],
+  );
+
+
+
+==============================================================================
+site/src/hooks/useCall.ts — переподключение существующего звонка
+==============================================================================
+
+    const onResume = async (payload: {
+      callId?: string;
+      peerId?: string;
+      peerName?: string;
+      mode?: CallMode;
+      chatId?: string;
+      role?: "caller" | "callee";
+      peerPresent?: boolean;
+    }) => {
+      const callId = String(payload?.callId || "");
+      const peerId = String(payload?.peerId || "");
+      const mode = payload?.mode === "video" ? "video" : "audio";
+      const chatId = String(payload?.chatId || "");
+      if (!callId || !peerId || !chatId) return;
+      if (consumeCallHungUp(callId)) {
+        socket.emit("call:signal", {
+          callId,
+          toUserId: peerId,
+          type: "end",
+        });
+        return;
+      }
+      if (callIdRef.current === callId && callPcAlive(pcRef.current)) {
+        peerLeftRef.current = false;
+        return;
+      }
+      prepareResumeControls(peerId, chatId, callId);
+      if (payload.peerPresent === false && !callPcAlive(pcRef.current)) {
+        busyRef.current = true;
+        peerLeftRef.current = false;
+        outboundRef.current = payload?.role !== "callee";
+        callIdRef.current = callId;
+        peerRef.current = { peerId, chatId, mode, callId };
+        setIncoming(null);
+        setMinimized(false);
+        setActive({
+          peerId,
+          peerName: payload.peerName || "Майко",
+          mode,
+          chatId,
+          outbound: payload?.role !== "callee",
+          callId,
+        });
+        setStatus("Переподключение…");
+        return;
+      }
+      if (!callPcAlive(pcRef.current) && busyRef.current && !peerRef.current) {
+        return;
+      }
+      if (busyRef.current && peerRef.current && peerRef.current.peerId !== peerId) {
+        return;
+      }
+      busyRef.current = true;
+      peerLeftRef.current = false;
+      outboundRef.current = payload?.role !== "callee";
+      callIdRef.current = callId;
+      peerRef.current = { peerId, chatId, mode, callId };
+      setIncoming(null);
+      setMinimized(false);
+      setActive({
+        peerId,
+        peerName: payload.peerName || "Майко",
+        mode,
+        chatId,
+        outbound: payload?.role !== "callee",
+        callId,
+      });
+      if (callPcAlive(pcRef.current)) {
+        setStatus("На линии");
+        return;
+      }
+      setStatus("Переподключение…");
+      try {
+        await ensureIceServers();
+        if (!localStreamRef.current) await getMedia(mode);
+        if (callIdRef.current !== callId) return;
+        if (payload?.role === "callee") {
+          acceptReadyRef.current = true;
+          emitSignal(peerId, "accept");
+        } else {
+          await createOffer(peerId, mode, { resetPc: true });
+        }
+      } catch {
+        setStatus("Не удалось переподключить звонок");
+      }
+    };
+
+    const onRenegotiate = async (payload: {
+      callId?: string;
+      fromUserId?: string;
+      mode?: CallMode;
+      chatId?: string;
+    }) => {
+      const callId = String(payload?.callId || "");
+      const peer = peerRef.current;
+      if (!callId || !peer || peer.callId !== callId) return;
+      peerLeftRef.current = false;
+      if (callPcAlive(pcRef.current)) {
+        setStatus("На линии");
+        return;
+      }
+      setStatus("Переподключение…");
+      try {
+        await ensureIceServers();
+        if (!localStreamRef.current) await getMedia(peer.mode);
+        if (callIdRef.current !== callId) return;
+        if (outboundRef.current) {
+          await createOffer(peer.peerId, peer.mode, { resetPc: true });
+          return;
+        }
+        if (pcRef.current) {
+          try {
+            pcRef.current.close();
+          } catch {
+            /* ignore */
+          }
+          pcRef.current = null;
+        }
+        pendingOfferRef.current = null;
+        pendingIceRef.current = [];
+        remoteReadyRef.current = false;
+        makingOfferRef.current = false;
+        const stream = localStreamRef.current;
+        const pc = ensurePc(peer.peerId);
+        stream?.getTracks().forEach((track) => {
+          if (!pc.getSenders().some((sender) => sender.track === track)) {
+            pc.addTrack(track, stream);
+          }
+        });
+        void applyAudioSenders([pc]);
+        acceptReadyRef.current = true;
+      } catch {
+        /* keep the overlay; ICE recovery may still help */
+      }
+    };
+
+
+
+==============================================================================
+site/src/components/chat/ChatApp.tsx — автоматическое возвращение в звонок или голосовой канал
+==============================================================================
+
+  const wasConnectedRef = useRef(false);
+  useEffect(() => {
+    if (!connected) {
+      wasConnectedRef.current = false;
+      return;
+    }
+    const justReconnected = !wasConnectedRef.current;
+    wasConnectedRef.current = true;
+    if (!authReady || !account) return;
+    const resume = peekMediaResume();
+    if (!resume) return;
+    const key =
+      resume.kind === "voice"
+        ? `voice:${resume.channelId}`
+        : `call:${resume.peerId}:${resume.chatId}`;
+    if (!justReconnected && triedResumeKeyRef.current === key) return;
+    triedResumeKeyRef.current = key;
+
+    if (resume.kind === "voice") {
+      // The voice hook owns reconnects for an existing session. Replaying the
+      // boot snapshot here can race its presence rebind or a pending join.
+      if (voiceActive || voiceJoining) return;
+      setSidebarPanel(resume.groupId);
+      setSidebarOpen(true);
+      setPendingTitle(resume.title);
+      restoreRoomRef.current = resume.groupId;
+      handleOpenChat(resume.groupId);
+      setVoiceMinimized(false);
+      void joinVoice(resume.channelId, resume.groupId, resume.title);
+      return;
+    }
+    if (active || incoming) return;
+    setSidebarPanel("home");
+    setSidebarOpen(true);
+    setPendingTitle(resume.peerName);
+    restoreRoomRef.current = resume.chatId;
+    handleOpenChat(resume.chatId);
+    setMinimized(false);
+    void startCall(resume.peerId, resume.peerName, resume.mode, resume.chatId, {
+      reconnect: true,
+    });
+  }, [
+    account,
+    active,
+    authReady,
+    connected,
+    handleOpenChat,
+    incoming,
+    joinVoice,
+    setMinimized,
+    startCall,
+    setVoiceMinimized,
+    voiceActive,
+    voiceJoining,
+  ]);
+
+  useEffect(() => {
+    if (active || incoming || voice.active) return;
+    const timer = window.setTimeout(() => flushPendingBootReload(), 800);
+    return () => window.clearTimeout(timer);
+  }, [active, incoming, voice.active]);
+
+
+
+==============================================================================
+site/e2e/site-reload.spec.ts
+==============================================================================
+
+import { expect, test } from "@playwright/test";
+import { build } from "esbuild";
+
+type DeployHarness = { media: (saved: unknown) => void; freshPersist: (saved: unknown) => void };
+type HarnessWindow = Window & { deployTest: DeployHarness };
+
+test.use({ channel: "msedge" });
+const bundles = new Map<string, string>();
+let deployed = "build-old";
+let healthy = true;
+
+test.beforeAll(async () => {
+  for (const version of ["build-old", "build-new"]) {
+    const result = await build({
+      stdin: { resolveDir: process.cwd(), contents: `
+        import { watchAppBoot, applyBootId, flushPendingBootReload, getSiteUpdateNotice, requestPendingSiteReload } from './src/lib/liveReload';
+        import { createElement } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { SiteUpdateNotice } from './src/components/chat/SiteUpdateNotice';
+        import { saveMediaResume, peekMediaResume, setLiveMediaSession, registerMediaResumePersist } from './src/lib/mediaResume';
+        const handlers = new Map();
+        export const socket = {
+          connected: true, approved: true,
+          on(name, fn) { if (!handlers.has(name)) handlers.set(name, new Set()); handlers.get(name).add(fn); },
+          off(name, fn) { handlers.get(name)?.delete(fn); },
+          emit(name, data, ack) {
+            if (name === 'app:prepare-reload') {
+              sessionStorage.setItem('prepares', String(Number(sessionStorage.getItem('prepares') || 0) + 1));
+              ack({ ok: socket.approved });
+            }
+          }
+        };
+        export function event(name, payload) { for (const fn of handlers.get(name) || []) fn(payload); }
+        export { applyBootId, flushPendingBootReload, peekMediaResume, getSiteUpdateNotice, requestPendingSiteReload };
+        export function media(saved) {
+          saveMediaResume(saved);
+          setLiveMediaSession(saved.kind, true);
+        }
+        export function idle() { setLiveMediaSession('call', false); setLiveMediaSession('voice', false); }
+        export function ringing() { setLiveMediaSession('call', true); }
+        export function joining() { setLiveMediaSession('voice', true, false); }
+        export function freshPersist(saved) { registerMediaResumePersist(() => saveMediaResume(saved)); }
+        export function start() {
+          sessionStorage.setItem('documents', String(Number(sessionStorage.getItem('documents') || 0) + 1));
+          watchAppBoot(socket);
+          createRoot(document.body.appendChild(document.createElement('main'))).render(createElement(SiteUpdateNotice));
+        }
+      ` },
+      bundle: true, write: false, platform: "browser", format: "iife", globalName: "deployTest",
+      define: { "process.env.NEXT_PUBLIC_SITE_VERSION": JSON.stringify(version) },
+    });
+    bundles.set(version, result.outputFiles[0].text);
+  }
+});
+
+test.beforeEach(async ({ page }) => {
+  deployed = "build-old";
+  healthy = true;
+  await page.route("**/api/health", route => route.fulfill({ status: healthy ? 200 : 503,
+    contentType: "application/json", body: JSON.stringify({ ok: healthy, buildId: deployed, bootId: "process-restarted" }) }));
+  await page.route("**/deploy-harness*", route => route.fulfill({ contentType: "text/html",
+    body: `<title>Deploy regression</title><body><script>${bundles.get(deployed)!.replaceAll("</script", "<\\/script")};deployTest.start()</script></body>` }));
+  await page.goto("/deploy-harness?chat=keep#messages");
+});
+
+const call = { kind: "call", peerId: "peer", peerName: "Алиса", chatId: "dm", callId: "original-call",
+  connectedAt: Date.now() - 90_000, mode: "video", muted: true, deafened: true, cameraOff: false, sharingScreen: false };
+const voice = { kind: "voice", channelId: "voice", groupId: "group", title: "Общий", muted: true,
+  deafened: true, cameraOff: false, sharingScreen: false };
+
+test("a process restart with the same build never reloads the page", async ({ page }) => {
+  await page.evaluate("deployTest.event('app:boot', {buildId:'build-old', bootId:'another-process'})");
+  await page.waitForTimeout(1800);
+  expect(await page.evaluate("sessionStorage.getItem('documents')")).toBe("1");
+});
+
+for (const saved of [call, voice]) {
+  test(`a deployment reloads once and preserves the ${saved.kind} identity and controls`, async ({ page }) => {
+    await page.evaluate(saved => (window as unknown as HarnessWindow).deployTest.media(saved), saved);
+    // The final persistence hook must win over an older snapshot.
+    await page.evaluate(saved => (window as unknown as HarnessWindow).deployTest.freshPersist(saved), { ...saved, muted: false });
+    deployed = "build-new";
+    await page.evaluate("for(let i=0;i<6;i++) deployTest.event('app:boot', {buildId:'build-new'})");
+    await expect.poll(() => page.evaluate("sessionStorage.getItem('documents')").catch(() => null)).toBe("2");
+    expect(await page.evaluate("sessionStorage.getItem('prepares')")).toBe("1");
+    expect(await page.evaluate("deployTest.peekMediaResume()")).toMatchObject({ ...saved, muted: false });
+    await expect(page).toHaveURL(/chat=keep/);
+    await expect(page).toHaveURL(/#messages$/);
+    await page.waitForTimeout(1800);
+    expect(await page.evaluate("sessionStorage.getItem('documents')")).toBe("2");
+  });
+}
+
+test("a stale bundle detects a deployment even on its first health response", async ({ page }) => {
+  deployed = "build-new";
+  await page.route("**/first-poll-harness*", route => {
+    const stale = !new URL(route.request().url()).searchParams.has("_b");
+    return route.fulfill({ contentType: "text/html", body: `<body><script>${stale ? "sessionStorage.clear();" : ""}
+      ${bundles.get(stale ? "build-old" : deployed)};deployTest.start()</script></body>` });
+  });
+  await page.goto("/first-poll-harness");
+  await expect.poll(() => page.evaluate("sessionStorage.getItem('documents')").catch(() => null)).toBe("2");
+});
+
+test("a browser screen share gets a notice and reloads only on the user's request", async ({ page }) => {
+  await page.evaluate(saved => (window as unknown as HarnessWindow).deployTest.media(saved), { ...call, sharingScreen: true });
+  deployed = "build-new";
+  await page.evaluate("deployTest.applyBootId('build-new')");
+  await page.waitForTimeout(1800);
+  expect(await page.evaluate("sessionStorage.getItem('documents')")).toBe("1");
+  await expect(page.getByText("Сайт обновился — обновите сайт")).toBeVisible();
+  await expect(page.getByText(/При перезагрузке демонстрация остановится/)).toBeVisible();
+  await page.evaluate(saved => (window as unknown as HarnessWindow).deployTest.media(saved), call);
+  await page.evaluate("deployTest.flushPendingBootReload()");
+  await page.waitForTimeout(1800);
+  expect(await page.evaluate("sessionStorage.getItem('documents')")).toBe("1");
+  await page.getByRole("button", { name: "Обновить сайт", exact: true }).click();
+  await expect.poll(() => page.evaluate("sessionStorage.getItem('documents')").catch(() => null)).toBe("2");
+});
+
+test("ringing defers reload without auto-answering", async ({ page }) => {
+  await page.evaluate("deployTest.ringing()");
+  deployed = "build-new";
+  await page.evaluate("deployTest.applyBootId('build-new')");
+  await page.waitForTimeout(1800);
+  expect(await page.evaluate("sessionStorage.getItem('documents')")).toBe("1");
+  await page.evaluate("deployTest.idle(); deployTest.flushPendingBootReload()");
+  await expect.poll(() => page.evaluate("sessionStorage.getItem('documents')").catch(() => null)).toBe("2");
+});
+
+test("an old snapshot cannot reload a voice channel while a new join is pending", async ({ page }) => {
+  await page.evaluate(saved => (window as unknown as HarnessWindow).deployTest.media(saved), voice);
+  await page.evaluate("deployTest.joining()");
+  deployed = "build-new";
+  await page.evaluate("deployTest.applyBootId('build-new')");
+  await page.waitForTimeout(1800);
+  expect(await page.evaluate("sessionStorage.getItem('documents')")).toBe("1");
+  await page.evaluate(saved => (window as unknown as HarnessWindow).deployTest.media(saved), { ...voice, channelId: "new-channel" });
+  await page.evaluate("deployTest.flushPendingBootReload()");
+  await expect.poll(() => page.evaluate("sessionStorage.getItem('documents')").catch(() => null)).toBe("2");
+  expect(await page.evaluate("deployTest.peekMediaResume().channelId")).toBe("new-channel");
+});
+
+test("an unhealthy server or rejected reservation does not destroy a live call", async ({ page }) => {
+  await page.evaluate(saved => (window as unknown as HarnessWindow).deployTest.media(saved), call);
+  deployed = "build-new";
+  healthy = false;
+  await page.evaluate("deployTest.applyBootId('build-new')");
+  await page.waitForTimeout(1800);
+  expect(await page.evaluate("sessionStorage.getItem('documents')")).toBe("1");
+  healthy = true;
+  await page.evaluate("deployTest.socket.approved=false; deployTest.flushPendingBootReload()");
+  await page.waitForTimeout(1800);
+  expect(await page.evaluate("sessionStorage.getItem('documents')")).toBe("1");
+  await page.evaluate("deployTest.socket.approved=true; deployTest.flushPendingBootReload()");
+  await expect.poll(() => page.evaluate("sessionStorage.getItem('documents')").catch(() => null)).toBe("2");
+});
+
+test("polling delivers an update when the socket notification was missed", async ({ page }) => {
+  deployed = "build-new";
+  await expect.poll(() => page.evaluate("sessionStorage.getItem('documents')").catch(() => null)).toBe("2");
+});
+
+test("blocked storage protects a live call and keeps the pending update in memory", async ({ page }) => {
+  await page.evaluate(saved => (window as unknown as HarnessWindow).deployTest.media(saved), call);
+  await page.evaluate(() => Object.defineProperty(window, "sessionStorage", {
+    configurable: true, get() { throw new DOMException("Blocked", "SecurityError"); },
+  }));
+  deployed = "build-new";
+  await page.evaluate("deployTest.applyBootId('build-new')");
+  await page.waitForTimeout(1800);
+  // The original document still has its blocked-storage getter.
+  expect(await page.evaluate(() => { try { void sessionStorage; return false; } catch { return true; } })).toBe(true);
+  await page.evaluate("deployTest.idle(); deployTest.flushPendingBootReload()");
+  await expect.poll(() => page.evaluate("sessionStorage.getItem('documents')").catch(() => null)).toBe("2");
+});
+
+
+==============================================================================
+site/e2e/call-media.spec.ts
+==============================================================================
+
+import { expect, test, type Page } from "@playwright/test";
+
+test.use({ channel: "msedge", actionTimeout: 15_000, permissions: ["camera", "microphone"], launchOptions: {
+  args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"],
+} });
+
+async function login(page: Page, username: string, password: string) {
+  await page.goto("/");
+  await page.getByPlaceholder("artem").fill(username);
+  await page.locator('input[type="password"]').fill(password);
+  await page.getByRole("button", { name: "Войти", exact: true }).click();
+  await expect(page.locator(".workspace")).toBeVisible();
+  const previous = page.getByRole("button", { name: /^Завершить(?: звонок)?$/ });
+  if (await previous.count()) await previous.click();
+}
+
+test("call demo audio stays in its own player and sender across repeated shares with a muted mic", async ({ browser, baseURL }) => {
+  test.setTimeout(150_000);
+  test.skip(!baseURL || !["localhost", "127.0.0.1"].includes(new URL(baseURL).hostname), "Uses local demo accounts only");
+  const a = await browser.newContext({ baseURL, permissions: ["camera", "microphone"] });
+  const b = await browser.newContext({ baseURL, permissions: ["camera", "microphone"] });
+  try {
+    const caller = await a.newPage();
+    const receiver = await b.newPage();
+    await caller.addInitScript(() => {
+      const pcs: RTCPeerConnection[] = [];
+      const NativePc = window.RTCPeerConnection;
+      window.RTCPeerConnection = class extends NativePc {
+        constructor(config?: RTCConfiguration) { super(config); pcs.push(this); }
+      };
+      Object.assign(window, { __audioPcs: pcs });
+      // Synthetic display/audio source: tests never capture the user's desktop.
+      navigator.mediaDevices.getDisplayMedia = async () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 160; canvas.height = 90;
+        canvas.getContext("2d")!.fillRect(0, 0, 160, 90);
+        const stream = canvas.captureStream(5);
+        const context = new AudioContext();
+        await context.resume();
+        const oscillator = context.createOscillator();
+        const destination = context.createMediaStreamDestination();
+        oscillator.connect(destination); oscillator.start();
+        const audio = destination.stream.getAudioTracks()[0];
+        stream.addTrack(audio);
+        audio.addEventListener("ended", () => { oscillator.stop(); void context.close(); }, { once: true });
+        return stream;
+      };
+    });
+    await login(caller, "artem", "Artem1234!");
+    await login(receiver, "alice", "Alice1234!");
+    await caller.getByRole("button", { name: "Люди", exact: true }).click();
+    await caller.getByRole("button", { name: /Алиса.*@alice/ }).click();
+    await receiver.getByRole("button", { name: "Люди", exact: true }).click();
+    await receiver.getByRole("button", { name: /Artem.*@artem/ }).click();
+    await caller.getByRole("button", { name: "Звонок", exact: true }).click();
+    await receiver.getByRole("button", { name: "Ответить", exact: true }).click();
+    await expect.poll(() => caller.evaluate(() =>
+      (window as unknown as { __audioPcs: RTCPeerConnection[] }).__audioPcs.some(pc => pc.connectionState === "connected"))).toBe(true);
+    await caller.getByRole("button", { name: "Выключить микрофон", exact: true }).click();
+    await receiver.evaluate(() => {
+      const peer = JSON.parse(sessionStorage.getItem("pulse-media-resume")!).peerId;
+      localStorage.setItem("pulse-screen-volume", JSON.stringify({ [peer]: 0.25 }));
+      window.dispatchEvent(new StorageEvent("storage", { key: "pulse-screen-volume" }));
+    });
+    const audioState = () => receiver.locator("audio").evaluateAll(nodes => (nodes as HTMLAudioElement[])
+      .filter(audio => (audio.srcObject as MediaStream | null)?.getAudioTracks().length)
+      .map(audio => ({ tracks: (audio.srcObject as MediaStream).getAudioTracks().length, volume: audio.volume }))
+      .sort((x, y) => x.volume - y.volume));
+    let audioSections: number | undefined;
+    for (let i = 0; i < 3; i++) {
+      await caller.getByRole("button", { name: "Демонстрация экрана", exact: true }).click();
+      await expect.poll(audioState).toEqual([{ tracks: 1, volume: 0.25 }, { tracks: 1, volume: 1 }]);
+      const sections = await caller.evaluate(() => {
+        const pcs = (window as unknown as { __audioPcs: RTCPeerConnection[] }).__audioPcs;
+        return (pcs.find(pc => pc.connectionState === "connected")?.localDescription?.sdp.match(/^m=audio /gm) || []).length;
+      });
+      audioSections ??= sections;
+      expect(sections).toBe(2);
+      expect(sections).toBe(audioSections);
+      await caller.getByRole("button", { name: "Остановить демонстрацию", exact: true }).click();
+    }
+    await caller.getByRole("button", { name: /^Завершить(?: звонок)?$/ }).click();
+  } finally { await a.close(); await b.close(); }
+});
+
+test("two local peers keep camera video while toggling mic and headphones", async ({ browser, baseURL }) => {
+  test.skip(!baseURL || !["localhost", "127.0.0.1"].includes(new URL(baseURL).hostname), "Uses local demo accounts only");
+  const a = await browser.newContext({ baseURL, permissions: ["camera", "microphone"] });
+  const b = await browser.newContext({ baseURL, permissions: ["camera", "microphone"] });
+  try {
+    const caller = await a.newPage();
+    const receiver = await b.newPage();
+    await login(caller, "artem", "Artem1234!");
+    await login(receiver, "alice", "Alice1234!");
+    await caller.getByRole("button", { name: "Люди", exact: true }).click();
+    await caller.getByRole("button", { name: /Алиса.*@alice/ }).click();
+    await receiver.getByRole("button", { name: "Люди", exact: true }).click();
+    await receiver.getByRole("button", { name: /Artem.*@artem/ }).click();
+    await caller.getByRole("button", { name: "Звонок", exact: true }).click();
+    await receiver.getByRole("button", { name: "Ответить", exact: true }).click();
+    await caller.getByRole("button", { name: "Включить камеру", exact: true }).click();
+    await receiver.getByRole("button", { name: "Включить камеру", exact: true }).click();
+    await expect.poll(() => caller.locator("video").evaluateAll((nodes) => nodes.filter((node) => (node as HTMLVideoElement).videoWidth > 0).length)).toBeGreaterThanOrEqual(2);
+    await expect(caller.locator(".connection-signal--good, .connection-signal--ok, .connection-signal--poor").first()).toBeVisible();
+    await caller.evaluate(() => {
+      const state = [...document.querySelectorAll("video")].filter((video) => video.videoWidth > 0).map((video) => {
+        const item = { video, stream: video.srcObject, resets: 0 };
+        video.addEventListener("emptied", () => item.resets++);
+        return item;
+      });
+      Object.assign(window, { __callVideoState: state });
+    });
+    for (let i = 0; i < 3; i++) {
+      await caller.getByRole("button", { name: /^(Включить|Выключить) микрофон$/ }).click();
+      await caller.getByRole("button", { name: /^(Включить|Отключить) звук$/ }).click();
+    }
+    const state = await caller.evaluate(() => {
+      const items = (window as unknown as { __callVideoState: { video: HTMLVideoElement; stream: unknown; resets: number }[] }).__callVideoState;
+      return { stable: items.every((v) => v.video.isConnected && v.video.srcObject === v.stream), resets: items.reduce((n, v) => n + v.resets, 0) };
+    });
+    expect(state).toEqual({ stable: true, resets: 0 });
+    await caller.getByRole("button", { name: /^Завершить(?: звонок)?$/ }).click();
+  } finally { await a.close(); await b.close(); }
+});
+
+test("one or both pages reload into the same call with mute, headphones, camera and duration preserved", async ({ browser, baseURL }) => {
+  test.setTimeout(150_000);
+  test.skip(!baseURL || !["localhost", "127.0.0.1"].includes(new URL(baseURL).hostname), "Uses local demo accounts only");
+  const a = await browser.newContext({ baseURL, permissions: ["camera", "microphone"] });
+  const b = await browser.newContext({ baseURL, permissions: ["camera", "microphone"] });
+  const saved = (page: Page) => page.evaluate(() => JSON.parse(sessionStorage.getItem("pulse-media-resume") || "null"));
+  const connectedVideo = (page: Page) => expect.poll(() => page.locator("video").evaluateAll(nodes =>
+    nodes.filter(node => (node as HTMLVideoElement).videoWidth > 0).length), { timeout: 30_000 }).toBeGreaterThanOrEqual(2);
+  try {
+    const caller = await a.newPage();
+    const receiver = await b.newPage();
+    await login(caller, "artem", "Artem1234!");
+    await login(receiver, "alice", "Alice1234!");
+    await caller.getByRole("button", { name: "Люди", exact: true }).click();
+    await caller.getByRole("button", { name: /Алиса.*@alice/ }).click();
+    await receiver.getByRole("button", { name: "Люди", exact: true }).click();
+    await receiver.getByRole("button", { name: /Artem.*@artem/ }).click();
+    await caller.getByRole("button", { name: "Звонок", exact: true }).click();
+    await receiver.getByRole("button", { name: "Ответить", exact: true }).click();
+    await caller.getByRole("button", { name: "Включить камеру", exact: true }).click();
+    await receiver.getByRole("button", { name: "Включить камеру", exact: true }).click();
+    await connectedVideo(caller);
+    await caller.getByRole("button", { name: "Отключить звук", exact: true }).click();
+    await expect.poll(() => saved(caller)).toMatchObject({ muted: true, deafened: true, cameraOff: false });
+    const original = await saved(caller);
+    expect(original.connectedAt).toBeGreaterThan(0);
+    await caller.reload();
+    await expect(caller.locator(".hologram-maiko")).toBeVisible();
+    await expect(caller.getByRole("button", { name: /^Завершить(?: звонок)?$/ })).toBeVisible();
+    await connectedVideo(caller);
+    expect(await saved(caller)).toMatchObject({ callId: original.callId, connectedAt: original.connectedAt,
+      muted: true, deafened: true, cameraOff: false });
+    await expect(receiver.getByRole("button", { name: "Ответить", exact: true })).toHaveCount(0);
+
+    await Promise.all([caller.reload(), receiver.reload()]);
+    await connectedVideo(caller);
+    await connectedVideo(receiver);
+    await expect.poll(() => saved(caller)).toMatchObject({ callId: original.callId, connectedAt: original.connectedAt,
+      muted: true, deafened: true, cameraOff: false });
+    await expect.poll(() => saved(receiver)).toMatchObject({ callId: original.callId, cameraOff: false });
+    await expect(caller.getByRole("button", { name: "Ответить", exact: true })).toHaveCount(0);
+    await expect(receiver.getByRole("button", { name: "Ответить", exact: true })).toHaveCount(0);
+    await caller.getByRole("button", { name: /^Завершить(?: звонок)?$/ }).click();
+    await expect.poll(() => saved(caller)).toBeNull();
+    await caller.reload();
+    await expect(caller.locator(".workspace")).toBeVisible();
+    await expect(caller.getByRole("button", { name: /^Завершить(?: звонок)?$/ })).toHaveCount(0);
+  } finally { await a.close(); await b.close(); }
+});
+
+
+==============================================================================
+desktop/tests/persistent-media.cjs
+==============================================================================
+
+// Local integration: real call and real display capture. Never save frames.
+const { _electron: electron, chromium } = require('playwright');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const fs = require('node:fs/promises');
+const http = require('node:http');
+
+const base = process.env.PULSE_BASE_URL || 'http://127.0.0.1:3100';
+if (!['127.0.0.1', 'localhost'].includes(new URL(base).hostname)) throw new Error('Use a local test server with SEED_DEMO=1');
+async function login(view, username, password) {
+  await view.getByPlaceholder('artem').fill(username);
+  await view.locator('input[type="password"]').fill(password);
+  await view.getByRole('button', { name: 'Войти', exact: true }).click();
+  await view.locator('.workspace').waitFor({ timeout: 30_000 });
+  const end = view.getByRole('button', { name: /^Завершить(?: звонок)?$/ });
+  if (await end.count()) await end.click();
+}
+async function main() {
+  const health = await (await fetch(base + '/api/health')).json();
+  assert.equal(health.desktopMediaHost, 1);
+  // Electron's local-asset protocol uses net.fetch, so a page-level CDP route
+  // cannot replace its health response. Simulate publication at a local HTTP
+  // proxy while forwarding the real app, signaling and media requests.
+  let simulateDeployment = false;
+  const target = new URL(base);
+  const connections = new Set();
+  const proxy = http.createServer((request, response) => {
+    if (new URL(request.url, target).searchParams.get('_b') === 'screen-update-test') simulateDeployment = false;
+    if (request.url === '/api/health' && simulateDeployment) {
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      response.end(JSON.stringify({ ...health, buildId: 'screen-update-test' }));
+      return;
+    }
+    const upstream = http.request(new URL(request.url, target), { method: request.method,
+      headers: { ...request.headers, host: target.host } }, upstreamResponse => {
+      response.writeHead(upstreamResponse.statusCode, upstreamResponse.headers);
+      upstreamResponse.pipe(response);
+    });
+    upstream.on('error', () => { response.writeHead(502); response.end(); });
+    request.pipe(upstream);
+  });
+  proxy.on('connection', socket => { connections.add(socket); socket.on('error', () => {}); socket.on('close', () => connections.delete(socket)); });
+  proxy.on('upgrade', (request, socket, head) => {
+    const upstream = http.request(new URL(request.url, target), { headers: { ...request.headers, host: target.host } });
+    upstream.on('upgrade', (response, peer, peerHead) => {
+      socket.write('HTTP/1.1 101 Switching Protocols\r\n' + Object.entries(response.headers).map(([key, value]) => `${key}: ${value}`).join('\r\n') + '\r\n\r\n');
+      if (head.length) peer.write(head);
+      if (peerHead.length) socket.write(peerHead);
+      peer.pipe(socket); socket.pipe(peer);
+      socket.on('close', () => peer.destroy()); peer.on('error', () => socket.destroy());
+    });
+    upstream.on('error', () => socket.destroy()); upstream.end();
+  });
+  await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
+  const testBase = `http://127.0.0.1:${proxy.address().port}`;
+  const profile = path.resolve(__dirname, '../test-output/persistent-media-' + Date.now());
+  await fs.mkdir(profile, { recursive: true });
+  const env = { ...process.env, MAIKO_DESKTOP_TEST: '1', MAIKO_DESKTOP_USER_DATA: profile, MAIKO_DESKTOP_URL: testBase };
+  delete env.ELECTRON_RUN_AS_NODE;
+  let app, browser, site;
+  try {
+    browser = await chromium.launch({ channel: 'msedge', headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
+    const remoteContext = await browser.newContext({ permissions: ['camera', 'microphone'] });
+    const remote = await remoteContext.newPage();
+    await remote.goto(testBase);
+    await login(remote, 'alice', 'Alice1234!');
+    app = await electron.launch({ executablePath: require('electron'), args: [path.resolve(__dirname, '..'), '--use-fake-device-for-media-stream'], env, timeout: 60_000 });
+    const shell = await app.firstWindow();
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
+    for (let attempt = 0; attempt < 100; attempt++) {
+      site = app.windows().find(page => page.url().startsWith(testBase + '/desktop-runtime'));
+      if (site) break;
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    assert.ok(site, 'The permanent media document loaded');
+    const ui = site.frameLocator('iframe[data-maiko-desktop-ui]');
+    await login(ui, 'artem', 'Artem1234!');
+    console.log('Persistent owner and embedded UI authenticated.');
+    await ui.getByRole('button', { name: 'Люди', exact: true }).click();
+    await ui.getByRole('button', { name: /Алиса.*@alice/ }).click();
+    await remote.getByRole('button', { name: 'Люди', exact: true }).click();
+    await remote.getByRole('button', { name: /Artem.*@artem/ }).click();
+    await ui.getByRole('button', { name: 'Звонок', exact: true }).click();
+    await remote.getByRole('button', { name: 'Ответить', exact: true }).click();
+    await site.waitForFunction(() => window.maikoMediaRuntime?.getSnapshot()?.call.status === 'На линии', null, { timeout: 30_000 });
+    console.log('Local call connected.');
+    await site.evaluate(() => {
+      const original = navigator.mediaDevices.getDisplayMedia.bind(navigator.mediaDevices);
+      navigator.mediaDevices.getDisplayMedia = async options => {
+        window.captureDebug = { active: navigator.userActivation.isActive, focus: document.hasFocus() };
+        try { return await original(options); }
+        catch (error) { window.captureDebug.error = error.name + ': ' + error.message; throw error; }
+      };
+    });
+    const pickerReady = app.waitForEvent('window', { predicate: page => page !== site && page !== shell, timeout: 20_000 });
+    await ui.getByRole('button', { name: 'Демонстрация экрана', exact: true }).click();
+    const picker = await pickerReady.catch(async error => {
+      console.error(await site.evaluate(() => ({ capture: window.captureDebug, status: window.maikoMediaRuntime.getSnapshot().call.status })));
+      throw error;
+    });
+    await picker.waitForFunction(() => window.maikoDesktop?.captureSources);
+    const sources = await picker.evaluate(() => window.maikoDesktop.captureSources());
+    const source = sources.sources.find(entry => entry.id.startsWith('screen:'));
+    assert.ok(source, 'A display is available');
+    await picker.evaluate(id => window.maikoDesktop.captureSelect({ id, audio: false }), source.id).catch(error => { if (!picker.isClosed()) throw error; });
+    await site.waitForFunction(() => window.maikoMediaRuntime?.getSnapshot()?.call.sharingScreen, null, { timeout: 20_000 });
+    console.log('Original display capture is live.');
+    const before = await site.evaluate(() => {
+      const call = window.maikoMediaRuntime.getSnapshot().call;
+      window.screenBeforeUpdate = call.localStream.getVideoTracks().find(track => track.contentHint === 'detail');
+      window.audioBeforeUpdate = document.querySelector('audio');
+      return { callId: call.active.callId, track: window.screenBeforeUpdate.id };
+    });
+    await remote.waitForFunction(() => [...document.querySelectorAll('video')].some(video => video.videoWidth > 0), null, { timeout: 20_000 });
+
+    let ownerNavigations = 0;
+    await site.evaluate(() => {
+      window.uiDocumentLoads = 0;
+      document.querySelector('iframe[data-maiko-desktop-ui]').addEventListener('load', () => { window.uiDocumentLoads++; });
+    });
+    site.on('framenavigated', frame => {
+      if (frame === site.mainFrame()) ownerNavigations++;
+    });
+    simulateDeployment = true;
+    await shell.getByText('Сайт обновляется…', { exact: true }).waitFor({ timeout: 15_000 });
+    await site.waitForFunction(() => sessionStorage.getItem('pulse-boot-id') === 'screen-update-test', null, { timeout: 15_000 });
+    await site.waitForFunction(() => window.uiDocumentLoads === 1, null, { timeout: 20_000 });
+    await ui.locator('.workspace').waitFor({ timeout: 30_000 });
+    await shell.getByText('Сайт обновлён', { exact: true }).waitFor({ timeout: 10_000 });
+    assert.equal(await ui.locator('.boot__update').count(), 0, 'Update text belongs to the top desktop dock');
+    const after = await site.evaluate(() => {
+      const call = window.maikoMediaRuntime.getSnapshot().call;
+      const screen = call.localStream.getVideoTracks().find(track => track.contentHint === 'detail');
+      return { callId: call.active.callId, track: screen.id, sameTrack: screen === window.screenBeforeUpdate,
+        live: screen.readyState, sharing: call.sharingScreen, sameAudioElement: document.querySelector('audio') === window.audioBeforeUpdate };
+    });
+    assert.equal(after.callId, before.callId);
+    assert.equal(after.track, before.track);
+    assert.equal(after.sameTrack, true);
+    assert.equal(after.live, 'live');
+    assert.equal(after.sharing, true);
+    assert.equal(after.sameAudioElement, true);
+    assert.equal(ownerNavigations, 0);
+    assert.equal(await site.evaluate(() => window.uiDocumentLoads), 1);
+    assert.equal(await ui.getByText('Сайт обновился — обновите сайт').count(), 0);
+    assert.ok(await ui.getByRole('button', { name: 'Остановить демонстрацию', exact: true }).count());
+    // Repeated ready reports must not cancel the countdown or keep the dock visible.
+    await site.evaluate(() => window.maikoMediaRuntime.reportSiteUpdate('ready'));
+    await shell.locator('#site-update-dock').waitFor({ state: 'hidden', timeout: 10_000 });
+    const uiLoadedAt = await site.evaluate(() => document.querySelector('iframe[data-maiko-desktop-ui]').contentWindow.performance.timeOrigin);
+    await shell.evaluate(() => window.maikoDesktop.control('reload'));
+    await site.waitForFunction(previous => {
+      const frame = document.querySelector('iframe[data-maiko-desktop-ui]');
+      return frame?.contentWindow.performance.timeOrigin !== previous && frame?.contentDocument.querySelector('.workspace');
+    }, uiLoadedAt, { timeout: 30_000 });
+    await ui.locator('.workspace').waitFor({ timeout: 30_000 });
+    assert.equal(await site.evaluate(() => window.screenBeforeUpdate.readyState), 'live');
+    assert.equal(ownerNavigations, 0);
+    await ui.getByRole('button', { name: /^Завершить(?: звонок)?$/ }).click();
+    console.log('PASS: server update and manual UI refresh preserve the original screen track, call ID and audio owner; no recapture or call leave.');
+  } finally {
+    await site?.evaluate(() => window.maikoMediaRuntime?.getSnapshot()?.call.endCall()).catch(() => {});
+    await app?.close().catch(() => {}); await browser?.close().catch(() => {});
+    for (const socket of connections) socket.destroy();
+    await new Promise(resolve => proxy.close(resolve));
+  }
+}
+main().catch(error => { console.error(error); process.exitCode = 1; });

@@ -56,7 +56,7 @@
 
 /* Leave space for messages and input below media in a short window. The dock
    may shrink even when the user previously dragged it to a larger height. */
-@media (min-width: 641px) and (max-width: 1099px) {
+@media (max-width: 1099px) {
   .app-shell .room.room--in-call > .room__stage {
     min-height: min(260px, 65%);
   }

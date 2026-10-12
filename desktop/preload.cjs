@@ -12,9 +12,6 @@ contextBridge.exposeInMainWorld('maikoDesktop', Object.freeze({
     ipcRenderer.on('desktop:downloads-panel-visible', handler);
     return () => ipcRenderer.removeListener('desktop:downloads-panel-visible', handler);
   },
-  resizeStart: (edge, point) => ipcRenderer.invoke('desktop:resize-start', edge, point),
-  resizeMove: (point) => ipcRenderer.send('desktop:resize-move', point),
-  resizeEnd: () => ipcRenderer.send('desktop:resize-end'),
   captureSources: () => ipcRenderer.invoke('desktop:capture-sources'),
   captureSelect: (choice) => ipcRenderer.invoke('desktop:capture-select', choice),
   onState: (callback) => {

@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "node scripts/run-tsx.mjs SEED_DEMO=1 watch --exclude uploads --exclude data --exclude .next --exclude **/uploads/** --exclude **/data/** --exclude **/.next/** server.ts",
-    "build": "next build",
+    "build": "node scripts/build-site.mjs",
     "start": "node scripts/run-tsx.mjs NODE_ENV=production server.ts",
     "lint": "eslint",
     "media:migrate": "tsx scripts/migrate-media-s3.ts",

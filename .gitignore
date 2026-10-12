@@ -65,6 +65,7 @@ yarn-error.log*
 # env files
 .env*
 .s3-storage.json
+.desktop-s3-storage.json
 .giphy-api-key
 .deepgram-api-key
 .deepgram-keyterms

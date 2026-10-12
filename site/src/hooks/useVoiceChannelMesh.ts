@@ -28,6 +28,10 @@ import {
   prepareScreenTrack,
   replaceAudioSenders,
   SCREEN_SEND_PARAMS,
+  remoteScreenAudioTrackIds,
+  setRemoteDescriptionWithAudioRouting,
+  splitCallAudioTracks,
+  withScreenAudioRouting,
   withReplacedAudioTrack,
 } from "@/lib/webrtcMedia";
 import {
@@ -79,14 +83,6 @@ export function useVoiceChannelMesh({
   const [active, setActive] = useState<ActiveVoice | null>(null);
   const [peers, setPeers] = useState<VoiceChannelUser[]>([]);
 
-  // Аудио тех, кто демонстрирует экран, — под ручкой громкости демонстрации.
-  useEffect(() => {
-    for (const [peerId, audio] of remoteAudioRef.current.entries()) {
-      const peer = peers.find((p) => p.userId === peerId);
-      if (peer?.sharingScreen) registerScreenAudio(audio, peerId);
-      else unregisterScreenAudio(audio);
-    }
-  }, [peers]);
   const [muted, setMuted] = useState(false);
   const [deafened, setDeafened] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -115,6 +111,8 @@ export function useVoiceChannelMesh({
   const iceServersRef = useRef<RTCIceServer[]>([]);
   const tokenRef = useRef(token);
   const remoteAudioRef = useRef(new Map<string, HTMLAudioElement>());
+  const remoteScreenAudioRef = useRef(new Map<string, HTMLAudioElement>());
+  const remoteScreenAudioIdsRef = useRef(new Map<string, Set<string>>());
   const remoteStreamsRef = useRef(new Map<string, MediaStream>());
   const pendingIceRef = useRef(new Map<string, RTCIceCandidateInit[]>());
   const signalQueueRef = useRef(new Map<string, Promise<void>>());
@@ -242,22 +240,41 @@ export function useVoiceChannelMesh({
       }
       if (chosenVideos.length > 1) noteRemotePresentation(stream, true);
 
-      if (audioTracks.length) {
-        const audio = ensureRemoteAudio(peerId);
+      let screenIds = remoteScreenAudioIdsRef.current.get(peerId);
+      if (!screenIds) { screenIds = new Set(); remoteScreenAudioIdsRef.current.set(peerId, screenIds); }
+      const { voice, screen } = splitCallAudioTracks(audioTracks, screenIds,
+        pc ? remoteScreenAudioTrackIds(pc) : undefined);
+      const attachAudio = (audio: HTMLAudioElement, tracks: MediaStreamTrack[]) => {
         const currentIds = (audio.srcObject as MediaStream | null)
           ?.getAudioTracks()
           .map((track) => track.id)
           .sort()
           .join("|");
-        const nextIds = audioTracks
+        const nextIds = tracks
           .map((track) => track.id)
           .sort()
           .join("|");
         if (currentIds !== nextIds) {
-          audio.srcObject = new MediaStream(audioTracks);
+          audio.srcObject = new MediaStream(tracks);
         }
         audio.muted = deafenedRef.current;
-        void audio.play().catch(() => undefined);
+        if (tracks.length) void audio.play().catch(() => undefined);
+      };
+      if (voice.length || remoteAudioRef.current.has(peerId)) attachAudio(ensureRemoteAudio(peerId), voice);
+      if (screen.length || remoteScreenAudioRef.current.has(peerId)) {
+        let audio = remoteScreenAudioRef.current.get(peerId);
+        if (!audio) {
+          audio = document.createElement("audio");
+          audio.autoplay = true;
+          audio.setAttribute("playsinline", "");
+          audio.hidden = true;
+          audio.dataset.voiceScreenPeer = peerId;
+          document.body.appendChild(audio);
+          remoteScreenAudioRef.current.set(peerId, audio);
+          void applyAudioOutput(audio);
+          registerScreenAudio(audio, peerId);
+        }
+        attachAudio(audio, screen);
       }
       publishRemoteStreams();
     },
@@ -295,7 +312,10 @@ export function useVoiceChannelMesh({
     (toUserId: string, type: string, data?: unknown) => {
       const channelId = channelIdRef.current;
       if (!socket || !channelId) return;
-      socket.emit("voice:signal", { channelId, toUserId, type, data });
+      const pc = pcsRef.current.get(toUserId);
+      socket.emit("voice:signal", { channelId, toUserId, type,
+        data: (type === "offer" || type === "answer") && pc && data
+          ? withScreenAudioRouting(pc, data as RTCSessionDescriptionInit) : data });
     },
     [socket],
   );
@@ -382,6 +402,14 @@ export function useVoiceChannelMesh({
         audio.remove();
         remoteAudioRef.current.delete(peerId);
       }
+      const screenAudio = remoteScreenAudioRef.current.get(peerId);
+      if (screenAudio) {
+        unregisterScreenAudio(screenAudio);
+        screenAudio.srcObject = null;
+        screenAudio.remove();
+        remoteScreenAudioRef.current.delete(peerId);
+      }
+      remoteScreenAudioIdsRef.current.delete(peerId);
       remoteStreamsRef.current.delete(peerId);
       pendingIceRef.current.delete(peerId);
       signalQueueRef.current.delete(peerId);
@@ -950,7 +978,7 @@ export function useVoiceChannelMesh({
     if (!next && deafenedRef.current) {
       deafenedRef.current = false;
       setDeafened(false);
-      for (const audio of remoteAudioRef.current.values()) {
+      for (const audio of [...remoteAudioRef.current.values(), ...remoteScreenAudioRef.current.values()]) {
         audio.muted = false;
         void audio.play().catch(() => undefined);
       }
@@ -962,7 +990,7 @@ export function useVoiceChannelMesh({
     const next = !deafenedRef.current;
     deafenedRef.current = next;
     setDeafened(next);
-    for (const audio of remoteAudioRef.current.values()) {
+    for (const audio of [...remoteAudioRef.current.values(), ...remoteScreenAudioRef.current.values()]) {
       audio.muted = next;
       if (!next) void audio.play().catch(() => undefined);
     }
@@ -1003,7 +1031,7 @@ export function useVoiceChannelMesh({
     async (change: VoiceSettingsChange) => {
       if (change.speaker) {
         await Promise.all(
-          [...remoteAudioRef.current.values()].map((audio) =>
+          [...remoteAudioRef.current.values(), ...remoteScreenAudioRef.current.values()].map((audio) =>
             applyAudioOutput(audio),
           ),
         );
@@ -1362,6 +1390,10 @@ export function useVoiceChannelMesh({
         if (!deafenedRef.current) void audio.play().catch(() => undefined);
         scheduleRemoteSync(peerId);
       }
+      for (const [peerId, audio] of remoteScreenAudioRef.current.entries()) {
+        if (!deafenedRef.current) void audio.play().catch(() => undefined);
+        scheduleRemoteSync(peerId);
+      }
     };
     document.addEventListener("visibilitychange", resumeMedia);
     window.addEventListener("online", resumeMedia);
@@ -1502,7 +1534,7 @@ export function useVoiceChannelMesh({
             if (pc.signalingState === "have-local-offer") {
               await pc.setLocalDescription({ type: "rollback" });
             }
-            await pc.setRemoteDescription(
+            await setRemoteDescriptionWithAudioRouting(pc,
               payload.data as RTCSessionDescriptionInit,
             );
             optimizePeerConnection(pc);
@@ -1524,7 +1556,7 @@ export function useVoiceChannelMesh({
             const pc = pcsRef.current.get(fromUserId);
             if (!pc) return;
             if (pc.signalingState === "stable") return;
-            await pc.setRemoteDescription(
+            await setRemoteDescriptionWithAudioRouting(pc,
               payload.data as RTCSessionDescriptionInit,
             );
             const buffered = pendingIceRef.current.get(fromUserId) || [];

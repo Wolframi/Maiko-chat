@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { MIN_WIDTH, MIN_HEIGHT } = require('./window-geometry.cjs');
 
 function normalizeUrl(value) {
   const url = new URL(String(value).trim());
@@ -40,8 +41,8 @@ function findProjectRoot(start) {
 function visibleBounds(saved, displays) {
   const bounds = { width: 1280, height: 820 };
   if (!saved || !Number.isFinite(saved.width) || !Number.isFinite(saved.height)) return bounds;
-  bounds.width = Math.min(3840, Math.max(800, Math.round(saved.width)));
-  bounds.height = Math.min(2160, Math.max(600, Math.round(saved.height)));
+  bounds.width = Math.min(3840, Math.max(MIN_WIDTH, Math.round(saved.width)));
+  bounds.height = Math.min(2160, Math.max(MIN_HEIGHT, Math.round(saved.height)));
   if (Number.isFinite(saved.x) && Number.isFinite(saved.y) && displays.some(({ workArea: a }) => (
     saved.x + bounds.width > a.x + 80 && saved.x < a.x + a.width - 80
     && saved.y >= a.y && saved.y < a.y + a.height - 80

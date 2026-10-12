@@ -65,8 +65,8 @@ export const SCREEN_CAPTURE_CONSTRAINTS = {
     autoGainControl: false,
     channelCount: { ideal: 2 },
     suppressLocalAudioPlayback: false,
-    // Best effort: isolate the call when available. Full-screen sharing also
-    // accepts system audio on browsers that cannot apply this restriction.
+    // Best effort: isolate the call when available; warn if a window's
+    // audio source cannot exclude the call.
     restrictOwnAudio: true,
   } as MediaTrackConstraints,
 };
@@ -308,8 +308,8 @@ async function sanitizeScreenAudio(
     // Full-screen sharing may include the call, by design. Never drop its
     // audio just because the browser cannot isolate our playback (Windows 10).
     // A separate tab is already isolated; Capture Handle rejects call tabs.
-    // Window/unknown sources still need verified isolation because browsers
-    // can return system loopback even when windowAudio requests window audio.
+    // Window/unknown sources may return system loopback. Try to isolate it,
+    // but keep the chosen source audible if isolation is unsupported.
     if (surface === "monitor" || surface === "browser" || hasOwnAudioRestriction(track)) continue;
     try {
       await track.applyConstraints({
@@ -319,10 +319,8 @@ async function sanitizeScreenAudio(
       // Unsupported constraints may reject asynchronously or be ignored.
     }
     if (!hasOwnAudioRestriction(track)) {
-      // Unfiltered system loopback is allowed only for a full-screen share.
-      removeAudio(
-        track,
-        "Звук окна не передаётся: браузер не смог исключить голоса канала. Выберите отдельную вкладку со звуком или весь экран с общим звуком.",
+      onAudioUnavailable?.(
+        "Внимание: звук окна транслируется, но браузер не смог аппаратно подавить эхо канала. Желательно использовать наушники.",
       );
     }
   }
@@ -352,7 +350,7 @@ function displayCaptureFailed(error: unknown) {
   );
 }
 
-/** Full screen allows system audio; windows and tabs keep the call isolated. */
+/** Capture source audio, attempting call isolation when the browser supports it. */
 export async function captureScreenShare(options: ScreenCaptureOptions = {}) {
   const video = prefersUnconstrainedScreenVideo()
     ? true
@@ -400,25 +398,35 @@ export async function captureScreenShare(options: ScreenCaptureOptions = {}) {
   throw lastError instanceof Error ? lastError : new Error("screen-share-failed");
 }
 
+// A cleared sender has no track metadata. Remember its role for this PC's lifetime.
+const screenAudioSenders = new WeakMap<RTCPeerConnection, RTCRtpSender>();
+const remoteScreenAudioMids = new WeakMap<RTCPeerConnection, ReadonlySet<string>>();
+
 export async function attachLocalScreenAudioTrack(
   pc: RTCPeerConnection,
   track: MediaStreamTrack,
   stream: MediaStream,
 ) {
   prepareScreenAudioTrack(track);
-  const existing = pc
-    .getSenders()
+  const senders = pc.getSenders();
+  const remembered = screenAudioSenders.get(pc);
+  const existing = (remembered && senders.includes(remembered) ? remembered : undefined) || senders
     .find(
       (sender) =>
         sender.track?.kind === "audio" && sender.track.contentHint === "music",
     );
   let sender = existing;
+  const transceiver = pc.getTransceivers().find(item => item.sender === sender);
+  if (transceiver?.direction === "stopped") sender = undefined;
   if (sender) {
     sender.setStreams?.(stream);
     await sender.replaceTrack(track);
+    if (transceiver?.direction === "recvonly") transceiver.direction = "sendrecv";
+    else if (transceiver?.direction === "inactive") transceiver.direction = "sendonly";
   } else {
     sender = pc.addTrack(track, stream);
   }
+  screenAudioSenders.set(pc, sender);
   await applyAudioSenderParams(sender, SCREEN_AUDIO_SEND_PARAMS.maxBitrate);
   return sender;
 }
@@ -427,22 +435,70 @@ export async function detachLocalScreenAudioTrack(
   pc: RTCPeerConnection,
   track?: MediaStreamTrack | null,
 ) {
-  const sender = pc.getSenders().find(
+  const sender = screenAudioSenders.get(pc) || pc.getSenders().find(
     (item) =>
       (track && item.track === track) ||
       (item.track?.kind === "audio" && item.track.contentHint === "music"),
   );
   if (!sender) return;
+  screenAudioSenders.set(pc, sender);
+  try {
+    // removeTrack changes the transceiver direction while its track is present.
+    pc.removeTrack(sender);
+  } catch {
+    /* ignore */
+  }
   try {
     await sender.replaceTrack(null);
   } catch {
     /* ignore */
   }
-  try {
-    pc.removeTrack(sender);
-  } catch {
-    /* ignore */
+}
+
+export type ScreenAudioDescription = RTCSessionDescriptionInit & { screenAudioMids?: string[] };
+
+export function localScreenAudioMids(pc: RTCPeerConnection, sdp = pc.localDescription?.sdp || "") {
+  const senders = pc.getSenders().filter(sender => sender.track?.kind === "audio" &&
+    (sender === screenAudioSenders.get(pc) || sender.track.contentHint === "music"));
+  const mids = new Set<string>();
+  for (const transceiver of pc.getTransceivers()) {
+    if (transceiver.mid !== null && senders.includes(transceiver.sender)) mids.add(transceiver.mid);
   }
+  // Initial offers have no assigned transceiver mids yet; SDP msid identifies the track.
+  for (const section of sdp.split(/\r?\n(?=m=)/)) {
+    if (!section.startsWith("m=audio ")) continue;
+    const mid = /^a=mid:([^\r\n]+)/m.exec(section)?.[1];
+    const ids = [...section.matchAll(/^a=msid:\S+ (\S+)/gm)].map(match => match[1]);
+    if (mid && senders.some(sender => ids.includes(sender.track!.id))) mids.add(mid);
+  }
+  return mids;
+}
+
+/** Role metadata travels in signaling; contentHint itself is local to each peer. */
+export function withScreenAudioRouting(pc: RTCPeerConnection, desc: RTCSessionDescriptionInit): ScreenAudioDescription {
+  return { ...desc, screenAudioMids: [...localScreenAudioMids(pc, desc.sdp)] };
+}
+
+export async function setRemoteDescriptionWithAudioRouting(pc: RTCPeerConnection, desc: ScreenAudioDescription) {
+  const previous = remoteScreenAudioMids.get(pc);
+  if (Array.isArray(desc.screenAudioMids)) {
+    remoteScreenAudioMids.set(pc, new Set(desc.screenAudioMids.filter(mid => typeof mid === "string")));
+  } else remoteScreenAudioMids.delete(pc);
+  try {
+    // Store roles before setRemoteDescription, which dispatches ontrack.
+    await pc.setRemoteDescription({ type: desc.type, sdp: desc.sdp });
+  } catch (error) {
+    if (previous) remoteScreenAudioMids.set(pc, previous);
+    else remoteScreenAudioMids.delete(pc);
+    throw error;
+  }
+}
+
+export function remoteScreenAudioTrackIds(pc: RTCPeerConnection): ReadonlySet<string> | undefined {
+  const mids = remoteScreenAudioMids.get(pc);
+  if (!mids) return undefined; // Older peers still use the legacy heuristic.
+  return new Set(pc.getTransceivers().filter(item => item.mid !== null && mids.has(item.mid) &&
+    item.receiver.track.kind === "audio").map(item => item.receiver.track.id));
 }
 
 export function prepareCameraTrack(track: MediaStreamTrack) {
@@ -596,10 +652,15 @@ export async function replaceAudioSenders(
       ) ||
       pc
         .getTransceivers()
-        .find((item) => item.receiver.track.kind === "audio")?.sender;
+        .find((item) => item.receiver.track.kind === "audio" &&
+          item.direction !== "stopped" && item.sender !== screenAudioSenders.get(pc) &&
+          item.sender.track?.contentHint !== "music")?.sender;
     if (sender) {
       sender.setStreams?.(stream);
       await sender.replaceTrack(track);
+      const transceiver = pc.getTransceivers().find(item => item.sender === sender);
+      if (transceiver?.direction === "recvonly") transceiver.direction = "sendrecv";
+      else if (transceiver?.direction === "inactive") transceiver.direction = "sendonly";
     } else {
       pc.addTrack(track, stream);
     }
@@ -826,13 +887,14 @@ function patchOpusSection(section: string, screen: boolean, eol: string) {
   return next;
 }
 
-export function patchOpusSdp(sdp: string) {
+export function patchOpusSdp(sdp: string, screenAudioMids?: ReadonlySet<string>) {
   const eol = sdp.includes("\r\n") ? "\r\n" : "\n";
   const chunks = sdp.split(/\r?\n(?=m=)/);
   let audioIndex = 0;
   const next = chunks.map((chunk) => {
     if (!/(^|\n)m=audio /.test(chunk)) return chunk;
-    const screen = audioIndex > 0;
+    const mid = /^a=mid:([^\r\n]+)/m.exec(chunk)?.[1];
+    const screen = screenAudioMids ? Boolean(mid && screenAudioMids.has(mid)) : audioIndex > 0;
     audioIndex += 1;
     return patchOpusSection(chunk, screen, eol);
   });
@@ -850,7 +912,7 @@ export async function setLocalDescriptionTuned(
 ) {
   const original = desc.sdp;
   try {
-    if (desc.sdp) desc.sdp = patchOpusSdp(desc.sdp);
+    if (desc.sdp) desc.sdp = patchOpusSdp(desc.sdp, localScreenAudioMids(pc, desc.sdp));
     await pc.setLocalDescription(desc);
   } catch {
     if (original) desc.sdp = original;
@@ -950,17 +1012,24 @@ export function streamHasScreenVideo(stream: MediaStream | null) {
   );
 }
 
-/** First live audio track is the mic; later ones are screen-share audio. */
+/** Explicit signaling roles take precedence; hints/order support older peers. */
 export function splitCallAudioTracks(
   tracks: MediaStreamTrack[],
   screenIds: Set<string>,
+  explicitScreenIds?: ReadonlySet<string>,
 ) {
   const live = tracks.filter((track) => track.readyState === "live");
+  if (explicitScreenIds) screenIds.clear();
+  for (const track of live) {
+    if (explicitScreenIds ? explicitScreenIds.has(track.id) : track.contentHint === "music") {
+      screenIds.add(track.id);
+    }
+  }
   for (const id of [...screenIds]) {
     if (!live.some((track) => track.id === id)) screenIds.delete(id);
   }
   const unmarked = live.filter((track) => !screenIds.has(track.id));
-  if (unmarked.length > 1) {
+  if (!explicitScreenIds && unmarked.length > 1) {
     for (const extra of unmarked.slice(1)) screenIds.add(extra.id);
   }
   return {

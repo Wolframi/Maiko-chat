@@ -141,36 +141,14 @@ async function main() {
       }
       requestAnimationFrame(frame);
     });
-    for (const edge of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
-      await shell.evaluate(() => {
-        window.pointerTrace = [];
-        if (window.traceInstalled) return;
-        window.traceInstalled = true;
-        for (const type of ['pointerdown', 'pointermove', 'pointerup']) document.addEventListener(type, (event) => window.pointerTrace.push({ type, x: event.screenX, y: event.screenY, edge: event.target.dataset.edge }), true);
-      });
-      await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setBounds({ x: 100, y: 100, width: 1000, height: 700 }));
-      await shell.waitForFunction(() => window.innerWidth === 1000 && window.innerHeight === 700, null, { polling: 100 });
-      const x = edge.includes('w') ? 3 : edge.includes('e') ? 997 : 500;
-      const y = edge.includes('n') ? 3 : edge.includes('s') ? 697 : 350;
-      const dx = edge.includes('w') ? 40 : edge.includes('e') ? -40 : 0;
-      const dy = edge.includes('n') ? 30 : edge.includes('s') ? -30 : 0;
-      await shell.mouse.move(x, y); await shell.mouse.down();
-      // CDP coordinates are relative to the moving window; the physical cursor
-      // stays in screen coordinates when dragging a north/west edge.
-      for (let step = 1; step <= 4; step++) {
-        const bounds = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds());
-        await shell.mouse.move(100 + x + dx * step / 4 - bounds.x, 100 + y + dy * step / 4 - bounds.y);
-        await shell.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-      }
-      await shell.mouse.up();
-      const expected = { x: edge.includes('w') ? 140 : 100, y: edge.includes('n') ? 130 : 100, width: edge.includes('e') || edge.includes('w') ? 960 : 1000, height: edge.includes('n') || edge.includes('s') ? 670 : 700 };
-      try {
-        await shell.waitForFunction(([width, height]) => innerWidth === width && innerHeight === height, [expected.width, expected.height], { polling: 100, timeout: 5000 });
-      } catch (error) {
-        console.error({ edge, expected, actual: await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds()), trace: await shell.evaluate(() => window.pointerTrace) });
-        throw error;
-      }
-      assert.deepEqual(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds()), expected, `Resize from ${edge}`);
+    assert.equal(await shell.locator('.resize-grip').count(), 0, 'No manual resize hit boxes remain');
+    assert.equal(await shell.evaluate(() => 'resizeStart' in window.maikoDesktop), false, 'No manual resize IPC remains');
+    assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isResizable()), true);
+    for (const [width, height] of [[1000, 700], [900, 650], [1100, 800], [1000, 700]]) {
+      await app.evaluate(({ BrowserWindow }, [width, height]) => BrowserWindow.getAllWindows()[0].setBounds({ x: 100, y: 100, width, height }), [width, height]);
+      await shell.waitForFunction(([width, height]) => innerWidth === width && innerHeight === height, [width, height]);
+      await site.waitForFunction(([width, height]) => innerWidth === width - 20 && innerHeight === height - 52, [width, height]);
+      await shell.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     }
     assert.equal(await shell.evaluate(() => window.resizeStateUpdates), 0, 'Resizing does not rewrite the titlebar or publish unchanged state');
     const frames = await site.evaluate(() => window.resizeFrames);
@@ -180,12 +158,15 @@ async function main() {
       const helper = path.join(output, 'native-resize.exe');
       await run(path.join(process.env.SystemRoot, 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),
         ['/nologo', '/target:exe', '/platform:x64', '/r:System.Drawing.dll', `/out:${helper}`, path.join(__dirname, 'native-resize.cs')], { windowsHide: true });
+      const dragHelper = path.join(output, 'native-drag.exe');
+      await run(path.join(process.env.SystemRoot, 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),
+        ['/nologo', '/target:exe', '/platform:x64', `/out:${dragHelper}`, path.join(__dirname, 'native-drag.cs')], { windowsHide: true });
       const identity = await app.evaluate(({ BrowserWindow }) => {
         const win = BrowserWindow.getAllWindows()[0];
         win.setAlwaysOnTop(true); win.setBounds({ x: 100, y: 100, width: 1000, height: 700 }); win.show(); win.moveTop();
         return { handle: win.getNativeWindowHandle().readBigUInt64LE().toString(), pid: String(process.pid) };
       });
-      await site.waitForFunction(() => innerWidth === 988 && innerHeight === 652);
+      await site.waitForFunction(() => innerWidth === 980 && innerHeight === 648);
       await site.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       // The native show transition blends with the backdrop before resizing
       // starts. Sample live resize after that separate animation has finished.
@@ -204,15 +185,7 @@ async function main() {
       });
       await ready;
       try {
-        await shell.evaluate(async () => {
-          await window.maikoDesktop.resizeStart('se', { x: 1100, y: 800 });
-          for (let i = 0; i < 40; i++) {
-            const delta = (i < 20 ? i : 39 - i) * 20;
-            window.maikoDesktop.resizeMove({ x: 1100 + delta, y: 800 + delta / 2 });
-            await new Promise((resolve) => setTimeout(resolve, 16));
-          }
-          window.maikoDesktop.resizeEnd();
-        });
+        await run(dragHelper, [identity.handle, identity.pid, 'e', 's', '380', '190'], { windowsHide: true });
         await completed;
         const pixels = JSON.parse(report.trim().split('\n').at(-1));
         assert.equal(pixels.samples, 400);
@@ -220,26 +193,40 @@ async function main() {
         assert.equal(pixels.other, 0, `No exposed desktop/white bands: ${report}`);
         console.log(`Live resize: ${pixels.samples} OS-composited samples, no black or exposed bands.`);
       } finally { sampler.kill(); }
+      const hitTests = { w: 10, e: 11, n: 12, nw: 13, ne: 14, s: 15, sw: 16, se: 17 };
+      for (const edge of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
+        await app.evaluate(({ BrowserWindow }) => { const win = BrowserWindow.getAllWindows()[0]; win.setBounds({ x: 100, y: 100, width: 1000, height: 700 }); win.show(); win.focus(); win.moveTop(); });
+        const contentSize = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getContentSize());
+        await shell.waitForFunction(([width, height]) => innerWidth === width && innerHeight === height, contentSize);
+        const x = edge.includes('w') ? 'w' : edge.includes('e') ? 'e' : 'c';
+        const y = edge.includes('n') ? 'n' : edge.includes('s') ? 's' : 'c';
+        const dx = edge.includes('w') ? 60 : edge.includes('e') ? -60 : 0;
+        const dy = edge.includes('n') ? 40 : edge.includes('s') ? -40 : 0;
+        const drag = await run(dragHelper, [identity.handle, identity.pid, x, y, String(dx), String(dy)], { windowsHide: true });
+        assert.equal(JSON.parse(drag.stdout).hit, hitTests[edge], `Windows owns the native ${edge} resize boundary`);
+        const expected = { x: edge.includes('w') ? 160 : 100, y: edge.includes('n') ? 140 : 100, width: /[ew]/.test(edge) ? 940 : 1000, height: /[ns]/.test(edge) ? 660 : 700 };
+        const actual = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds());
+        assert.deepEqual(actual, expected, `Native drag from ${edge} anchors the opposite edge; hit test ${drag.stdout.trim()}`);
+      }
     }
     await shell.getByRole('button', { name: 'Развернуть', exact: true }).click();
     assert.equal((await shell.evaluate(() => window.maikoDesktop.state())).maximized, true);
     await shell.getByRole('button', { name: 'Восстановить', exact: true }).click();
     assert.equal((await shell.evaluate(() => window.maikoDesktop.state())).maximized, false);
-    // Capture the transparent shell; nested native views are checked separately.
+    // Capture the rectangular shell; nested native views are checked separately.
     const png = Buffer.from(await app.evaluate(async ({ BrowserWindow }) => (await BrowserWindow.getAllWindows()[0].capturePage()).toPNG().toString('base64')), 'base64');
-    await fs.writeFile(path.join(output, 'smooth-corners.png'), png);
+    await fs.writeFile(path.join(output, 'square-corners.png'), png);
     const { data, info } = await sharp(png).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-    assert.equal(data[3], 0, 'Outer corner is actually transparent');
-    const alphas = [];
-    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) alphas.push(data[(y * info.width + x) * 4 + 3]);
-    assert.ok(alphas.some((alpha) => alpha > 0 && alpha < 255), 'Corners have smooth fractional alpha');
+    for (const [x, y] of [[0, 0], [info.width - 1, 0], [0, info.height - 1], [info.width - 1, info.height - 1]]) {
+      assert.equal(data[(y * info.width + x) * 4 + 3], 255, 'Every outer corner is square and opaque');
+    }
     // Side gutters must be dark on BOTH sides, including during resizing.
     for (const x of [2, info.width - 3]) {
       const offset = (100 * info.width + x) * 4;
       assert.ok(data[offset] < 30 && data[offset + 1] < 30 && data[offset + 2] < 30, 'No white side strip');
     }
     await app.close(); app = undefined;
-    console.log('Window/assets regression passed: all 8 resize grips, anchored opposite edges, smooth alpha corners, dark symmetric gutters, local video/model/WASM/worker, remote POST cookies/body and uploads.');
+    console.log('Window/assets regression passed: all 8 native resize boundaries, anchored opposite edges, square opaque corners, dark symmetric gutters, local video/model/WASM/worker, remote POST cookies/body and uploads.');
   } finally {
     if (app) await app.close();
     await new Promise((resolve) => server.close(resolve));

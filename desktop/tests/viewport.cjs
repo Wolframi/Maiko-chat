@@ -91,9 +91,9 @@ async function main() {
       if (!page) await new Promise((resolve) => setTimeout(resolve, 100));
     }
     assert.ok(page, 'Site renders in its isolated view');
-    for (const [width, height] of [[1280, 820], [1000, 700], [800, 600], [1200, 600], [1600, 900]]) {
+    for (const [width, height] of [[1280, 820], [1000, 700], [800, 600], [1200, 600], [1600, 900], [500, 360], [960, 520]]) {
       await app.evaluate(({ BrowserWindow }, bounds) => BrowserWindow.getAllWindows()[0].setBounds(bounds), { x: 100, y: 100, width, height });
-      await page.waitForFunction(([width, height]) => innerWidth === width - 12 && innerHeight === height - 48, [width, height]);
+      await page.waitForFunction(([width, height]) => innerWidth === width - 20 && innerHeight === height - 52, [width, height]);
       for (const mode of ['normal', 'group', 'direct', 'mini']) for (const longDraft of [false, true]) {
         await page.evaluate(([mode, longDraft]) => window.setScenario(mode, longDraft), [mode, longDraft]);
         await checkChat(page, `${width}x${height}/${mode}/${longDraft ? 'long' : 'short'}`);
@@ -104,7 +104,7 @@ async function main() {
     // Previously resized call media must yield space after the window shrinks.
     await page.evaluate(() => { document.querySelector('.room').style.setProperty('--call-dock-height', '650px'); window.setScenario('group', true); });
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setBounds({ width: 1000, height: 600 }));
-    await page.waitForFunction(() => innerHeight === 552);
+    await page.waitForFunction(() => innerHeight === 548);
     await checkChat(page, 'large media dock after shrinking');
     await page.reload();
     await shell.waitForFunction(async () => (await window.maikoDesktop.state()).phase === 'ready');
@@ -121,7 +121,7 @@ async function main() {
     assert.ok(await page.locator('.app-shell').evaluate((element) => element.scrollTop > 0), 'Tall login form scrolls');
     const submit = await page.getByRole('button', { name: 'Продолжить' }).boundingBox();
     assert.ok(submit.y >= 0 && submit.y + submit.height <= await page.evaluate(() => innerHeight), 'Login action stays reachable');
-    console.log('Viewport regression passed: five window sizes, regular/group/direct/minimized calls, long drafts, replies/attachments, real wheel scrolling, typing, resized media, reload, sidebar and tall login form.');
+    console.log('Viewport regression passed: seven window sizes including Snap zones, regular/group/direct/minimized calls, long drafts, replies/attachments, real wheel scrolling, typing, resized media, reload, sidebar and tall login form.');
   } finally {
     if (app) await app.close();
     await new Promise((resolve) => server.close(resolve));

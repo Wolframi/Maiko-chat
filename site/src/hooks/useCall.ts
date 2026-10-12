@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useDesktopMedia } from "@/hooks/useDesktopMedia";
+import { getDesktopMediaRuntime } from "@/lib/desktopMedia";
 import type { Socket } from "socket.io-client";
 import type { CallMode, IncomingCall } from "@/lib/types";
 import { getClientIceServers } from "@/lib/iceServers";
@@ -41,6 +43,9 @@ import {
   replaceAudioSenders,
   SCREEN_SEND_PARAMS,
   setLocalDescriptionTuned,
+  setRemoteDescriptionWithAudioRouting,
+  remoteScreenAudioTrackIds,
+  withScreenAudioRouting,
   splitCallAudioTracks,
   videoQualityForCall,
   withReplacedAudioTrack,
@@ -67,9 +72,11 @@ import { registerScreenAudio, unregisterScreenAudio } from "@/lib/screenAudio";
 import {
   clearMediaResume,
   isPageUnloading,
+  peekMediaResume,
   registerMediaResumePersist,
   saveMediaResume,
   setLiveMediaSession,
+  type MediaResume,
 } from "@/lib/mediaResume";
 
 type UseCallOptions = {
@@ -134,7 +141,21 @@ function formatDuration(totalSeconds: number) {
   return `${mins}:${String(secs).padStart(2, "0")}`;
 }
 
-export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions) {
+export function useCall(options: UseCallOptions) {
+  const desktop = useDesktopMedia({ selfId: options.selfId, token: options.token ?? undefined });
+  const native = useBrowserCall(getDesktopMediaRuntime() ? { socket: null } : options);
+  const silentUiAudio = useRef<HTMLAudioElement | null>(null);
+  useEffect(() => {
+    if (!desktop) return;
+    setLiveMediaSession("call", Boolean(desktop.call.active || desktop.call.incoming));
+    return () => setLiveMediaSession("call", false);
+  }, [desktop]);
+  // Playback belongs to the owner as well: reloading an <audio> in the UI
+  // must neither silence the call nor play its audio a second time.
+  return desktop ? { ...desktop.call, remoteAudioRef: silentUiAudio } : native;
+}
+
+export function useBrowserCall({ socket, selfId, token = null, onLog }: UseCallOptions) {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const iceServersRef = useRef<RTCIceServer[]>([]);
   const tokenRef = useRef(token);
@@ -169,6 +190,8 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const durationTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const connectedAtRef = useRef<number | null>(null);
+  const resumedConnectedAtRef = useRef<number | null>(null);
+  const resumeControlsRef = useRef<Extract<MediaResume, { kind: "call" }> | null>(null);
   const cleanupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const peerReturnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const iceRestartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -367,6 +390,7 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
     const { voice, screen } = splitCallAudioTracks(
       audioTracks,
       remoteScreenAudioIdsRef.current,
+      pcRef.current ? remoteScreenAudioTrackIds(pcRef.current) : undefined,
     );
     const clone = new MediaStream([...voice, ...chosenVideos]);
     noteRemotePresentation(clone, chosenVideos.length > 1);
@@ -702,6 +726,8 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
     setMinimized(false);
     setDuration(0);
     connectedAtRef.current = null;
+    resumedConnectedAtRef.current = null;
+    resumeControlsRef.current = null;
     peerRef.current = null;
     callIdRef.current = null;
     pendingOfferRef.current = null;
@@ -788,8 +814,9 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
     lastInboundPacketsRef.current = -1;
     startCallMonitors();
     if (connectedAtRef.current) return;
-    connectedAtRef.current = Date.now();
-    setDuration(0);
+    connectedAtRef.current = resumedConnectedAtRef.current || Date.now();
+    resumedConnectedAtRef.current = null;
+    setDuration(Math.floor((Date.now() - connectedAtRef.current) / 1000));
     if (durationTimerRef.current) clearInterval(durationTimerRef.current);
     durationTimerRef.current = setInterval(() => {
       if (!connectedAtRef.current) return;
@@ -821,7 +848,8 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
         callId,
         toUserId,
         type,
-        data,
+        data: (type === "offer" || type === "answer") && pcRef.current && data
+          ? withScreenAudioRouting(pcRef.current, data as RTCSessionDescriptionInit) : data,
       });
     },
     [socket],
@@ -1016,8 +1044,26 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
     [emitSignal, markConnected, publishRemoteStream],
   );
 
+  const prepareResumeControls = useCallback((peerId: string, chatId: string, callId?: string) => {
+    if (localStreamRef.current) return;
+    const saved = peekMediaResume();
+    if (saved?.kind !== "call" || saved.peerId !== peerId || saved.chatId !== chatId ||
+      (callId && saved.callId && saved.callId !== callId)) return;
+    resumeControlsRef.current = saved;
+    resumedConnectedAtRef.current = saved.connectedAt || null;
+    mutedRef.current = saved.muted;
+    deafenedRef.current = Boolean(saved.deafened);
+    setMuted(saved.muted);
+    setDeafened(Boolean(saved.deafened));
+    setCameraOff(saved.cameraOff);
+  }, []);
+
   const getMedia = useCallback(async (_mode: CallMode) => {
+    const saved = resumeControlsRef.current;
     const { filter, stream } = await captureFilteredMic();
+    // Apply mute BEFORE publishing any track: reload must never expose audio
+    // from a microphone that the user had muted.
+    setMicEnabled(stream, !mutedRef.current, filter.sourceTrack);
     noiseFilterRef.current = filter;
     setNoiseFilterEnabled(getNeuralNoiseEnabled());
     setNoiseFilterKind(filter.kind);
@@ -1027,9 +1073,32 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
     cameraWasOffRef.current = true;
     cameraTrackRef.current = null;
     localStreamRef.current = stream;
+    if (saved && !saved.cameraOff) {
+      try {
+        const camera = await openCameraStream(cameraFacingRef.current);
+        const track = camera.getVideoTracks()[0];
+        if (track) {
+          prepareCameraTrack(track);
+          cameraTrackRef.current = track;
+          stream.addTrack(track);
+          cameraWasOffRef.current = false;
+          localCameraOffRef.current = false;
+          setCameraOff(false);
+          track.onended = () => {
+            if (cameraTrackRef.current !== track) return;
+            cameraTrackRef.current = null;
+            cameraWasOffRef.current = true;
+            localCameraOffRef.current = true;
+            setCameraOff(true);
+            publishLocalVideos();
+          };
+        }
+      } catch { setStatus("Нет доступа к камере"); }
+    }
+    resumeControlsRef.current = null;
     setLocalStream(stream);
     return stream;
-  }, []);
+  }, [publishLocalVideos]);
 
   const answerRemoteOffer = useCallback(
     async (peerId: string, offer: RTCSessionDescriptionInit) => {
@@ -1046,7 +1115,8 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
         if (pc.signalingState === "have-local-offer") {
           await pc.setLocalDescription({ type: "rollback" });
         }
-        await pc.setRemoteDescription(offer);
+        await setRemoteDescriptionWithAudioRouting(pc, offer);
+        publishRemoteStream();
         remoteReadyRef.current = true;
         optimizePeerConnection(pc);
         const answer = await pc.createAnswer();
@@ -1078,7 +1148,7 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
         await tryAnswer(fresh);
       }
     },
-    [ensurePc, flushIce, emitSignal],
+    [ensurePc, flushIce, emitSignal, publishRemoteStream],
   );
 
   const createOffer = useCallback(
@@ -1268,12 +1338,13 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
 
   useEffect(() => {
     busyRef.current = Boolean(active || incoming);
-    setLiveMediaSession("call", Boolean(active || incoming));
+    setLiveMediaSession("call", Boolean(active || incoming),
+      Boolean(active && connectedAtRef.current && localStream && !mediaBusy && !sharingScreen));
     return () => setLiveMediaSession("call", false);
-  }, [active, incoming]);
+  }, [active, incoming, localStream, status, mediaBusy, sharingScreen]);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || !active.callId || resumeControlsRef.current) return;
     const persist = () =>
       saveMediaResume({
         kind: "call",
@@ -1282,7 +1353,11 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
         chatId: active.chatId,
         mode: active.mode,
         muted,
+        deafened,
         cameraOff,
+        callId: active.callId,
+        connectedAt: connectedAtRef.current || resumedConnectedAtRef.current || undefined,
+        sharingScreen,
       });
     persist();
     const unbind = registerMediaResumePersist(persist);
@@ -1291,7 +1366,7 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
       unbind();
       window.clearInterval(timer);
     };
-  }, [active, muted, cameraOff]);
+  }, [active, muted, deafened, cameraOff, sharingScreen, localStream]);
 
   const startCall = useCallback(
     async (
@@ -1308,6 +1383,8 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
       }
 
       busyRef.current = true;
+      const saved = opts?.reconnect ? peekMediaResume() : null;
+      if (opts?.reconnect) prepareResumeControls(peerId, chatId);
       outboundRef.current = true;
       peerLeftRef.current = false;
       setMinimized(false);
@@ -1352,16 +1429,19 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
           callId?: string;
           resume?: boolean;
           role?: "caller" | "callee";
+          peerPresent?: boolean;
           error?: string;
         }>((resolve) => {
           socket.emit(
             "call:invite",
-            { toUserId: peerId, mode, chatId, reconnect: Boolean(opts?.reconnect) },
+            { toUserId: peerId, mode, chatId, reconnect: Boolean(opts?.reconnect),
+              callId: saved?.kind === "call" ? saved.callId : undefined },
             (result: {
               ok: boolean;
               callId?: string;
               resume?: boolean;
               role?: "caller" | "callee";
+              peerPresent?: boolean;
               error?: string;
             }) => resolve(result || { ok: false }),
           );
@@ -1395,6 +1475,7 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
           ringTimerRef.current = null;
         }
         setStatus("Переподключение…");
+        if (result.peerPresent === false) return;
         try {
           if (result.role === "callee") {
             acceptReadyRef.current = true;
@@ -1407,7 +1488,7 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
         }
       }
     },
-    [socket, selfId, startRingTimer, onLog, scheduleCleanup, emitSignal, getMedia, ensureIceServers, createOffer],
+    [socket, selfId, startRingTimer, onLog, scheduleCleanup, emitSignal, getMedia, ensureIceServers, createOffer, prepareResumeControls],
   );
 
   const acceptCall = useCallback(async (incomingOverride?: IncomingCall | any) => {
@@ -2252,7 +2333,8 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
       if (payload.type === "answer" && payload.data) {
         const pc = ensurePc(payload.fromUserId);
         if (pc.signalingState === "stable") return;
-        await pc.setRemoteDescription(payload.data as RTCSessionDescriptionInit);
+        await setRemoteDescriptionWithAudioRouting(pc, payload.data as RTCSessionDescriptionInit);
+        publishRemoteStream();
         remoteReadyRef.current = true;
         await flushIce(pc);
         return;
@@ -2318,6 +2400,7 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
         peerLeftRef.current = false;
         return;
       }
+      prepareResumeControls(peerId, chatId, callId);
       if (payload.peerPresent === false && !callPcAlive(pcRef.current)) {
         busyRef.current = true;
         peerLeftRef.current = false;
@@ -2365,7 +2448,7 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
       setStatus("Переподключение…");
       try {
         await ensureIceServers();
-        await getMedia(mode);
+        if (!localStreamRef.current) await getMedia(mode);
         if (callIdRef.current !== callId) return;
         if (payload?.role === "callee") {
           acceptReadyRef.current = true;
@@ -2432,6 +2515,10 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
     socket.on("call:dismiss", onDismiss);
     socket.on("call:resume", onResume);
     socket.on("call:renegotiate", onRenegotiate);
+    const onPeerReload = (payload: { callId?: string }) => {
+      if (payload.callId === callIdRef.current) setStatus("Собеседник обновляет приложение…");
+    };
+    socket.on("call:reloading", onPeerReload);
     const onSocketDown = () => {
       // Deploy/network blip — media stays up, signaling recovers via resume.
       if (callIdRef.current) setStatus("Переподключение к серверу…");
@@ -2443,6 +2530,7 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
       socket.off("call:dismiss", onDismiss);
       socket.off("call:resume", onResume);
       socket.off("call:renegotiate", onRenegotiate);
+      socket.off("call:reloading", onPeerReload);
       socket.off("disconnect", onSocketDown);
     };
   }, [
@@ -2456,12 +2544,14 @@ export function useCall({ socket, selfId, token = null, onLog }: UseCallOptions)
     startRingTimer,
     emitSignal,
     answerRemoteOffer,
+    publishRemoteStream,
     refreshLocalVideoForPeer,
     scheduleRemoteMediaRecovery,
     incoming,
     acceptCall,
     getMedia,
     ensureIceServers,
+    prepareResumeControls,
   ]);
 
   useEffect(() => {

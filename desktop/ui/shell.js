@@ -1,9 +1,7 @@
 const api = window.maikoDesktop;
-let currentState;
 const element = (id) => document.getElementById(id);
 
 function render(state) {
-  currentState = state;
   document.body.dataset.phase = state.phase;
   document.body.classList.toggle('maximized', state.maximized);
   element('status').textContent = state.phase === 'ready' ? 'Подключено' : state.phase === 'error' ? 'Нет подключения' : 'Подключаемся…';
@@ -12,6 +10,11 @@ function render(state) {
   element('loader').hidden = state.phase !== 'loading';
   element('error-actions').hidden = state.phase !== 'error';
   element('connection-screen').hidden = state.phase === 'ready';
+  const sitePhase = state.siteUpdatePhase || 'idle';
+  element('site-update-dock').hidden = sitePhase === 'idle';
+  element('site-update-dock').dataset.phase = sitePhase;
+  element('site-update-label').textContent = sitePhase === 'loading' ? 'Сайт обновляется…' : sitePhase === 'ready' ? 'Сайт обновлён' : sitePhase === 'error' ? 'Не удалось обновить сайт' : '';
+  element('site-update-retry').hidden = sitePhase !== 'error';
   element('maximize').title = state.maximized ? 'Восстановить' : 'Развернуть';
   element('maximize').setAttribute('aria-label', element('maximize').title);
   const files = state.downloads?.entries || [];
@@ -77,46 +80,3 @@ downloadsButton.addEventListener('pointerleave', () => void api.downloadsPanel(f
 downloadsButton.addEventListener('focus', showDownloadsPanel);
 downloadsButton.addEventListener('blur', () => void api.downloadsPanel(false));
 api.onDownloadsPanel((open) => downloadsButton.setAttribute('aria-expanded', String(open)));
-
-for (const edge of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
-  const grip = document.createElement('div');
-  grip.className = 'resize-grip';
-  grip.dataset.edge = edge;
-  document.body.append(grip);
-  let active = false;
-  let started = false;
-  let pendingPoint;
-  const point = (event) => ({ x: event.screenX, y: event.screenY });
-  const flush = () => {
-    if (!started || !pendingPoint) return;
-    api.resizeMove(pendingPoint);
-    pendingPoint = undefined;
-  };
-  grip.addEventListener('pointerdown', async (event) => {
-    if (event.button !== 0 || currentState?.maximized) return;
-    event.preventDefault();
-    grip.setPointerCapture(event.pointerId);
-    active = true;
-    started = await api.resizeStart(edge, point(event));
-    if (started) {
-      flush();
-      if (!active) { api.resizeEnd(); started = false; }
-    } else { active = false; pendingPoint = undefined; }
-  });
-  grip.addEventListener('pointermove', (event) => {
-    if (!active) return;
-    pendingPoint = point(event);
-    // IPC is ordered. Send immediately instead of adding a renderer frame of
-    // latency (which also stalled while the transparent window was resizing).
-    flush();
-  });
-  const finish = () => {
-    if (!active) return;
-    flush();
-    active = false;
-    if (started) { api.resizeEnd(); started = false; }
-  };
-  grip.addEventListener('pointerup', finish);
-  grip.addEventListener('pointercancel', finish);
-  grip.addEventListener('lostpointercapture', finish);
-}

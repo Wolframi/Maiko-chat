@@ -20,6 +20,7 @@ import {
 import type { StickerPack } from "@/lib/types";
 import { MAX_STICKER_BYTES } from "@/lib/files";
 import { StickerCropDialog } from "@/components/chat/StickerCropDialog";
+import { ConfirmDialog } from "@/components/chat/ConfirmDialog";
 import { layoutGifMosaic } from "@/lib/gifMosaic";
 
 type StickerPickerProps = {
@@ -127,6 +128,11 @@ export function StickerPicker({
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [cropFile, setCropFile] = useState<File | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<{
+    packId: string;
+    title: string;
+    stickerId?: string;
+  } | null>(null);
   const cropResolverRef = useRef<((file: File | null) => void) | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const widthProbeRef = useRef<HTMLDivElement>(null);
@@ -170,7 +176,10 @@ export function StickerPicker({
   }, [open, activePackId]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setPendingDelete(null);
+      return;
+    }
     void refreshPacks();
   }, [open, refreshPacks]);
 
@@ -266,17 +275,26 @@ export function StickerPicker({
     [activePack, onAddSticker, uploading, askCrop],
   );
 
-  const handleDeletePack = useCallback(async () => {
-    if (!activePack) return;
-    if (!confirm(`Удалить пак «${activePack.title}»?`)) return;
-    const ok = await onDeletePack(activePack.id);
-    if (!ok) {
-      toast.error("Не удалось удалить пак");
-      return;
+  const handleConfirmDelete = useCallback(async () => {
+    if (!pendingDelete) return;
+    const { packId, stickerId } = pendingDelete;
+    setPendingDelete(null);
+    try {
+      const ok = stickerId
+        ? await onRemoveSticker(packId, stickerId)
+        : await onDeletePack(packId);
+      if (!ok) {
+        toast.error(stickerId ? "Не удалось удалить стикер" : "Не удалось удалить пак");
+        return;
+      }
+      if (!stickerId) {
+        toast("Пак удалён");
+        setActivePackId((current) => current === packId ? null : current);
+      }
+    } catch {
+      toast.error(stickerId ? "Не удалось удалить стикер" : "Не удалось удалить пак");
     }
-    toast("Пак удалён");
-    setActivePackId(null);
-  }, [activePack, onDeletePack]);
+  }, [pendingDelete, onDeletePack, onRemoveSticker]);
 
   const handleSaveRename = useCallback(async () => {
     if (!activePack) return;
@@ -434,7 +452,7 @@ export function StickerPicker({
                 <button
                   type="button"
                   className="sticker-picker__action sticker-picker__action--danger"
-                  onClick={() => void handleDeletePack()}
+                  onClick={() => setPendingDelete({ packId: activePack.id, title: activePack.title })}
                   title="Удалить пак"
                   aria-label="Удалить пак"
                 >
@@ -458,12 +476,9 @@ export function StickerPicker({
                 const tile = mosaic.tiles[index];
                 if (!tile) return null;
                 return (
-                  <button
+                  <div
                     key={sticker.id}
-                    type="button"
                     className="sticker-picker__item"
-                    onClick={() => onSend(activePack.id, sticker.id)}
-                    title={sticker.name || "Стикер"}
                     style={{
                       left: tile.x,
                       top: tile.y,
@@ -471,45 +486,49 @@ export function StickerPicker({
                       height: tile.height,
                     }}
                   >
-                    {sticker.animated ? (
-                      <video
-                        src={sticker.url}
-                        autoPlay
-                        loop
-                        muted
-                        playsInline
-                        preload="metadata"
-                        aria-hidden
-                      />
-                    ) : (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={sticker.url}
-                        alt=""
-                        loading="lazy"
-                        draggable={false}
-                      />
-                    )}
+                    <button
+                      type="button"
+                      className="sticker-picker__item-send"
+                      onClick={() => onSend(activePack.id, sticker.id)}
+                      title={sticker.name || "Стикер"}
+                      aria-label={sticker.name || "Отправить стикер"}
+                    >
+                      {sticker.animated ? (
+                        <video
+                          src={sticker.url}
+                          autoPlay
+                          loop
+                          muted
+                          playsInline
+                          preload="metadata"
+                          aria-hidden
+                        />
+                      ) : (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={sticker.url}
+                          alt=""
+                          loading="lazy"
+                          draggable={false}
+                        />
+                      )}
+                    </button>
                     {activePack.canEdit && (
-                      <span
+                      <button
+                        type="button"
                         className="sticker-picker__item-remove"
-                        role="button"
                         aria-label="Удалить стикер"
                         title="Удалить стикер"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          if (!confirm("Удалить этот стикер?")) return;
-                          void onRemoveSticker(activePack.id, sticker.id).then(
-                            (ok) => {
-                              if (!ok) toast.error("Не удалось удалить");
-                            },
-                          );
-                        }}
+                        onClick={() => setPendingDelete({
+                          packId: activePack.id,
+                          title: activePack.title,
+                          stickerId: sticker.id,
+                        })}
                       >
-                        <IconClose size={12} />
-                      </span>
+                        <IconTrash size={14} />
+                      </button>
                     )}
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -522,6 +541,15 @@ export function StickerPicker({
         )}
       </div>
     </motion.div>
+    <ConfirmDialog
+      open={Boolean(pendingDelete)}
+      title={pendingDelete?.stickerId ? "Удалить стикер?" : "Удалить пак?"}
+      body={pendingDelete?.stickerId
+        ? `Стикер будет удалён из пака «${pendingDelete.title}». Это действие нельзя отменить.`
+        : `Пак «${pendingDelete?.title ?? ""}» и все его стикеры будут удалены. Это действие нельзя отменить.`}
+      onCancel={() => setPendingDelete(null)}
+      onConfirm={() => void handleConfirmDelete()}
+    />
     <StickerCropDialog
       open={Boolean(cropFile)}
       file={cropFile}

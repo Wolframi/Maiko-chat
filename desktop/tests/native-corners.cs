@@ -10,6 +10,7 @@ class NativeCorners {
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out int value, int size);
+    [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")] static extern int DwmGetFrameBounds(IntPtr window, int attribute, out Rect value, int size);
     static int Main(string[] args) {
         try {
             long handle;
@@ -22,7 +23,9 @@ class NativeCorners {
             int enabled;
             DwmGetWindowAttribute(window, 1, out enabled, 4);
             Rect rect;
-            if (!GetWindowRect(window, out rect)) return 1;
+            // Native resizing uses an invisible border outside the visible
+            // frame. Capture the actual displayed window, excluding that border.
+            if (DwmGetFrameBounds(window, 9, out rect, Marshal.SizeOf(typeof(Rect))) < 0 && !GetWindowRect(window, out rect)) return 1;
             using (var bitmap = new Bitmap(rect.right - rect.left, rect.bottom - rect.top)) {
                 using (var graphics = Graphics.FromImage(bitmap))
                     graphics.CopyFromScreen(rect.left, rect.top, 0, 0, bitmap.Size);

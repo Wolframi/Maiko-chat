@@ -62,8 +62,10 @@
   function schedule() {
     if (!scheduled) { scheduled = true; requestAnimationFrame(render); }
   }
-  api.onState(state => { active = state; schedule(); });
+  const unsubscribe = api.onState(state => { active = state; schedule(); });
   // Messages may arrive or be remounted while their native download is running.
-  new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
+  const observer = new MutationObserver(schedule);
+  observer.observe(document.body, { childList: true, subtree: true });
+  window.addEventListener('pagehide', () => { unsubscribe(); observer.disconnect(); }, { once: true });
   void api.state().then(state => { active = state; schedule(); }).catch(() => {});
 })();

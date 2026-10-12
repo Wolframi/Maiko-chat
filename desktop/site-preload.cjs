@@ -1,5 +1,17 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+// No renderer controls or IPC primitives are exposed. This signal only lets
+// the trusted site's permanent media document refresh its own child UI.
+contextBridge.exposeInMainWorld('maikoMediaShell', Object.freeze({
+  version: 1,
+  siteUpdate: (phase) => ipcRenderer.invoke('desktop:site-update-state', phase),
+  onRefresh: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('desktop:refresh-interface', handler);
+    return () => ipcRenderer.removeListener('desktop:refresh-interface', handler);
+  },
+}));
+
 // Only our isolated DOM helper can see this bridge. No filesystem paths or
 // folder-opening commands are exposed to the remotely loaded messenger.
 contextBridge.exposeInIsolatedWorld(1001, 'maikoDownloadProgress', Object.freeze({

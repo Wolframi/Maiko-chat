@@ -45,8 +45,8 @@ async function main() {
     execFileSync(path.join(process.env.SystemRoot, 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),
       ['/nologo', '/target:exe', '/platform:x64', '/r:System.Drawing.dll', `/out:${captureHelper}`, path.join(__dirname, 'native-corners.cs')], { windowsHide: true });
     const inspect = () => JSON.parse(execFileSync(helper, [identity.handle, identity.pid, 'inspect'], { windowsHide: true }).toString());
-    const expectedStyle = { caption: true, thickFrame: false, nativeFrame: false };
-    assert.deepEqual(inspect(), expectedStyle, 'Native transitions are enabled without the opaque DWM frame');
+    const expectedStyle = { caption: true, thickFrame: true, nativeFrame: true };
+    assert.deepEqual(inspect(), expectedStyle, 'Windows owns the resize frame and native transitions');
     assert.throws(() => execFileSync(helper, [identity.handle, '0', 'enable'], { windowsHide: true, stdio: 'pipe' }), 'Helper rejects an invalid process');
     assert.throws(() => execFileSync(helper, [identity.handle, String(process.pid), 'enable'], { windowsHide: true, stdio: 'pipe' }), 'Helper rejects a window owned by another process');
     await app.evaluate(async ({ BrowserWindow }) => {
@@ -97,20 +97,21 @@ async function main() {
       win.setAlwaysOnTop(true); win.show(); win.moveTop();
     });
     await shell.waitForTimeout(500);
-    const nativeFile = path.join(output, 'native-transparent-corners.png');
+    const nativeFile = path.join(output, 'native-square-corners.png');
     execFileSync(captureHelper, [identity.handle, identity.pid, nativeFile], { windowsHide: true });
     const physical = await sharp(nativeFile).raw().toBuffer({ resolveWithObject: true });
     for (const [x, y] of [[0, 0], [physical.info.width - 1, 0], [0, physical.info.height - 1], [physical.info.width - 1, physical.info.height - 1]]) {
       const index = (y * physical.info.width + x) * physical.info.channels;
-      assert.deepEqual(Array.from(physical.data.subarray(index, index + 3)), [0, 255, 255], 'OS-composited corner shows the backdrop, without white backing');
+      const corner = Array.from(physical.data.subarray(index, index + 3));
+      assert.notDeepEqual(corner, [0, 255, 255], 'Every visible corner is drawn; no rounded clipping exposes the backdrop');
+      assert.notDeepEqual(corner, [255, 255, 255], 'The native frame has no white corner backing');
     }
     const png = Buffer.from(await app.evaluate(async ({ BrowserWindow }) => (await BrowserWindow.getAllWindows().find((win) => win.webContents.getURL().startsWith('file:')).capturePage()).toPNG().toString('base64')), 'base64');
     await fs.writeFile(path.join(output, 'window-after-restore.png'), png);
     const { data, info } = await sharp(png).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-    assert.equal(data[3], 0, 'Transparent corner survives native animation styles and restore');
-    const alphas = [];
-    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) alphas.push(data[(y * info.width + x) * 4 + 3]);
-    assert.ok(alphas.some((alpha) => alpha > 0 && alpha < 255), 'Rounded corners retain smooth fractional alpha');
+    for (const [x, y] of [[0, 0], [info.width - 1, 0], [0, info.height - 1], [info.width - 1, info.height - 1]]) {
+      assert.equal(data[(y * info.width + x) * 4 + 3], 255, 'Square opaque corners survive minimize, maximize and fullscreen');
+    }
     await shell.getByRole('button', { name: 'Свернуть', exact: true }).click();
     await waitMinimized(app, true);
     await app.close(); app = undefined;
@@ -121,7 +122,7 @@ async function main() {
     const reopened = await app.firstWindow();
     await reopened.waitForFunction(() => !!window.maikoDesktop, null, { polling: 100 });
     assert.deepEqual((await windowState(app)).bounds, normalBounds, 'Relaunch restores the same window geometry');
-    console.log('Window animation regression passed: native caption flag, owner validation, minimize button, repeated normal/maximized restore, fullscreen, smooth corners, saved bounds and relaunch.');
+    console.log('Window animation regression passed: native caption flag, owner validation, minimize button, repeated normal/maximized restore, fullscreen, square corners, saved bounds and relaunch.');
   } finally {
     if (app) await app.close();
     await new Promise((resolve) => server.close(resolve));

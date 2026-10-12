@@ -1,0 +1,1349 @@
+КОД ЗАХВАТА ЗВУКА ДЕМОНСТРАЦИИ ЭКРАНА НА САЙТЕ
+
+Снимок текущих исходников проекта. Это подборка фрагментов, а не отдельный запускаемый модуль.
+Главная точка захвата: captureScreenShare() в site/src/lib/webrtcMedia.ts.
+navigator.mediaDevices.getDisplayMedia() получает экран и доступный звук выбранного источника;
+sanitizeScreenAudio() проверяет аудиотреки, затем звонок или голосовой канал публикует их.
+screenAudio.ts управляет воспроизведением и громкостью полученной демонстрации, а не захватом.
+Роли аудиотреков передаются в offer/answer как screenAudioMids: contentHint сам по себе не передаётся по WebRTC.
+Сендер демонстрации сохраняется в WeakMap и используется повторно после остановки.
+В конце отдельно приведена обёртка Electron, применяемая при открытии сайта в приложении.
+Повторная сборка TXT: node scripts/export-screen-audio-code.mjs
+
+
+==============================================================================
+1. Захват экрана и звука, ограничения, исключение эха
+site/src/lib/webrtcMedia.ts
+==============================================================================
+
+// site/src/lib/webrtcMedia.ts:55 — SCREEN_CAPTURE_CONSTRAINTS
+export const SCREEN_CAPTURE_CONSTRAINTS = {
+  video: {
+    displaySurface: "monitor",
+    width: { ideal: 1920, max: 2560 },
+    height: { ideal: 1080, max: 1440 },
+    frameRate: { ideal: 30, max: 30 },
+  } as MediaTrackConstraints,
+  audio: {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    channelCount: { ideal: 2 },
+    suppressLocalAudioPlayback: false,
+    // Best effort: isolate the call when available; warn if a window's
+    // audio source cannot exclude the call.
+    restrictOwnAudio: true,
+  } as MediaTrackConstraints,
+};
+
+// site/src/lib/webrtcMedia.ts:30 — SCREEN_AUDIO_SEND_PARAMS
+/** System/tab audio from a screen share — stereo, not a speech codec. */
+export const SCREEN_AUDIO_SEND_PARAMS = {
+  maxBitrate: 128_000,
+} as const;
+
+// site/src/lib/webrtcMedia.ts:74 — SCREEN_SEND_PARAMS
+export const SCREEN_SEND_PARAMS = {
+  maxBitrate: 5_000_000,
+  maxFramerate: 30,
+} as const;
+
+// site/src/lib/webrtcMedia.ts:214 — prepareScreenAudioTrack
+export function prepareScreenAudioTrack(track: MediaStreamTrack) {
+  try {
+    track.contentHint = "music";
+  } catch {
+    /* older browsers */
+  }
+}
+
+// site/src/lib/webrtcMedia.ts:222 — ScreenDisplayOptions
+type ScreenDisplayOptions = DisplayMediaStreamOptions & {
+  systemAudio?: "include" | "exclude";
+  windowAudio?: "window" | "exclude";
+  selfBrowserSurface?: "exclude";
+  monitorTypeSurfaces?: "include";
+  surfaceSwitching?: "exclude";
+};
+
+// site/src/lib/webrtcMedia.ts:230 — ScreenAudioConstraints
+type ScreenAudioConstraints = MediaTrackConstraints & {
+  restrictOwnAudio?: ConstrainBoolean;
+};
+
+// site/src/lib/webrtcMedia.ts:234 — CALL_AUDIO_CAPTURE_HANDLE
+const CALL_AUDIO_CAPTURE_HANDLE = "mayko-call-audio";
+
+// site/src/lib/webrtcMedia.ts:236 — CaptureHandleConfig
+type CaptureHandleConfig = {
+  handle?: string;
+  exposeOrigin?: boolean;
+  permittedOrigins?: string[];
+};
+
+// site/src/lib/webrtcMedia.ts:243 — configureCallAudioCapture
+/** Let other Mayko tabs recognize a tab playing a call, without exposing it to other sites. */
+export function configureCallAudioCapture(active: boolean) {
+  const devices = navigator.mediaDevices as MediaDevices & {
+    setCaptureHandleConfig?: (config: CaptureHandleConfig) => void;
+  };
+  try {
+    devices?.setCaptureHandleConfig?.(
+      active
+        ? {
+            handle: CALL_AUDIO_CAPTURE_HANDLE,
+            exposeOrigin: true,
+            permittedOrigins: [window.location.origin],
+          }
+        : {},
+    );
+  } catch {
+    // Capture Handle is unavailable in some browsers and embedded frames.
+  }
+}
+
+// site/src/lib/webrtcMedia.ts:262 — capturesCallTab
+function capturesCallTab(track: MediaStreamTrack | undefined) {
+  const handle = (
+    track as (MediaStreamTrack & {
+      getCaptureHandle?: () => { handle?: string; origin?: string } | null;
+    }) | undefined
+  )?.getCaptureHandle?.();
+  return (
+    handle?.origin === window.location.origin &&
+    handle?.handle === CALL_AUDIO_CAPTURE_HANDLE
+  );
+}
+
+// site/src/lib/webrtcMedia.ts:274 — ScreenCaptureOptions
+type ScreenCaptureOptions = {
+  onAudioUnavailable?: (message: string) => void;
+};
+
+// site/src/lib/webrtcMedia.ts:278 — hasOwnAudioRestriction
+function hasOwnAudioRestriction(track: MediaStreamTrack) {
+  return (
+    (track.getSettings() as MediaTrackSettings & { restrictOwnAudio?: boolean })
+      .restrictOwnAudio === true
+  );
+}
+
+// site/src/lib/webrtcMedia.ts:285 — sanitizeScreenAudio
+async function sanitizeScreenAudio(
+  stream: MediaStream,
+  { onAudioUnavailable }: ScreenCaptureOptions,
+) {
+  const video = stream.getVideoTracks()[0];
+  const surface = video?.getSettings().displaySurface;
+  const removeAudio = (track: MediaStreamTrack, message: string) => {
+    track.stop();
+    stream.removeTrack(track);
+    onAudioUnavailable?.(message);
+  };
+  const removeCallTabAudio = () => {
+    if (!capturesCallTab(video)) return;
+    for (const track of stream.getAudioTracks()) {
+      removeAudio(
+        track,
+        "Звук вкладки со звонком не передаётся, чтобы собеседники не слышали эхо.",
+      );
+    }
+  };
+  removeCallTabAudio();
+  for (const track of stream.getAudioTracks()) {
+    prepareScreenAudioTrack(track);
+    // Full-screen sharing may include the call, by design. Never drop its
+    // audio just because the browser cannot isolate our playback (Windows 10).
+    // A separate tab is already isolated; Capture Handle rejects call tabs.
+    // Window/unknown sources may return system loopback. Try to isolate it,
+    // but keep the chosen source audible if isolation is unsupported.
+    if (surface === "monitor" || surface === "browser" || hasOwnAudioRestriction(track)) continue;
+    try {
+      await track.applyConstraints({
+        restrictOwnAudio: { exact: true },
+      } as ScreenAudioConstraints);
+    } catch {
+      // Unsupported constraints may reject asynchronously or be ignored.
+    }
+    if (!hasOwnAudioRestriction(track)) {
+      onAudioUnavailable?.(
+        "Внимание: звук окна транслируется, но браузер не смог аппаратно подавить эхо канала. Желательно использовать наушники.",
+      );
+    }
+  }
+  // A shared tab can navigate to Mayko or join a call after capture starts.
+  video?.addEventListener("capturehandlechange", removeCallTabAudio);
+  video?.addEventListener("ended", () => {
+    video.removeEventListener("capturehandlechange", removeCallTabAudio);
+  }, { once: true });
+  return stream;
+}
+
+// site/src/lib/webrtcMedia.ts:335 — prefersUnconstrainedScreenVideo
+function prefersUnconstrainedScreenVideo() {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  return /Safari/i.test(ua) && !/Chrome|Chromium|Edg|Android|CriOS|FxiOS/i.test(ua);
+}
+
+// site/src/lib/webrtcMedia.ts:341 — displayCaptureFailed
+function displayCaptureFailed(error: unknown) {
+  const name =
+    error && typeof error === "object" && "name" in error
+      ? String((error as { name?: string }).name)
+      : "";
+  return (
+    name === "NotSupportedError" ||
+    name === "OverconstrainedError" ||
+    name === "TypeError"
+  );
+}
+
+// site/src/lib/webrtcMedia.ts:354 — captureScreenShare
+/** Capture source audio, attempting call isolation when the browser supports it. */
+export async function captureScreenShare(options: ScreenCaptureOptions = {}) {
+  const video = prefersUnconstrainedScreenVideo()
+    ? true
+    : SCREEN_CAPTURE_CONSTRAINTS.video;
+  const audio = SCREEN_CAPTURE_CONSTRAINTS.audio;
+  const captureOptions: ScreenDisplayOptions = {
+    // Offer audio for the chosen source. Verify isolation on the actual track,
+    // rather than hiding desktop/window audio based on a global feature flag.
+    systemAudio: "include",
+    windowAudio: "window",
+    selfBrowserSurface: "exclude",
+    monitorTypeSurfaces: "include",
+    surfaceSwitching: "exclude",
+  };
+  const attempts: ScreenDisplayOptions[] = [
+    {
+      ...captureOptions,
+      video,
+      audio,
+    },
+    {
+      ...captureOptions,
+      video,
+      audio: true,
+    },
+    { ...captureOptions, video, audio: false },
+  ];
+  let lastError: unknown;
+  for (const attempt of attempts) {
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia(attempt);
+    } catch (error) {
+      lastError = error;
+      if (!displayCaptureFailed(error)) throw error;
+      continue;
+    }
+    try {
+      return await sanitizeScreenAudio(stream, options);
+    } catch (error) {
+      stream.getTracks().forEach((track) => track.stop());
+      throw error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("screen-share-failed");
+}
+
+
+==============================================================================
+2. Отправка отдельного аудиотрека демонстрации через WebRTC
+site/src/lib/webrtcMedia.ts
+==============================================================================
+
+// site/src/lib/webrtcMedia.ts:402 — screenAudioSenders
+// A cleared sender has no track metadata. Remember its role for this PC's lifetime.
+const screenAudioSenders = new WeakMap<RTCPeerConnection, RTCRtpSender>();
+
+// site/src/lib/webrtcMedia.ts:403 — remoteScreenAudioMids
+const remoteScreenAudioMids = new WeakMap<RTCPeerConnection, ReadonlySet<string>>();
+
+// site/src/lib/webrtcMedia.ts:458 — ScreenAudioDescription
+export type ScreenAudioDescription = RTCSessionDescriptionInit & { screenAudioMids?: string[] };
+
+// site/src/lib/webrtcMedia.ts:405 — attachLocalScreenAudioTrack
+export async function attachLocalScreenAudioTrack(
+  pc: RTCPeerConnection,
+  track: MediaStreamTrack,
+  stream: MediaStream,
+) {
+  prepareScreenAudioTrack(track);
+  const senders = pc.getSenders();
+  const remembered = screenAudioSenders.get(pc);
+  const existing = (remembered && senders.includes(remembered) ? remembered : undefined) || senders
+    .find(
+      (sender) =>
+        sender.track?.kind === "audio" && sender.track.contentHint === "music",
+    );
+  let sender = existing;
+  const transceiver = pc.getTransceivers().find(item => item.sender === sender);
+  if (transceiver?.direction === "stopped") sender = undefined;
+  if (sender) {
+    sender.setStreams?.(stream);
+    await sender.replaceTrack(track);
+    if (transceiver?.direction === "recvonly") transceiver.direction = "sendrecv";
+    else if (transceiver?.direction === "inactive") transceiver.direction = "sendonly";
+  } else {
+    sender = pc.addTrack(track, stream);
+  }
+  screenAudioSenders.set(pc, sender);
+  await applyAudioSenderParams(sender, SCREEN_AUDIO_SEND_PARAMS.maxBitrate);
+  return sender;
+}
+
+// site/src/lib/webrtcMedia.ts:434 — detachLocalScreenAudioTrack
+export async function detachLocalScreenAudioTrack(
+  pc: RTCPeerConnection,
+  track?: MediaStreamTrack | null,
+) {
+  const sender = screenAudioSenders.get(pc) || pc.getSenders().find(
+    (item) =>
+      (track && item.track === track) ||
+      (item.track?.kind === "audio" && item.track.contentHint === "music"),
+  );
+  if (!sender) return;
+  screenAudioSenders.set(pc, sender);
+  try {
+    // removeTrack changes the transceiver direction while its track is present.
+    pc.removeTrack(sender);
+  } catch {
+    /* ignore */
+  }
+  try {
+    await sender.replaceTrack(null);
+  } catch {
+    /* ignore */
+  }
+}
+
+// site/src/lib/webrtcMedia.ts:788 — applyAudioSenderParams
+export async function applyAudioSenderParams(
+  sender: RTCRtpSender | undefined,
+  maxBitrate: number = AUDIO_SEND_PARAMS.maxBitrate,
+) {
+  if (!sender) return;
+  try {
+    const params = sender.getParameters();
+    if (!params.encodings || params.encodings.length === 0) {
+      params.encodings = [{}];
+    }
+    params.encodings[0].maxBitrate = maxBitrate;
+    await sender.setParameters(params);
+  } catch {
+    /* encodings are empty until the first negotiation on some browsers */
+  }
+}
+
+// site/src/lib/webrtcMedia.ts:641 — replaceAudioSenders
+export async function replaceAudioSenders(
+  pcs: Iterable<RTCPeerConnection | null | undefined>,
+  stream: MediaStream,
+  track: MediaStreamTrack,
+) {
+  for (const pc of pcs) {
+    if (!pc) continue;
+    const sender =
+      pc.getSenders().find(
+        (item) =>
+          item.track?.kind === "audio" && item.track.contentHint !== "music",
+      ) ||
+      pc
+        .getTransceivers()
+        .find((item) => item.receiver.track.kind === "audio" &&
+          item.direction !== "stopped" && item.sender !== screenAudioSenders.get(pc) &&
+          item.sender.track?.contentHint !== "music")?.sender;
+    if (sender) {
+      sender.setStreams?.(stream);
+      await sender.replaceTrack(track);
+      const transceiver = pc.getTransceivers().find(item => item.sender === sender);
+      if (transceiver?.direction === "recvonly") transceiver.direction = "sendrecv";
+      else if (transceiver?.direction === "inactive") transceiver.direction = "sendonly";
+    } else {
+      pc.addTrack(track, stream);
+    }
+  }
+}
+
+// site/src/lib/webrtcMedia.ts:460 — localScreenAudioMids
+export function localScreenAudioMids(pc: RTCPeerConnection, sdp = pc.localDescription?.sdp || "") {
+  const senders = pc.getSenders().filter(sender => sender.track?.kind === "audio" &&
+    (sender === screenAudioSenders.get(pc) || sender.track.contentHint === "music"));
+  const mids = new Set<string>();
+  for (const transceiver of pc.getTransceivers()) {
+    if (transceiver.mid !== null && senders.includes(transceiver.sender)) mids.add(transceiver.mid);
+  }
+  // Initial offers have no assigned transceiver mids yet; SDP msid identifies the track.
+  for (const section of sdp.split(/\r?\n(?=m=)/)) {
+    if (!section.startsWith("m=audio ")) continue;
+    const mid = /^a=mid:([^\r\n]+)/m.exec(section)?.[1];
+    const ids = [...section.matchAll(/^a=msid:\S+ (\S+)/gm)].map(match => match[1]);
+    if (mid && senders.some(sender => ids.includes(sender.track!.id))) mids.add(mid);
+  }
+  return mids;
+}
+
+// site/src/lib/webrtcMedia.ts:478 — withScreenAudioRouting
+/** Role metadata travels in signaling; contentHint itself is local to each peer. */
+export function withScreenAudioRouting(pc: RTCPeerConnection, desc: RTCSessionDescriptionInit): ScreenAudioDescription {
+  return { ...desc, screenAudioMids: [...localScreenAudioMids(pc, desc.sdp)] };
+}
+
+// site/src/lib/webrtcMedia.ts:482 — setRemoteDescriptionWithAudioRouting
+export async function setRemoteDescriptionWithAudioRouting(pc: RTCPeerConnection, desc: ScreenAudioDescription) {
+  const previous = remoteScreenAudioMids.get(pc);
+  if (Array.isArray(desc.screenAudioMids)) {
+    remoteScreenAudioMids.set(pc, new Set(desc.screenAudioMids.filter(mid => typeof mid === "string")));
+  } else remoteScreenAudioMids.delete(pc);
+  try {
+    // Store roles before setRemoteDescription, which dispatches ontrack.
+    await pc.setRemoteDescription({ type: desc.type, sdp: desc.sdp });
+  } catch (error) {
+    if (previous) remoteScreenAudioMids.set(pc, previous);
+    else remoteScreenAudioMids.delete(pc);
+    throw error;
+  }
+}
+
+// site/src/lib/webrtcMedia.ts:497 — remoteScreenAudioTrackIds
+export function remoteScreenAudioTrackIds(pc: RTCPeerConnection): ReadonlySet<string> | undefined {
+  const mids = remoteScreenAudioMids.get(pc);
+  if (!mids) return undefined; // Older peers still use the legacy heuristic.
+  return new Set(pc.getTransceivers().filter(item => item.mid !== null && mids.has(item.mid) &&
+    item.receiver.track.kind === "audio").map(item => item.receiver.track.id));
+}
+
+// site/src/lib/webrtcMedia.ts:849 — upsertFmtp
+function upsertFmtp(params: string, key: string, value: string) {
+  const next = params.replace(/^;+/, "");
+  const re = new RegExp(`${key}=[^;]*`, "i");
+  if (re.test(next)) return next.replace(re, `${key}=${value}`);
+  return next ? `${next};${key}=${value}` : `${key}=${value}`;
+}
+
+// site/src/lib/webrtcMedia.ts:856 — patchOpusSection
+function patchOpusSection(section: string, screen: boolean, eol: string) {
+  const bitrate = screen
+    ? SCREEN_AUDIO_SEND_PARAMS.maxBitrate
+    : AUDIO_SEND_PARAMS.maxBitrate;
+  const pts = [...section.matchAll(/^a=rtpmap:(\d+) opus\/48000/gim)].map(
+    (match) => match[1],
+  );
+  if (!pts.length) return section;
+  let next = section;
+  for (const pt of pts) {
+    const tune = (params: string) => {
+      let patched = upsertFmtp(params, "minptime", "10");
+      patched = upsertFmtp(patched, "useinbandfec", "1");
+      patched = upsertFmtp(patched, "usedtx", screen ? "0" : "1");
+      patched = upsertFmtp(patched, "maxaveragebitrate", String(bitrate));
+      patched = upsertFmtp(patched, "stereo", screen ? "1" : "0");
+      if (screen) patched = upsertFmtp(patched, "sprop-stereo", "1");
+      return patched;
+    };
+    const fmtp = new RegExp(`^(a=fmtp:${pt} )(.*)$`, "im");
+    if (fmtp.test(next)) {
+      next = next.replace(fmtp, (_line, prefix: string, params: string) => {
+        return `${prefix}${tune(params)}`;
+      });
+      continue;
+    }
+    next = next.replace(
+      new RegExp(`^(a=rtpmap:${pt} opus\\/48000.*)$`, "im"),
+      `$1${eol}a=fmtp:${pt} ${tune("")}`,
+    );
+  }
+  return next;
+}
+
+// site/src/lib/webrtcMedia.ts:890 — patchOpusSdp
+export function patchOpusSdp(sdp: string, screenAudioMids?: ReadonlySet<string>) {
+  const eol = sdp.includes("\r\n") ? "\r\n" : "\n";
+  const chunks = sdp.split(/\r?\n(?=m=)/);
+  let audioIndex = 0;
+  const next = chunks.map((chunk) => {
+    if (!/(^|\n)m=audio /.test(chunk)) return chunk;
+    const mid = /^a=mid:([^\r\n]+)/m.exec(chunk)?.[1];
+    const screen = screenAudioMids ? Boolean(mid && screenAudioMids.has(mid)) : audioIndex > 0;
+    audioIndex += 1;
+    return patchOpusSection(chunk, screen, eol);
+  });
+  return next.join(eol);
+}
+
+// site/src/lib/webrtcMedia.ts:904 — tuneSessionDescription
+export function tuneSessionDescription(desc: RTCSessionDescriptionInit) {
+  if (!desc.sdp) return desc;
+  return { ...desc, sdp: patchOpusSdp(desc.sdp) };
+}
+
+// site/src/lib/webrtcMedia.ts:909 — setLocalDescriptionTuned
+export async function setLocalDescriptionTuned(
+  pc: RTCPeerConnection,
+  desc: RTCSessionDescriptionInit,
+) {
+  const original = desc.sdp;
+  try {
+    if (desc.sdp) desc.sdp = patchOpusSdp(desc.sdp, localScreenAudioMids(pc, desc.sdp));
+    await pc.setLocalDescription(desc);
+  } catch {
+    if (original) desc.sdp = original;
+    await pc.setLocalDescription(desc);
+  }
+  return desc;
+}
+
+// site/src/lib/webrtcMedia.ts:1016 — splitCallAudioTracks
+/** Explicit signaling roles take precedence; hints/order support older peers. */
+export function splitCallAudioTracks(
+  tracks: MediaStreamTrack[],
+  screenIds: Set<string>,
+  explicitScreenIds?: ReadonlySet<string>,
+) {
+  const live = tracks.filter((track) => track.readyState === "live");
+  if (explicitScreenIds) screenIds.clear();
+  for (const track of live) {
+    if (explicitScreenIds ? explicitScreenIds.has(track.id) : track.contentHint === "music") {
+      screenIds.add(track.id);
+    }
+  }
+  for (const id of [...screenIds]) {
+    if (!live.some((track) => track.id === id)) screenIds.delete(id);
+  }
+  const unmarked = live.filter((track) => !screenIds.has(track.id));
+  if (!explicitScreenIds && unmarked.length > 1) {
+    for (const extra of unmarked.slice(1)) screenIds.add(extra.id);
+  }
+  return {
+    voice: live.filter((track) => !screenIds.has(track.id)),
+    screen: live.filter((track) => screenIds.has(track.id)),
+  };
+}
+
+
+==============================================================================
+3. Захват и передача демонстрации в личном звонке
+site/src/hooks/useCall.ts
+==============================================================================
+
+// site/src/hooks/useCall.ts:1892 — performToggleScreenShare
+const performToggleScreenShare = useCallback(async () => {
+    const peer = peerRef.current;
+    if (!peer) {
+      setStatus("Демонстрация экрана недоступна");
+      return;
+    }
+    if (sharingScreen) {
+      stopScreenShare();
+      return;
+    }
+
+    let pc = pcRef.current;
+    if (!pc || pc.connectionState === "closed") {
+      pcRef.current = null;
+      pc = ensurePc(peer.peerId);
+    }
+
+    let display: MediaStream | null = null;
+    let screenAudioWarning: string | undefined;
+    try {
+      display = await captureScreenShare({
+        onAudioUnavailable: (message) => {
+          screenAudioWarning = message;
+          setStatus(message);
+        },
+      });
+      const track = display.getVideoTracks()[0];
+      if (!track) {
+        display.getTracks().forEach((item) => item.stop());
+        setStatus("Демонстрация экрана недоступна");
+        return;
+      }
+      const extraAudio = display.getAudioTracks().slice(1);
+      for (const audio of extraAudio) {
+        audio.stop();
+        display.removeTrack(audio);
+      }
+      const screenAudio = display.getAudioTracks()[0] || null;
+
+      prepareScreenTrack(track);
+      screenTrackRef.current = track;
+      screenAudioTrackRef.current = screenAudio;
+      const media = publishLocalVideos();
+      makingOfferRef.current = true;
+      try {
+        const sender = await attachLocalVideoTrackByHint(
+          pc,
+          track,
+          media,
+          "detail",
+        );
+        await applyVideoSenderParams(sender, {
+          maxBitrate: SCREEN_SEND_PARAMS.maxBitrate,
+          maxFramerate: SCREEN_SEND_PARAMS.maxFramerate,
+          maintainResolution: true,
+        });
+        videoQualityKeyRef.current = {};
+        if (screenAudio) {
+          await attachLocalScreenAudioTrack(pc, screenAudio, media);
+        }
+        if (pc.signalingState === "stable") {
+          optimizePeerConnection(pc);
+          const offer = await pc.createOffer();
+          if (pcRef.current === pc && callIdRef.current && pc.signalingState === "stable") {
+            await setLocalDescriptionTuned(pc, offer);
+            emitSignal(peer.peerId, "offer", {
+              type: offer.type,
+              sdp: offer.sdp,
+            });
+          }
+        }
+      } finally {
+        makingOfferRef.current = false;
+      }
+
+      setSharingScreen(true);
+      localSharingScreenRef.current = true;
+      setStatus(screenAudioWarning || "Демонстрация экрана");
+      emitSignal(peer.peerId, "screen-on");
+      emitCurrentMediaState(cameraWasOffRef.current, true);
+      track.onended = () => {
+        stopScreenShare();
+      };
+    } catch (error) {
+      screenTrackRef.current?.stop();
+      screenTrackRef.current = null;
+      display?.getTracks().forEach((item) => item.stop());
+      publishLocalVideos();
+      const name =
+        error && typeof error === "object" && "name" in error
+          ? String((error as { name?: string }).name)
+          : "";
+      if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+        setStatus("Демонстрация экрана отклонена");
+      } else {
+        setStatus("Демонстрация экрана недоступна");
+      }
+    }
+  }, [
+    sharingScreen,
+    stopScreenShare,
+    emitSignal,
+    emitCurrentMediaState,
+    applyVideoSenderParams,
+    publishLocalVideos,
+    ensurePc,
+  ]);
+
+// site/src/hooks/useCall.ts:2000 — toggleScreenShare
+const toggleScreenShare = useCallback(async () => {
+    if (mediaBusyRef.current) return;
+    mediaBusyRef.current = true;
+    setMediaBusy(true);
+    try {
+      await performToggleScreenShare();
+    } finally {
+      mediaBusyRef.current = false;
+      setMediaBusy(false);
+    }
+  }, [performToggleScreenShare]);
+
+// site/src/hooks/useCall.ts:648 — stopScreenShare
+const stopScreenShare = useCallback(() => {
+    const wasSharing = Boolean(screenTrackRef.current || screenAudioTrackRef.current);
+    const peer = peerRef.current;
+    const callId = callIdRef.current;
+    const screenAudio = screenAudioTrackRef.current;
+
+    screenTrackRef.current?.stop();
+    screenTrackRef.current = null;
+    screenAudioTrackRef.current = null;
+    setSharingScreen(false);
+    localSharingScreenRef.current = false;
+
+    if (wasSharing && socket && peer && callId) {
+      socket.emit("call:signal", {
+        callId,
+        toUserId: peer.peerId,
+        type: "screen-off",
+      });
+    }
+
+    const pc = pcRef.current;
+    const camera = cameraTrackRef.current;
+    const cameraLive =
+      Boolean(camera) &&
+      camera?.readyState === "live" &&
+      !cameraWasOffRef.current;
+
+    void (async () => {
+      if (pc) {
+        await detachLocalVideoTrackByHint(pc, "detail");
+        await detachLocalScreenAudioTrack(pc, screenAudio);
+      }
+      screenAudio?.stop();
+    })();
+
+    const media = publishLocalVideos();
+    setCameraOff(!cameraLive);
+    emitCurrentMediaState(!cameraLive, false);
+    if (wasSharing) {
+      setStatus(cameraLive ? "На линии" : "Демонстрация экрана завершена");
+    }
+    void media;
+  }, [socket, emitCurrentMediaState, publishLocalVideos]);
+
+// site/src/hooks/useCall.ts:355 — ensureScreenAudioEl
+const ensureScreenAudioEl = useCallback(() => {
+    const existing = screenAudioElRef.current;
+    if (existing) return existing;
+    const audio = document.createElement("audio");
+    audio.autoplay = true;
+    audio.hidden = true;
+    audio.setAttribute("playsinline", "");
+    document.body.appendChild(audio);
+    screenAudioElRef.current = audio;
+    return audio;
+  }, []);
+
+// site/src/hooks/useCall.ts:367 — stopScreenAudioEl
+const stopScreenAudioEl = useCallback(() => {
+    const audio = screenAudioElRef.current;
+    if (!audio) return;
+    unregisterScreenAudio(audio);
+    audio.srcObject = null;
+    audio.remove();
+    screenAudioElRef.current = null;
+  }, []);
+
+// site/src/hooks/useCall.ts:376 — publishRemoteStream
+const publishRemoteStream = useCallback(() => {
+    const stream = remoteStreamRef.current;
+    if (!stream) {
+      setRemoteStream(null);
+      stopScreenAudioEl();
+      return;
+    }
+    const liveTracks = stream
+      .getTracks()
+      .filter((track) => track.readyState === "live");
+    const audioTracks = liveTracks.filter((track) => track.kind === "audio");
+    const videoTracks = liveTracks.filter((track) => track.kind === "video");
+    const audible = videoTracks.filter((track) => !track.muted);
+    const chosenVideos = audible.length ? audible : videoTracks.slice(-1);
+    const { voice, screen } = splitCallAudioTracks(
+      audioTracks,
+      remoteScreenAudioIdsRef.current,
+      pcRef.current ? remoteScreenAudioTrackIds(pcRef.current) : undefined,
+    );
+    const clone = new MediaStream([...voice, ...chosenVideos]);
+    noteRemotePresentation(clone, chosenVideos.length > 1);
+    setRemoteStream(clone);
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = new MediaStream(voice);
+      remoteAudioRef.current.muted = deafenedRef.current;
+      void applyAudioOutput(remoteAudioRef.current);
+      if (!deafenedRef.current && voice.length) {
+        void remoteAudioRef.current.play().catch(() => undefined);
+      }
+    }
+    if (!screen.length) {
+      const audio = screenAudioElRef.current;
+      if (audio) {
+        unregisterScreenAudio(audio);
+        audio.srcObject = null;
+      }
+      return;
+    }
+    const screenAudio = ensureScreenAudioEl();
+    const currentIds = (screenAudio.srcObject as MediaStream | null)
+      ?.getAudioTracks()
+      .map((track) => track.id)
+      .join("|");
+    const nextIds = screen.map((track) => track.id).join("|");
+    if (currentIds !== nextIds) {
+      screenAudio.srcObject = new MediaStream(screen);
+    }
+    screenAudio.muted = deafenedRef.current;
+    registerScreenAudio(screenAudio, peerRef.current?.peerId || "remote");
+    void applyAudioOutput(screenAudio);
+    if (!deafenedRef.current) {
+      void screenAudio.play().catch(() => undefined);
+    }
+  }, [ensureScreenAudioEl, stopScreenAudioEl]);
+
+// site/src/hooks/useCall.ts:827 — emitSignal
+const emitSignal = useCallback(
+    (
+      toUserId: string,
+      type:
+        | "offer"
+        | "answer"
+        | "ice"
+        | "accept"
+        | "reject"
+        | "end"
+        | "screen-on"
+        | "screen-off"
+        | "camera-on"
+        | "camera-off"
+        | "media-request"
+        | "media-state",
+      data?: unknown,
+    ) => {
+      const callId = callIdRef.current;
+      if (!socket || !callId) return;
+      socket.emit("call:signal", {
+        callId,
+        toUserId,
+        type,
+        data: (type === "offer" || type === "answer") && pcRef.current && data
+          ? withScreenAudioRouting(pcRef.current, data as RTCSessionDescriptionInit) : data,
+      });
+    },
+    [socket],
+  );
+
+// site/src/hooks/useCall.ts:1103 — answerRemoteOffer
+const answerRemoteOffer = useCallback(
+    async (peerId: string, offer: RTCSessionDescriptionInit) => {
+      const attachLocal = (pc: RTCPeerConnection) => {
+        const stream = localStreamRef.current;
+        stream?.getTracks().forEach((track) => {
+          if (!pc.getSenders().some((sender) => sender.track === track)) {
+            pc.addTrack(track, stream);
+          }
+        });
+        void applyAudioSenders([pc]);
+      };
+      const tryAnswer = async (pc: RTCPeerConnection) => {
+        if (pc.signalingState === "have-local-offer") {
+          await pc.setLocalDescription({ type: "rollback" });
+        }
+        await setRemoteDescriptionWithAudioRouting(pc, offer);
+        publishRemoteStream();
+        remoteReadyRef.current = true;
+        optimizePeerConnection(pc);
+        const answer = await pc.createAnswer();
+        await setLocalDescriptionTuned(pc, answer);
+        void applyAudioSenders([pc]);
+        emitSignal(peerId, "answer", {
+          type: answer.type,
+          sdp: answer.sdp,
+        });
+        await flushIce(pc);
+      };
+      try {
+        const pc = ensurePc(peerId);
+        attachLocal(pc);
+        await tryAnswer(pc);
+      } catch {
+        if (pcRef.current) {
+          try {
+            pcRef.current.close();
+          } catch {
+            /* ignore */
+          }
+          pcRef.current = null;
+        }
+        pendingIceRef.current = [];
+        remoteReadyRef.current = false;
+        const fresh = ensurePc(peerId);
+        attachLocal(fresh);
+        await tryAnswer(fresh);
+      }
+    },
+    [ensurePc, flushIce, emitSignal, publishRemoteStream],
+  );
+
+
+==============================================================================
+4. Захват и передача демонстрации в голосовом канале WebRTC Mesh
+site/src/hooks/useVoiceChannelMesh.ts
+==============================================================================
+
+// site/src/hooks/useVoiceChannelMesh.ts:1204 — toggleScreenShare
+const toggleScreenShare = useCallback(async () => {
+    if (mediaBusyRef.current) return;
+    mediaBusyRef.current = true;
+    setMediaBusy(true);
+    try {
+      if (sharingScreen) {
+        await stopScreenShare();
+        return;
+      }
+
+      const display = await captureScreenShare({ onAudioUnavailable: setError });
+      const track = display.getVideoTracks()[0];
+      if (!track) {
+        display.getTracks().forEach((item) => item.stop());
+        setError("Демонстрация экрана недоступна");
+        return;
+      }
+      const extraAudio = display.getAudioTracks().slice(1);
+      for (const audio of extraAudio) {
+        audio.stop();
+        display.removeTrack(audio);
+      }
+      const screenAudio = display.getAudioTracks()[0] || null;
+      prepareScreenTrack(track);
+      screenTrackRef.current = track;
+      screenAudioTrackRef.current = screenAudio;
+
+      const media = publishLocalVideos();
+      for (const pc of pcsRef.current.values()) {
+        const sender = await attachLocalVideoTrackByHint(
+          pc,
+          track,
+          media,
+          "detail",
+        );
+        await applyVideoSenderParams(sender, {
+          maxBitrate: SCREEN_SEND_PARAMS.maxBitrate,
+          maxFramerate: SCREEN_SEND_PARAMS.maxFramerate,
+          maintainResolution: true,
+        });
+        if (screenAudio) {
+          await attachLocalScreenAudioTrack(pc, screenAudio, media);
+        }
+      }
+
+      setSharingScreen(true);
+      queueNegotiationForAll();
+      emitMediaToServer({
+        sharingScreen: true,
+        cameraOff,
+      });
+
+      track.onended = () => {
+        if (screenTrackRef.current !== track) return;
+        const restore = () => {
+          if (mediaBusyRef.current) {
+            setTimeout(restore, 120);
+            return;
+          }
+          mediaBusyRef.current = true;
+          setMediaBusy(true);
+          void stopScreenShare().finally(() => {
+            mediaBusyRef.current = false;
+            setMediaBusy(false);
+          });
+        };
+        restore();
+      };
+    } catch (err) {
+      screenTrackRef.current?.stop();
+      screenTrackRef.current = null;
+      screenAudioTrackRef.current?.stop();
+      screenAudioTrackRef.current = null;
+      const name =
+        err && typeof err === "object" && "name" in err
+          ? String((err as { name?: string }).name)
+          : "";
+      if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+        setError("Демонстрация экрана отклонена");
+      } else {
+        setError("Демонстрация экрана недоступна");
+      }
+    } finally {
+      mediaBusyRef.current = false;
+      setMediaBusy(false);
+    }
+  }, [
+    cameraOff,
+    emitMediaToServer,
+    publishLocalVideos,
+    queueNegotiationForAll,
+    sharingScreen,
+    stopScreenShare,
+  ]);
+
+// site/src/hooks/useVoiceChannelMesh.ts:760 — stopScreenShare
+const stopScreenShare = useCallback(async () => {
+    const screen = screenTrackRef.current;
+    const screenAudio = screenAudioTrackRef.current;
+    if (screen) screen.onended = null;
+    screenTrackRef.current = null;
+    screenAudioTrackRef.current = null;
+    if (screen?.readyState === "live") screen.stop();
+
+    for (const pc of pcsRef.current.values()) {
+      await detachLocalVideoTrackByHint(pc, "detail");
+      await detachLocalScreenAudioTrack(pc, screenAudio);
+    }
+    screenAudio?.stop();
+
+    const audioTracks = (localStreamRef.current?.getAudioTracks() || []).filter(
+      (track) => track !== screenAudio,
+    );
+    const camera = cameraTrackRef.current;
+    const videos = [camera].filter(
+      (track): track is MediaStreamTrack =>
+        Boolean(track && track.readyState === "live"),
+    );
+    const media = new MediaStream([...audioTracks, ...videos]);
+    localStreamRef.current = media;
+    setLocalStream(media);
+    setSharingScreen(false);
+    setCameraOff(!camera || camera.readyState !== "live" || !camera.enabled);
+    queueNegotiationForAll();
+    emitMediaToServer({
+      sharingScreen: false,
+      cameraOff: !camera || camera.readyState !== "live" || !camera.enabled,
+    });
+  }, [emitMediaToServer, queueNegotiationForAll]);
+
+// site/src/hooks/useVoiceChannelMesh.ts:311 — emitSignal
+const emitSignal = useCallback(
+    (toUserId: string, type: string, data?: unknown) => {
+      const channelId = channelIdRef.current;
+      if (!socket || !channelId) return;
+      const pc = pcsRef.current.get(toUserId);
+      socket.emit("voice:signal", { channelId, toUserId, type,
+        data: (type === "offer" || type === "answer") && pc && data
+          ? withScreenAudioRouting(pc, data as RTCSessionDescriptionInit) : data });
+    },
+    [socket],
+  );
+
+// site/src/hooks/useVoiceChannelMesh.ts:205 — syncRemoteStream
+const syncRemoteStream = useCallback(
+    (peerId: string, eventTrack?: MediaStreamTrack) => {
+      const pc = pcsRef.current.get(peerId);
+      const receiverTracks = (pc?.getReceivers() || [])
+        .map((receiver) => receiver.track)
+        .filter((track) => track.readyState === "live");
+      if (
+        eventTrack?.readyState === "live" &&
+        !receiverTracks.some((track) => track.id === eventTrack.id)
+      ) {
+        receiverTracks.push(eventTrack);
+      }
+      const audioTracks = receiverTracks.filter(
+        (track) => track.kind === "audio",
+      );
+      const videoTracks = receiverTracks.filter(
+        (track) => track.kind === "video",
+      );
+      const audible = videoTracks.filter((track) => !track.muted);
+      const chosenVideos = audible.length
+        ? audible
+        : videoTracks.slice(-1);
+      const tracks = [...audioTracks, ...chosenVideos];
+
+      let stream = remoteStreamsRef.current.get(peerId);
+      if (!stream) {
+        stream = new MediaStream();
+        remoteStreamsRef.current.set(peerId, stream);
+      }
+      const liveIds = new Set(tracks.map((track) => track.id));
+      for (const oldTrack of stream.getTracks()) {
+        if (!liveIds.has(oldTrack.id)) stream.removeTrack(oldTrack);
+      }
+      for (const track of tracks) {
+        if (!stream.getTrackById(track.id)) stream.addTrack(track);
+      }
+      if (chosenVideos.length > 1) noteRemotePresentation(stream, true);
+
+      let screenIds = remoteScreenAudioIdsRef.current.get(peerId);
+      if (!screenIds) { screenIds = new Set(); remoteScreenAudioIdsRef.current.set(peerId, screenIds); }
+      const { voice, screen } = splitCallAudioTracks(audioTracks, screenIds,
+        pc ? remoteScreenAudioTrackIds(pc) : undefined);
+      const attachAudio = (audio: HTMLAudioElement, tracks: MediaStreamTrack[]) => {
+        const currentIds = (audio.srcObject as MediaStream | null)
+          ?.getAudioTracks()
+          .map((track) => track.id)
+          .sort()
+          .join("|");
+        const nextIds = tracks
+          .map((track) => track.id)
+          .sort()
+          .join("|");
+        if (currentIds !== nextIds) {
+          audio.srcObject = new MediaStream(tracks);
+        }
+        audio.muted = deafenedRef.current;
+        if (tracks.length) void audio.play().catch(() => undefined);
+      };
+      if (voice.length || remoteAudioRef.current.has(peerId)) attachAudio(ensureRemoteAudio(peerId), voice);
+      if (screen.length || remoteScreenAudioRef.current.has(peerId)) {
+        let audio = remoteScreenAudioRef.current.get(peerId);
+        if (!audio) {
+          audio = document.createElement("audio");
+          audio.autoplay = true;
+          audio.setAttribute("playsinline", "");
+          audio.hidden = true;
+          audio.dataset.voiceScreenPeer = peerId;
+          document.body.appendChild(audio);
+          remoteScreenAudioRef.current.set(peerId, audio);
+          void applyAudioOutput(audio);
+          registerScreenAudio(audio, peerId);
+        }
+        attachAudio(audio, screen);
+      }
+      publishRemoteStreams();
+    },
+    [ensureRemoteAudio, publishRemoteStreams],
+  );
+
+
+==============================================================================
+5. Захват и публикация звука демонстрации через LiveKit
+site/src/hooks/useVoiceChannelLiveKit.ts
+==============================================================================
+
+// site/src/hooks/useVoiceChannelLiveKit.ts:105 — SCREEN_VIDEO_PUBLISH
+const SCREEN_VIDEO_PUBLISH = {
+  source: Track.Source.ScreenShare,
+  // Simulcast layers for screen share often never appear on LiveKit 1.8
+  // (subscribers get notFoundTimeout / empty stage).
+  simulcast: false,
+  degradationPreference: "maintain-resolution" as const,
+  videoEncoding: {
+    maxBitrate: SCREEN_SEND_PARAMS.maxBitrate,
+    maxFramerate: SCREEN_SEND_PARAMS.maxFramerate,
+  },
+  screenShareEncoding: {
+    maxBitrate: SCREEN_SEND_PARAMS.maxBitrate,
+    maxFramerate: SCREEN_SEND_PARAMS.maxFramerate,
+  },
+};
+
+// site/src/hooks/useVoiceChannelLiveKit.ts:143 — markAsScreenTrack
+function markAsScreenTrack(track: MediaStreamTrack | undefined) {
+  if (!track) return;
+  try {
+    if (track.contentHint !== "detail" && track.contentHint !== "text") {
+      track.contentHint = "detail";
+    }
+  } catch {
+    /* Safari */
+  }
+}
+
+// site/src/hooks/useVoiceChannelLiveKit.ts:154 — enableLiveKitScreenShare
+async function enableLiveKitScreenShare(
+  room: Room,
+  onAudioUnavailable: (message: string) => void,
+) {
+  const display = await captureScreenShare({ onAudioUnavailable });
+  const videoTrack = display.getVideoTracks()[0];
+  if (!videoTrack) {
+    display.getTracks().forEach((track) => track.stop());
+    throw new Error("screen-share-failed");
+  }
+  prepareScreenTrack(videoTrack);
+  const audioTrack = display.getAudioTracks()[0] || null;
+  try {
+    await room.localParticipant.publishTrack(videoTrack, SCREEN_VIDEO_PUBLISH);
+  } catch (error) {
+    display.getTracks().forEach((track) => track.stop());
+    throw error;
+  }
+  markAsScreenTrack(videoTrack);
+  if (!audioTrack) return;
+  prepareScreenAudioTrack(audioTrack);
+  try {
+    await room.localParticipant.publishTrack(audioTrack, {
+      source: Track.Source.ScreenShareAudio,
+      audioPreset: AudioPresets.musicHighQualityStereo,
+      dtx: false,
+      forceStereo: true,
+      red: false,
+    });
+  } catch {
+    audioTrack.stop();
+  }
+}
+
+
+==============================================================================
+6. Воспроизведение и громкость звука демонстрации
+site/src/lib/screenAudio.ts
+==============================================================================
+
+"use client";
+
+/** Громкость звука демонстраций экрана — отдельная ручка на каждую демонстрацию. */
+
+const SCREEN_VOLUME_KEY = "pulse-screen-volume";
+
+const DEFAULT_OWNER = "__default__";
+let loaded = false;
+const volumeByOwner = new Map<string, number>();
+const elementsByOwner = new Map<string, Set<HTMLAudioElement>>();
+const ownerByElement = new WeakMap<HTMLAudioElement, string>();
+const listeners = new Set<() => void>();
+
+/** Подписка на изменения громкости (чтобы все ручки одного владельца были в синхроне). */
+export function subscribeScreenAudioVolume(listener: () => void) {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+function clamp(value: number) {
+  return Math.min(1, Math.max(0, value));
+}
+
+function ownerKey(owner?: string | null) {
+  return owner ? String(owner) : DEFAULT_OWNER;
+}
+
+function load() {
+  if (loaded) return;
+  loaded = true;
+  try {
+    const raw = localStorage.getItem(SCREEN_VOLUME_KEY);
+    if (raw === null) return;
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed === "number" && Number.isFinite(parsed)) {
+      // Старый формат — единая громкость для всех демонстраций.
+      volumeByOwner.set(DEFAULT_OWNER, clamp(parsed));
+      return;
+    }
+    if (parsed && typeof parsed === "object") {
+      for (const [key, value] of Object.entries(
+        parsed as Record<string, unknown>,
+      )) {
+        if (typeof value === "number" && Number.isFinite(value)) {
+          volumeByOwner.set(key, clamp(value));
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function persist() {
+  try {
+    const map: Record<string, number> = {};
+    for (const [key, value] of volumeByOwner) map[key] = value;
+    localStorage.setItem(SCREEN_VOLUME_KEY, JSON.stringify(map));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function getScreenAudioVolume(owner?: string | null): number {
+  load();
+  return volumeByOwner.get(ownerKey(owner)) ?? 1;
+}
+
+export function setScreenAudioVolume(volume: number, owner?: string | null) {
+  load();
+  const key = ownerKey(owner);
+  const next = clamp(volume);
+  volumeByOwner.set(key, next);
+  persist();
+  const elements = elementsByOwner.get(key);
+  if (elements) {
+    for (const element of elements) element.volume = next;
+  }
+  for (const listener of listeners) listener();
+}
+
+/** Регистрирует аудиоэлемент звука демонстрации (сразу применяет громкость). */
+export function registerScreenAudio(
+  element: HTMLAudioElement,
+  owner?: string | null,
+) {
+  load();
+  const key = ownerKey(owner);
+  const previous = ownerByElement.get(element);
+  if (previous && previous !== key) {
+    const old = elementsByOwner.get(previous);
+    old?.delete(element);
+    if (old && !old.size) elementsByOwner.delete(previous);
+  }
+  const set = elementsByOwner.get(key) ?? new Set<HTMLAudioElement>();
+  set.add(element);
+  elementsByOwner.set(key, set);
+  ownerByElement.set(element, key);
+  element.volume = volumeByOwner.get(key) ?? 1;
+}
+
+export function unregisterScreenAudio(element: HTMLAudioElement) {
+  const key = ownerByElement.get(element);
+  if (!key) return;
+  ownerByElement.delete(element);
+  // В звонке и mesh это тот же элемент, что играет голос собеседника.
+  element.volume = 1;
+  const set = elementsByOwner.get(key);
+  if (set) {
+    set.delete(element);
+    if (!set.size) elementsByOwner.delete(key);
+  }
+}
+
+// The desktop UI and persistent media owner share storage but have separate
+// module instances. Apply UI volume changes to the owner's playing elements.
+if (typeof window !== "undefined") window.addEventListener("storage", (event) => {
+  if (event.key !== SCREEN_VOLUME_KEY) return;
+  loaded = false;
+  volumeByOwner.clear();
+  load();
+  for (const [owner, elements] of elementsByOwner) {
+    for (const element of elements) element.volume = volumeByOwner.get(owner) ?? 1;
+  }
+  for (const listener of listeners) listener();
+});
+
+
+==============================================================================
+7. Дополнение для приложения: политика нативного захвата звука
+desktop/site-preload.cjs
+==============================================================================
+
+// Зависимости фрагмента: const { contextBridge, ipcRenderer } = require('electron');
+// Read-only capture metadata. The site still has no shell, filesystem or
+// window-control bridge. The main process accepts this only from its site.
+contextBridge.exposeInMainWorld('maikoScreenAudio', Object.freeze({
+  takePolicy: () => ipcRenderer.invoke('desktop:capture-audio-policy'),
+}));
+
+contextBridge.executeInMainWorld({ func: () => {
+  const devices = navigator.mediaDevices;
+  if (!devices?.getDisplayMedia) return;
+  const capture = devices.getDisplayMedia.bind(devices);
+  let capturing = false;
+  function describeIsolatedTrack(track) {
+    const settings = track.getSettings.bind(track);
+    const clone = track.clone.bind(track);
+    // Chromium on Windows 10 reports restrictOwnAudio=false even for its
+    // native process-isolated devices. Report the policy actually applied by
+    // the desktop handler, so the deployed site's safety check accepts it.
+    // This changes metadata only; filtering happens natively before encoding.
+    Object.defineProperty(track, 'getSettings', {
+      value: () => ({ ...settings(), restrictOwnAudio: true }),
+    });
+    Object.defineProperty(track, 'clone', {
+      value: () => { const cloned = clone(); describeIsolatedTrack(cloned); return cloned; },
+    });
+  }
+  Object.defineProperty(devices, 'getDisplayMedia', {
+    value: async (options) => {
+      if (capturing) throw new DOMException('Демонстрация уже выбирается', 'InvalidStateError');
+      capturing = true;
+      let stream;
+      try {
+        stream = await capture(options);
+        const policy = await window.maikoScreenAudio.takePolicy();
+        if (policy?.isolated === true) {
+          for (const track of stream.getAudioTracks()) describeIsolatedTrack(track);
+        } else {
+          // A missing policy must never produce an unfiltered call loopback.
+          for (const track of stream.getAudioTracks()) { track.stop(); stream.removeTrack(track); }
+        }
+        return stream;
+      } catch (error) {
+        stream?.getTracks().forEach((track) => track.stop());
+        throw error;
+      } finally { capturing = false; }
+    },
+  });
+} });

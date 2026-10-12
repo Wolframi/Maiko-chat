@@ -1,7 +1,7 @@
 const { BrowserWindow, desktopCapturer, ipcMain } = require('electron');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { RADIUS } = require('./window-geometry.cjs');
+const { RADIUS, makeWindowRectangular } = require('./window-geometry.cjs');
 const { windowProcesses, audioPolicy } = require('./capture-audio.cjs');
 
 function configureCapture({ siteSession, getWindow, getSite, trusted, testing, log }) {
@@ -64,11 +64,12 @@ function configureCapture({ siteSession, getWindow, getSite, trusted, testing, l
       const policies = new Map(sources.map((source) => [source.id, audioPolicy(source, owners)]));
       const picker = new BrowserWindow({
         parent: getWindow(), modal: true, width: 780, height: 600,
-        frame: false, roundedCorners: true, transparent: true, thickFrame: false, backgroundColor: '#00000000',
+        frame: false, roundedCorners: false, transparent: false, thickFrame: false, backgroundColor: '#141416',
         resizable: false, minimizable: false, maximizable: false, show: false,
         title: 'Демонстрация экрана — Майко',
         webPreferences: { preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false },
       });
+      makeWindowRectangular(picker);
       let finished = false;
       const finish = (streams) => {
         if (finished) return;
@@ -84,7 +85,7 @@ function configureCapture({ siteSession, getWindow, getSite, trusted, testing, l
       picker.on('closed', () => finish(null));
       picker.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
       picker.webContents.on('will-navigate', (event, url) => { if (url !== pickerUrl) event.preventDefault(); });
-      picker.contentView.setBackgroundColor('#00000000');
+      picker.contentView.setBackgroundColor('#141416');
       picker.contentView.setBorderRadius(RADIUS);
       picker.once('ready-to-show', () => { if (!testing) picker.show(); });
       await picker.loadURL(pickerUrl);

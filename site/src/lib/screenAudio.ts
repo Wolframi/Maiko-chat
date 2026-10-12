@@ -113,3 +113,16 @@ export function unregisterScreenAudio(element: HTMLAudioElement) {
     if (!set.size) elementsByOwner.delete(key);
   }
 }
+
+// The desktop UI and persistent media owner share storage but have separate
+// module instances. Apply UI volume changes to the owner's playing elements.
+if (typeof window !== "undefined") window.addEventListener("storage", (event) => {
+  if (event.key !== SCREEN_VOLUME_KEY) return;
+  loaded = false;
+  volumeByOwner.clear();
+  load();
+  for (const [owner, elements] of elementsByOwner) {
+    for (const element of elements) element.volume = volumeByOwner.get(owner) ?? 1;
+  }
+  for (const listener of listeners) listener();
+});

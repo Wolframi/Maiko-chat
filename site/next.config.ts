@@ -1,7 +1,10 @@
 import type { NextConfig } from "next";
+import { randomUUID } from "node:crypto";
 import { lanDevHosts } from "./src/lib/devHosts";
 
 const nextConfig: NextConfig = {
+  generateBuildId: async () => process.env.NEXT_PUBLIC_SITE_VERSION || randomUUID(),
+  env: { NEXT_PUBLIC_SITE_VERSION: process.env.NEXT_PUBLIC_SITE_VERSION || "" },
   // The Electron client has its own lockfile; keep the web workspace explicit.
   turbopack: { root: process.cwd() },
   async headers() {

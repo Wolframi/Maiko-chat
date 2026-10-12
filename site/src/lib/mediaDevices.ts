@@ -62,7 +62,13 @@ export function subscribeVoiceSettings(
     handler(detail);
   }
   window.addEventListener(VOICE_SETTINGS_EVENT, onEvent);
-  return () => window.removeEventListener(VOICE_SETTINGS_EVENT, onEvent);
+  const onStorage = (event: StorageEvent) => {
+    if (event.key === "pulse-mic-device") handler({ mic: true });
+    else if (event.key === "pulse-speaker-device") handler({ speaker: true });
+    else if (event.key?.startsWith("pulse-") && /noise|krisp|browser-ns|dtln/.test(event.key)) handler({ noise: true });
+  };
+  window.addEventListener("storage", onStorage);
+  return () => { window.removeEventListener(VOICE_SETTINGS_EVENT, onEvent); window.removeEventListener("storage", onStorage); };
 }
 
 export function getMicDeviceId() {

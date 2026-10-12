@@ -73,7 +73,8 @@ import type { ChatMessage, RoomMediaItem } from "@/lib/types";
 import { isImageAttachment, isVideoAttachment, albumPreviewText } from "@/lib/files";
 import { formatLastSeen } from "@/lib/notify";
 import { isChatMuted, toggleChatMuted } from "@/lib/mute";
-import { flushPendingBootReload } from "@/lib/liveReload";
+import { consumeSiteReloadNotice, flushPendingBootReload } from "@/lib/liveReload";
+import { getDesktopMediaRuntime } from "@/lib/desktopMedia";
 import { peekLastRoom, peekMediaResume, saveLastRoom } from "@/lib/mediaResume";
 import { getSavedRingtone, prefetchRingtone } from "@/lib/ringtone";
 import { Toaster, toast } from "sonner";
@@ -1455,12 +1456,17 @@ export function ChatApp() {
     setIntroReady(ready => ready ?? { at: performance.now(), durationMs });
   }, []);
   const [introVisible, setIntroVisible] = useState(true);
+  const [siteReloaded, setSiteReloaded] = useState(false);
+  useEffect(() => {
+    if (!introVisible) getDesktopMediaRuntime()?.reportSiteUpdate("ready");
+  }, [introVisible]);
   const [authWash, setAuthWash] = useState(true);
   // Avoid hydration mismatch: reducedMotion="user" reads matchMedia on first client paint.
   const [motionPolicy, setMotionPolicy] = useState<"never" | "user">("never");
 
   useEffect(() => {
     setMotionPolicy("user");
+    setSiteReloaded(consumeSiteReloadNotice());
   }, []);
 
   // Start the intro clock after the particles load, including on slow connections.
@@ -1677,6 +1683,9 @@ export function ChatApp() {
             transition={{ duration: 0.42, ease: easeOut }}
           >
             <HologramMaiko onReady={handleIntroReady} />
+            {siteReloaded && !getDesktopMediaRuntime() && <p className="boot__update" role="status">
+              Сайт обновлён{peekMediaResume() ? " · возвращаемся в звонок…" : " · загружаем Майко…"}
+            </p>}
           </motion.div>
         ) : !account ? (
           <motion.div

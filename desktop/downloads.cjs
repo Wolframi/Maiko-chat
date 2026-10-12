@@ -43,7 +43,7 @@ function createDownloads({ directory, historyPath, siteSession, getSite, trusted
   const trimHistory = () => {
     let recent = 0;
     // Forget old records only. Downloaded files are never removed here.
-    entries = entries.filter((entry) => entry.phase === 'downloading' || recent++ < HISTORY_LIMIT);
+    entries = entries.filter((entry) => entry.phase !== 'cancelled' && (entry.phase === 'downloading' || recent++ < HISTORY_LIMIT));
   };
   const snapshot = () => ({ directory, limit: HISTORY_LIMIT, entries: entries.slice(0, HISTORY_LIMIT).map((entry) => ({ ...entry })) });
   const siteProgress = () => entries.filter(entry => entry.phase === 'downloading' && entry.sourcePath)

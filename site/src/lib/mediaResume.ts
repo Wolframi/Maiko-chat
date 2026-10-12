@@ -11,6 +11,10 @@ export type MediaResume =
       mode: "audio" | "video";
       muted: boolean;
       cameraOff: boolean;
+      deafened?: boolean;
+      callId?: string;
+      connectedAt?: number;
+      sharingScreen?: boolean;
       at: number;
     }
   | {
@@ -21,6 +25,7 @@ export type MediaResume =
       muted: boolean;
       deafened: boolean;
       cameraOff: boolean;
+      sharingScreen?: boolean;
       at: number;
     };
 
@@ -29,6 +34,7 @@ type VoiceResumeInput = Omit<Extract<MediaResume, { kind: "voice" }>, "at">;
 
 let pageUnloading = false;
 const liveMedia = { call: false, voice: false };
+const reloadBlocked = { call: false, voice: false };
 
 const persistHooks = new Set<() => void>();
 
@@ -65,12 +71,23 @@ export function isPageUnloading() {
 }
 
 /** True while a 1:1 call or group voice session is open in this tab. */
-export function setLiveMediaSession(kind: "call" | "voice", on: boolean) {
+export function setLiveMediaSession(kind: "call" | "voice", on: boolean, reloadable = true) {
   liveMedia[kind] = on;
+  reloadBlocked[kind] = on && !reloadable;
 }
 
 export function hasLiveMediaSession() {
   return liveMedia.call || liveMedia.voice;
+}
+
+/** Screen capture requires a fresh user gesture; ringing must not auto-answer. */
+export function canReloadLiveMedia() {
+  if (!hasLiveMediaSession()) return true;
+  if (reloadBlocked.call || reloadBlocked.voice) return false;
+  const resume = peekMediaResume();
+  if (!resume || resume.sharingScreen) return false;
+  if (liveMedia.call) return resume.kind === "call" && Boolean(resume.callId && resume.connectedAt);
+  return resume.kind === "voice";
 }
 
 export function saveMediaResume(session: CallResumeInput | VoiceResumeInput) {
