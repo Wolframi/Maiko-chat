@@ -5,6 +5,7 @@ import {
   persistLiveMediaNow,
 } from "@/lib/mediaResume";
 import { getDesktopMediaRuntime, isDesktopMediaOwner } from "@/lib/desktopMedia";
+import { sessionHeaders } from "@/lib/sessionHeaders";
 
 const BOOT_KEY = "pulse-boot-id";
 const PENDING_KEY = "pulse-boot-pending";
@@ -163,7 +164,7 @@ async function reloadNow(bootId: string, manual = false) {
     }
     // Verify readiness even for a socket notification: never navigate into
     // a restarting server, an unhealthy deployment or a different version.
-    const response = await fetch("/api/health", { cache: "no-store", signal: AbortSignal.timeout(2500) });
+    const response = await fetch("/api/health", { cache: "no-store", headers: sessionHeaders(), signal: AbortSignal.timeout(2500) });
     if (!response.ok) { writePendingBootId(bootId); return; }
     const health = await response.json() as BootNotice;
     if (versionOf(health) !== bootId) { writePendingBootId(versionOf(health) || bootId); return; }
@@ -233,7 +234,7 @@ async function pollHealth() {
   try {
     const res = await fetch("/api/health", {
       cache: "no-store",
-      headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+      headers: { ...sessionHeaders(), "Cache-Control": "no-cache", Pragma: "no-cache" },
       signal: ac.signal,
     });
     if (!res.ok) return;

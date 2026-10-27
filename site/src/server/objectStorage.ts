@@ -184,6 +184,12 @@ export async function presignUploadPart(key: string, uploadId: string, partNumbe
   }), { expiresIn, signableHeaders: new Set(["content-length"]) });
 }
 
+/** Server-only input for ffmpeg: Range reads avoid downloading entire videos. */
+export async function processingObjectUrl(key: string) {
+  if (!s3Client) throw new Error("S3 storage is not configured");
+  return getSignedUrl(s3Client, new GetObjectCommand(objectLocation(key)), { expiresIn: 60 });
+}
+
 export async function completeMultipartUpload(key: string, uploadId: string, parts: Array<{ partNumber: number; etag: string }>) {
   if (!s3Client) throw new Error("S3 storage is not configured");
   await s3Client.send(new CompleteMultipartUploadCommand({

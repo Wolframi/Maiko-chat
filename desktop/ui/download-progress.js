@@ -1,6 +1,6 @@
 (() => {
   if (window.maikoDownloadRingsInitialized) return;
-  const api = window.maikoDownloadProgress;
+  const api = typeof maikoDownloadProgress !== 'undefined' ? maikoDownloadProgress : window.maikoDownloadProgress;
   if (!api) return;
   window.maikoDownloadRingsInitialized = true;
   const length = 2 * Math.PI * 20;

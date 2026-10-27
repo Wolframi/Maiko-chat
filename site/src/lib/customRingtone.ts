@@ -1,3 +1,6 @@
+import { uploadFileWithRetry } from "./files";
+import { getRingtoneAccount, requestRingtoneSettings } from "./ringtoneAccount";
+
 export const CUSTOM_RINGTONE_ID = "custom";
 export const CUSTOM_RINGTONE_URL = "idb:custom";
 export const CUSTOM_MAX_SEC = 45;
@@ -191,29 +194,45 @@ export async function saveCustomRingtone(opts: {
   startSec: number;
   endSec: number;
   title: string;
-}) {
+}, ifAbsent = false) {
+  const account = getRingtoneAccount();
+  if (!account) throw new Error("Сначала войдите в аккаунт");
+  const trimmed = await uploadFileWithRetry(new File([opts.trimmed], "ringtone.wav", { type: "audio/wav" }), account.token);
+  const original = await uploadFileWithRetry(new File([opts.source], opts.sourceName, { type: opts.source.type || "audio/mpeg" }), account.token);
+  if (getRingtoneAccount() !== account) throw new Error("Аккаунт изменился");
+  await requestRingtoneSettings({ custom: {
+    id: CUSTOM_RINGTONE_ID, title: opts.title, url: trimmed.url, startSec: 0,
+    source: { url: original.url, name: opts.sourceName, startSec: opts.startSec, endSec: opts.endSec },
+  }, ifAbsent });
   if (objectUrl) {
     URL.revokeObjectURL(objectUrl);
     objectUrl = null;
   }
-  await idbPut(TRIMMED_KEY, opts.trimmed);
+  await idbPut(`${account.userId}:${TRIMMED_KEY}`, opts.trimmed).catch(() => undefined);
   const source: SourceRecord = {
     blob: opts.source,
     name: opts.sourceName,
     startSec: opts.startSec,
     endSec: opts.endSec,
   };
-  await idbPut(SOURCE_KEY, source);
+  await idbPut(`${account.userId}:${SOURCE_KEY}`, source).catch(() => undefined);
   objectUrl = URL.createObjectURL(opts.trimmed);
   return objectUrl;
 }
 
+export async function migrateCustomRingtone(title: string) {
+  const trimmed = await idbGet<Blob>(TRIMMED_KEY);
+  const source = await idbGet<SourceRecord>(SOURCE_KEY);
+  if (!trimmed || !source) return;
+  await saveCustomRingtone({ trimmed, source: source.blob, sourceName: source.name,
+    startSec: source.startSec, endSec: source.endSec, title }, true);
+}
+
 export async function getCustomRingtoneObjectUrl(): Promise<string | null> {
-  if (objectUrl) return objectUrl;
-  const blob = await idbGet<Blob>(TRIMMED_KEY);
-  if (!blob) return null;
-  objectUrl = URL.createObjectURL(blob);
-  return objectUrl;
+  const account = getRingtoneAccount();
+  if (!account) return null;
+  const settings = await requestRingtoneSettings();
+  return settings.custom?.url || null;
 }
 
 export async function loadCustomSource(): Promise<{
@@ -221,7 +240,16 @@ export async function loadCustomSource(): Promise<{
   startSec: number;
   endSec: number;
 } | null> {
-  const rec = await idbGet<SourceRecord>(SOURCE_KEY);
+  const settings = getRingtoneAccount() ? await requestRingtoneSettings() : null;
+  const stored = settings?.custom?.source;
+  if (stored) {
+    const response = await fetch(stored.url);
+    if (!response.ok) throw new Error("Не удалось загрузить исходный рингтон");
+    return { file: new File([await response.blob()], stored.name, { type: response.headers.get("Content-Type") || "audio/mpeg" }),
+      startSec: stored.startSec, endSec: stored.endSec };
+  }
+  const account = getRingtoneAccount();
+  const rec = account ? await idbGet<SourceRecord>(`${account.userId}:${SOURCE_KEY}`) : null;
   if (!rec?.blob) return null;
   const file = new File([rec.blob], rec.name || "ringtone.mp3", {
     type: rec.blob.type || "audio/mpeg",
@@ -234,14 +262,18 @@ export async function loadCustomSource(): Promise<{
 }
 
 export async function hasCustomRingtone() {
-  const blob = await idbGet<Blob>(TRIMMED_KEY);
-  return Boolean(blob && blob.size > 0);
+  if (!getRingtoneAccount()) return false;
+  const settings = await requestRingtoneSettings();
+  return Boolean(settings.custom);
 }
 
 export async function clearCustomRingtone() {
+  const account = getRingtoneAccount();
+  if (!account) return;
+  await requestRingtoneSettings({ custom: null });
   if (objectUrl) {
     URL.revokeObjectURL(objectUrl);
     objectUrl = null;
   }
-  await idbDelete([TRIMMED_KEY, SOURCE_KEY]);
+  await idbDelete([`${account.userId}:${TRIMMED_KEY}`, `${account.userId}:${SOURCE_KEY}`]).catch(() => undefined);
 }

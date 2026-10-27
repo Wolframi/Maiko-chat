@@ -1,20 +1,46 @@
 const api = window.maikoDesktop;
 const element = (id) => document.getElementById(id);
+const connectionText = createStatusText(element('status'));
+const siteUpdateText = createStatusText(element('site-update-label'));
+let sitePhase = 'idle', siteTransition = 0, dockAnimation;
+
+function renderSiteUpdate(nextPhase) {
+  if (nextPhase === sitePhase) return;
+  sitePhase = nextPhase;
+  const transition = ++siteTransition;
+  const dock = element('site-update-dock');
+  dockAnimation?.cancel();
+  delete dock.dataset.leaving;
+  element('site-update-retry').hidden = nextPhase !== 'error';
+  dock.dataset.phase = nextPhase;
+  if (nextPhase !== 'idle') {
+    dock.hidden = false;
+    void siteUpdateText.set(nextPhase === 'loading' ? 'Сайт обновляется…' : nextPhase === 'ready' ? 'Сайт обновлён' : 'Не удалось обновить сайт');
+    return;
+  }
+  const animate = !document.hidden && !matchMedia('(prefers-reduced-motion: reduce)').matches;
+  dock.dataset.leaving = 'true';
+  if (animate) {
+    const width = `${dock.getBoundingClientRect().width}px`;
+    dockAnimation = dock.animate([{ width, opacity: 1, offset: 0 }, { width, opacity: 1, offset: .55 }, { width: '0px', opacity: 0 }], {
+      duration: 600, easing: 'cubic-bezier(.22, 1, .36, 1)', fill: 'forwards',
+    });
+  }
+  void siteUpdateText.set('').then(finished => {
+    if (!finished || transition !== siteTransition) return;
+    dock.hidden = true;
+    dockAnimation?.cancel();
+    delete dock.dataset.leaving;
+  });
+}
 
 function render(state) {
   document.body.dataset.phase = state.phase;
   document.body.classList.toggle('maximized', state.maximized);
-  element('status').textContent = state.phase === 'ready' ? 'Подключено' : state.phase === 'error' ? 'Нет подключения' : 'Подключаемся…';
+  void connectionText.set(state.phase === 'ready' ? 'Подключено' : state.phase === 'error' ? 'Нет подключения' : 'Подключаемся…');
   element('message').textContent = state.message;
-  element('heading').textContent = state.phase === 'error' ? 'Не удалось подключиться' : 'Почти на месте';
-  element('loader').hidden = state.phase !== 'loading';
-  element('error-actions').hidden = state.phase !== 'error';
-  element('connection-screen').hidden = state.phase === 'ready';
-  const sitePhase = state.siteUpdatePhase || 'idle';
-  element('site-update-dock').hidden = sitePhase === 'idle';
-  element('site-update-dock').dataset.phase = sitePhase;
-  element('site-update-label').textContent = sitePhase === 'loading' ? 'Сайт обновляется…' : sitePhase === 'ready' ? 'Сайт обновлён' : sitePhase === 'error' ? 'Не удалось обновить сайт' : '';
-  element('site-update-retry').hidden = sitePhase !== 'error';
+  element('connection-screen').hidden = state.phase !== 'error';
+  renderSiteUpdate(state.siteUpdatePhase || 'idle');
   element('maximize').title = state.maximized ? 'Восстановить' : 'Развернуть';
   element('maximize').setAttribute('aria-label', element('maximize').title);
   const files = state.downloads?.entries || [];

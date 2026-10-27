@@ -1,12 +1,47 @@
 let selected;
+let selectedSource;
 const api = window.maikoDesktop;
 const share = document.getElementById('share');
 const audio = document.getElementById('share-audio');
 const audioLabel = document.getElementById('audio-label');
 const audioHint = document.getElementById('audio-hint');
 const captureError = document.getElementById('capture-error');
+
+function updateAudio() {
+  audio.disabled = !selectedSource?.audioKind;
+  if (audio.disabled) audio.checked = false;
+  audioLabel.textContent = selectedSource?.audioKind === 'system'
+    ? 'Передавать звук компьютера' : 'Передавать звук приложения';
+  audioHint.textContent = selectedSource?.audioKind === 'system'
+      ? 'Звук ПК подключается автоматически. Голоса и демонстрации собеседников исключены.'
+      : selectedSource?.audioKind === 'application'
+        ? 'Только звук приложения этого окна. Мост DAW подключится автоматически; другие приложения исключены.'
+        : 'Для этого окна звук недоступен. Окно Майко передаётся без звука звонка.';
+}
+const dawStatus = document.getElementById('daw-status');
+const dawButton = document.getElementById('download-daw');
+function showDawInstalled(installed) {
+  dawButton.textContent = installed ? '✓ Установлено' : 'Скачать VST3';
+  dawButton.disabled = installed;
+  dawButton.classList.toggle('is-installed', installed);
+}
+dawButton.addEventListener('click', async () => {
+  dawButton.disabled = true;
+  dawButton.textContent = 'Установка…';
+  dawStatus.hidden = true;
+  try {
+    const result = await api.installDawBridge();
+    if (!result?.installed) throw new Error('VST3 не установлен');
+    showDawInstalled(true);
+  } catch {
+    showDawInstalled(false);
+    dawStatus.textContent = 'Не удалось установить VST3. Закройте DAW и повторите. Проверьте доступ к папке VST3.';
+    dawStatus.hidden = false;
+  }
+});
 audio.disabled = true;
-void api.captureSources().then(({ sources, audioAvailable }) => {
+void api.captureSources().then(({ sources, audioAvailable, dawInstalled }) => {
+  showDawInstalled(dawInstalled === true);
   document.getElementById('audio-option').hidden = !audioAvailable;
   for (const source of sources) {
     const button = document.createElement('button');
@@ -20,14 +55,8 @@ void api.captureSources().then(({ sources, audioAvailable }) => {
     button.append(image, name);
     button.addEventListener('click', () => {
       selected = source.id;
-      audio.disabled = !source.audioKind;
-      if (!source.audioKind) audio.checked = false;
-      audioLabel.textContent = source.audioKind === 'system' ? 'Передавать звук компьютера' : 'Передавать звук приложения';
-      audioHint.textContent = source.audioKind === 'system'
-        ? 'Звук ПК без голосов собеседников и аудио их демонстраций.'
-        : source.audioKind === 'application'
-          ? 'Звук приложения этого окна. Другие приложения и Майко исключены.'
-          : 'Для этого окна звук недоступен. Окно Майко передаётся без звука звонка.';
+      selectedSource = source;
+      updateAudio();
       for (const item of document.querySelectorAll('.source')) item.setAttribute('aria-pressed', String(item === button));
       share.disabled = false;
     });

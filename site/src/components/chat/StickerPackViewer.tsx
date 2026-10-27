@@ -1,11 +1,15 @@
 "use client";
 
+import { ChatImage } from "@/components/chat/ChatImage";
+import { AnimatedSticker } from "@/components/chat/AnimatedSticker";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { toast } from "sonner";
 import { IconClose, IconPlus, IconCheck } from "@/lib/icons";
 import type { StickerPack } from "@/lib/types";
 import { sheetSpring } from "@/lib/motion";
+import { thumbSrc } from "@/lib/files";
 
 type StickerPackViewerProps = {
   open: boolean;
@@ -262,7 +266,7 @@ export function StickerPackViewer({
                     }}
                   >
                     {sticker.animated ? (
-                      <video
+                      <AnimatedSticker
                         src={sticker.url}
                         autoPlay
                         loop
@@ -280,9 +284,9 @@ export function StickerPackViewer({
                         }}
                       />
                     ) : (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={sticker.url}
+
+                      <ChatImage
+                        src={thumbSrc(sticker.url)}
                         alt=""
                         draggable={false}
                         loading="lazy"

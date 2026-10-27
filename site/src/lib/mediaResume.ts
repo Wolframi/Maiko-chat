@@ -152,6 +152,12 @@ export function peekLastRoom(): LastRoom | null {
   }
 }
 
+export function forgetLastRoom(chatId: string) {
+  const last = peekLastRoom();
+  if (last?.chatId !== chatId && last?.panel !== chatId) return;
+  try { sessionStorage.removeItem(ROOM_KEY); } catch { /* unavailable storage */ }
+}
+
 export function clearMediaResume() {
   if (typeof window === "undefined") return;
   if (pageUnloading) return;

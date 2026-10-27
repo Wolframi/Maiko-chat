@@ -14,6 +14,7 @@ type VoiceDockProps = {
   title: string;
   connectionLabel?: string | null;
   connectionQuality?: SignalQuality;
+  rttMs?: number | null;
   muted: boolean;
   deafened: boolean;
   onToggleMute: () => void;
@@ -26,6 +27,7 @@ export function VoiceDock({
   title,
   connectionLabel = null,
   connectionQuality = "unknown",
+  rttMs = null,
   muted,
   deafened,
   onToggleMute,
@@ -37,7 +39,7 @@ export function VoiceDock({
     <div className="voice-dock" role="status" aria-live="polite">
       <div className="voice-dock__meta">
         <strong title={title}>{title}</strong>
-        <ConnectionSignal quality={connectionQuality} pending={connectionLabel} />
+        <ConnectionSignal quality={connectionQuality} rttMs={rttMs} pending={connectionLabel} />
       </div>
       <div className="voice-dock__actions">
         {onExpand ? (

@@ -5,7 +5,6 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import Busboy from "busboy";
 import { pipeline } from "node:stream/promises";
@@ -18,6 +17,7 @@ import {
   headObject,
   isObjectNotFound,
   presignUploadPart,
+  processingObjectUrl,
   putObjectFile,
   readObject,
   readObjectPrefix,
@@ -27,6 +27,7 @@ import {
 import { isDevAccessibleHost } from "../lib/devHosts";
 import { restoreSession } from "./auth";
 import { rateLimit } from "./rateLimit";
+import { createMediaPreviewService, previewWithin } from "./mediaPreview";
 import { audioWaveform } from "./audioWaveform";
 import { downloadName, downloadDisposition } from "./downloadName";
 import {
@@ -47,14 +48,14 @@ import {
   closeSync,
   readFileSync,
   readdirSync,
-  renameSync,
   writeFileSync,
 } from "node:fs";
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 const THUMB_DIR = path.join(UPLOAD_DIR, "thumbs");
 const THUMB_WIDTHS = new Set(["320", "430", "860", "1080"]);
-const THUMB_SOURCE_EXT = new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp"]);
+const THUMB_SOURCE_EXT = new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".avif"]);
+const previews = createMediaPreviewService(THUMB_DIR);
 const MAX_SIZE = 500 * 1024 * 1024;
 const AVATAR_MAX_SIZE = 2 * 1024 * 1024;
 const DEV = process.env.NODE_ENV !== "production";
@@ -205,7 +206,7 @@ function signingSecret() {
     writeFileSync(SECRET_FILE, secret, "utf8");
     return secret;
   } catch {
-    return "pulse-dev-upload-secret";
+    throw new Error("Cannot load or persist upload signing secret");
   }
 }
 
@@ -233,7 +234,7 @@ export function signAvatarUrl(url: string) {
 
 function verifyUploadSignature(bare: string, expRaw: string, sigRaw: string) {
   const exp = Number(expRaw);
-  if (!Number.isFinite(exp) || exp < Date.now()) return false;
+  if (!/^\d{13}$/.test(expRaw) || !Number.isSafeInteger(exp) || exp <= Date.now()) return false;
   const expected = signPayload(bare, exp);
   const got = String(sigRaw || "");
   if (expected.length !== got.length) return false;
@@ -722,86 +723,6 @@ async function pipeUpload(
 /** Delete uploads nothing references, older than ORPHAN_MIN_AGE_MS. */
 const ORPHAN_MIN_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
-function isJpegFile(filePath: string) {
-  try {
-    const fd = openSync(filePath, "r");
-    const buf = Buffer.alloc(3);
-    const n = readSync(fd, buf, 0, 3, 0);
-    closeSync(fd);
-    return n >= 2 && buf[0] === 0xff && buf[1] === 0xd8;
-  } catch {
-    return false;
-  }
-}
-
-/** ffmpeg resize off the request path so the first view is not stuck on a thumb. */
-function resizeThumb(source: string, target: string, width: number) {
-  const tmp = `${target}.tmp`;
-  const side = Math.max(32, Math.min(1080, Math.round(width) || 430));
-  return new Promise<boolean>((resolve) => {
-    let stderr = "";
-    let settled = false;
-    const child = spawn(
-      "ffmpeg",
-      [
-        "-y",
-        "-i",
-        source,
-        "-vf",
-        `scale=${side}:-2`,
-        "-frames:v",
-        "1",
-        "-q:v",
-        "5",
-        "-update",
-        "1",
-        "-f",
-        "image2",
-        tmp,
-      ],
-      { stdio: ["ignore", "ignore", "pipe"], windowsHide: true },
-    );
-    const timer = setTimeout(() => {
-      child.kill();
-      finish(false);
-    }, 15_000);
-    function finish(ok: boolean) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (!ok) {
-        try {
-          unlinkSync(tmp);
-        } catch {
-          /* ignore */
-        }
-      }
-      resolve(ok);
-    }
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr = (stderr + chunk.toString()).slice(-200);
-    });
-    child.on("error", (error) => {
-      console.error("[thumbs] spawn error", error.message);
-      finish(false);
-    });
-    child.on("close", (status) => {
-      if (status === 0 && existsSync(tmp) && isJpegFile(tmp)) {
-        try {
-          renameSync(tmp, target);
-          finish(true);
-          return;
-        } catch (error) {
-          console.error("[thumbs] rename failed", (error as Error).message);
-        }
-      } else if (status !== 0) {
-        console.error("[thumbs] ffmpeg failed", "status:", status, "stderr:", stderr);
-      }
-      finish(false);
-    });
-  });
-}
-
 export function sweepOrphanUploads(
   isReferenced: (fileName: string) => boolean,
   now = Date.now(),
@@ -862,6 +783,13 @@ async function serveUpload(req: IncomingMessage, res: ServerResponse) {
   const url = req.url || "";
 
   const parsed = new URL(url, "http://localhost");
+  const requestedName = uploadNameFromUrl(parsed.pathname);
+  if (!requestedName || !verifyUploadSignature(`/uploads/${requestedName}`,
+    parsed.searchParams.get("exp") || "", parsed.searchParams.get("sig") || "")) {
+    res.writeHead(403, { "Cache-Control": "no-store" });
+    res.end("Forbidden");
+    return;
+  }
   const info = await getUploadInfo(parsed.pathname);
   const fileName = info?.fileName || "";
   const bare = `/uploads/${fileName}`;
@@ -881,25 +809,6 @@ async function serveUpload(req: IncomingMessage, res: ServerResponse) {
       : fileName;
   const ext = path.extname(fileName).toLowerCase() || path.extname(original).toLowerCase();
   const looksImage = info.image;
-  const isInlineVisual =
-    INLINE_MEDIA_EXT.has(ext) ||
-    looksImage ||
-    ext === ".mov" ||
-    ext === ".m4v" ||
-    ext === ".mkv" ||
-    ext === ".avi";
-  const exp = parsed.searchParams.get("exp") || "";
-  const sig = parsed.searchParams.get("sig") || "";
-  // Photos/videos/avatars: UUID path is the capability — allow missing/expired
-  // signatures so cached message media doesn't randomly 403.
-  if (!isInlineVisual) {
-    if (!verifyUploadSignature(bare, exp, sig)) {
-      res.statusCode = 403;
-      res.setHeader("Cache-Control", "no-store");
-      res.end("Forbidden");
-      return true;
-    }
-  }
 
   const size = info.size;
   if (!download && parsed.searchParams.get("waveform") === "1") {
@@ -919,7 +828,7 @@ async function serveUpload(req: IncomingMessage, res: ServerResponse) {
     res.writeHead(200, {
       "Content-Type": "application/json; charset=utf-8",
       "Content-Length": Buffer.byteLength(body),
-      "Cache-Control": "private, max-age=86400",
+      "Cache-Control": "private, no-store",
       "X-Content-Type-Options": "nosniff",
     });
     res.end(req.method === "HEAD" ? undefined : body);
@@ -953,39 +862,37 @@ async function serveUpload(req: IncomingMessage, res: ServerResponse) {
   const forceAttach = download || !INLINE_MEDIA_EXT.has(ext);
   const suggestedName = download ? downloadName(parsed.searchParams.get("name") || "", original) : original;
   const disposition = downloadDisposition(suggestedName, forceAttach);
-  const isVideo = mime.startsWith("video/");
 
-  // Thumbnail proxy: a ready thumb is served immediately. A miss falls
-  // through to the original so the chat is not stuck on ffmpeg.
+  // Authenticate first. Small derived frames never expose the original URL.
   const wantW = parsed.searchParams.get("w");
-  if (
-    !download && wantW &&
-    THUMB_WIDTHS.has(wantW) &&
-    looksImage &&
-    THUMB_SOURCE_EXT.has(ext) &&
-    size > 120_000
-  ) {
-    const thumbName = `${fileName}.w${wantW}.jpg`;
-    const thumbSize = await readyThumbnailSize(thumbName);
-    if (thumbSize <= 0) scheduleThumbnail(fileName, thumbName, Number(wantW));
-    if (thumbSize > 0) {
+  const poster = parsed.searchParams.get("poster") === "1";
+  const canPreview = looksImage && THUMB_SOURCE_EXT.has(ext) && size > 120_000;
+  if (!download && wantW && THUMB_WIDTHS.has(wantW) && (canPreview || (poster && mime.startsWith("video/")))) {
+    const preview = await previewWithin(uploadPreview(info, Number(wantW)), 1200);
+    if (res.destroyed) return;
+    if (preview) {
       const headers = {
-          "Content-Type": "image/jpeg",
-          "Cache-Control": "public, max-age=31536000, immutable",
-          "Content-Length": thumbSize,
-          "X-Content-Type-Options": "nosniff",
+        "Content-Type": "image/webp", "Content-Length": preview.size,
+        "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
       };
       if (req.method === "HEAD") { res.writeHead(200, headers); res.end(); }
-      else await pipeUpload(`thumbs/${thumbName}`, res, 200, headers);
-      return true;
+      else {
+        res.writeHead(200, headers);
+        await pipeline(createReadStream(preview.filename), res);
+      }
+      return;
     }
+  }
+  if (!download && poster) {
+    // Let the client use its normal video fallback while this shared job finishes.
+    res.writeHead(503, { "Cache-Control": "no-store", "Retry-After": "2" });
+    res.end();
+    return;
   }
   // Videos are often replaced after HEVC→H.264 — short cache + ETag so PC
   // browsers pick up the converted file instead of a stale audio-only copy.
   const etag = info.etag;
-  const cacheControl = isVideo || !isInlineVisual
-    ? "private, max-age=60, must-revalidate"
-    : "public, max-age=31536000, immutable";
+  const cacheControl = "private, no-store";
 
   const baseHeaders: Record<string, string | number> = {
     "Content-Type": mime,
@@ -1055,39 +962,19 @@ async function serveUpload(req: IncomingMessage, res: ServerResponse) {
   return true;
 }
 
-const thumbnailJobs = new Map<string, Promise<void>>();
-
-async function readyThumbnailSize(thumbName: string) {
-  const key = `uploads/thumbs/${thumbName}`;
-  const target = path.join(THUMB_DIR, thumbName);
-  if (s3Enabled) {
-    const remote = await headObject(key);
-    return remote?.ContentLength || 0;
-  }
-  if (existsSync(target) && isJpegFile(target)) return statSync(target).size;
-  return 0;
+function uploadPreview(info: UploadInfo, width = 430, localSource?: string) {
+  return previews.get({ name: info.fileName, version: info.etag, width,
+    source: () => localSource ? Promise.resolve(localSource) : s3Enabled
+      ? processingObjectUrl(`uploads/${info.fileName}`)
+      : Promise.resolve(path.join(UPLOAD_DIR, info.fileName)),
+  });
 }
 
-function scheduleThumbnail(fileName: string, thumbName: string, width: number) {
-  if (thumbnailJobs.has(thumbName)) return;
-  if (!rateLimit("thumb-gen", 120, 60_000)) return;
-  const job = (async () => {
-    const key = `uploads/thumbs/${thumbName}`;
-    const target = path.join(THUMB_DIR, thumbName);
-    if ((await readyThumbnailSize(thumbName)) > 0) return;
-    try {
-      const ok = await withUploadFile(`/uploads/${fileName}`, (source) =>
-        resizeThumb(source, target, width),
-      );
-      if (!ok) return;
-      if (s3Enabled) await putObjectFile(key, target, "image/jpeg", { image: "true" });
-    } catch (error) {
-      console.error("[thumbs] generate failed", (error as Error).name);
-    } finally {
-      if (s3Enabled) cleanupPath(target);
-    }
-  })().finally(() => thumbnailJobs.delete(thumbName));
-  thumbnailJobs.set(thumbName, job);
+async function warmUploadPreview(fileName: string, mime: string, localSource?: string) {
+  const ext = path.extname(fileName).toLowerCase();
+  if (!mime.startsWith("video/") && !THUMB_SOURCE_EXT.has(ext)) return;
+  const info = await getUploadInfo(`/uploads/${fileName}`);
+  if (info && (mime.startsWith("video/") || info.size > 120_000)) await uploadPreview(info, 430, localSource);
 }
 
 export function handleUpload(req: IncomingMessage, res: ServerResponse) {
@@ -1306,12 +1193,15 @@ export function handleUpload(req: IncomingMessage, res: ServerResponse) {
             size: finalSize,
             mime: savedMime,
           };
+          // Start the common chat size before recipients open the message.
+          const previewPromise = warmUploadPreview(finalStored, savedMime, finalPath).catch(() => {});
           const wavePromise =
             savedMime.startsWith("audio/") && finalSize <= 64 * 1024 * 1024
               ? audioWaveform(finalStored, (consume) => consume(finalPath))
               : null;
           if (transcode) {
             scheduleBrowserVideoTranscode(finalPath, savedMime, async (convertedPath, changed) => {
+              await previewPromise;
               if (changed) forgetUploadInfo(finalStored);
               if (!s3Enabled) return;
               if (changed) {
@@ -1321,8 +1211,7 @@ export function handleUpload(req: IncomingMessage, res: ServerResponse) {
               if (convertedPath !== finalPath) cleanupPath(finalPath);
             });
           } else if (s3Enabled) {
-            if (wavePromise) void wavePromise.finally(() => cleanupPath(finalPath));
-            else cleanupPath(finalPath);
+            void Promise.allSettled([previewPromise, wavePromise]).then(() => cleanupPath(finalPath));
           }
           resolve();
         })().catch((error) => {
@@ -1672,6 +1561,7 @@ async function handleDirectUpload(
 
   const url = `/uploads/${upload.stored}`;
   rememberUploadOwner(url, userId);
+  void warmUploadPreview(upload.stored, upload.mime).catch(() => {});
   if (isTranscodableVideoPath(upload.stored, upload.mime)) {
     scheduleStoredVideoTranscode(upload.stored, upload.mime);
   }

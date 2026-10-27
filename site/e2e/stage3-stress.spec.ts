@@ -65,28 +65,12 @@ async function createGroup(page: Page, title: string) {
   });
 }
 
-async function inviteUser(page: Page, query: string, label: RegExp) {
-  await page.getByRole("textbox", { name: "Пригласить в группу" }).fill(query);
-  const pick = page.locator(".member-pick").filter({ hasText: label }).first();
-  await expect(pick).toBeVisible({ timeout: 10_000 });
-  await pick.click();
-}
-
-async function acceptInvite(page: Page) {
+async function joinByCode(page: Page, code: string) {
   const rail = page.getByRole("navigation", { name: "Серверы и группы" });
-  await rail.getByRole("button", { name: "Чаты" }).click({ force: true });
-  const dm = page
-    .locator(".room-item button, .sidebar__list button, button")
-    .filter({ hasText: /Artem|Приглашение/i })
-    .first();
-  await expect(dm).toBeVisible({ timeout: 12_000 });
-  await dm.click();
-  const accept = page.getByRole("button", { name: "Принять" });
-  await expect(accept).toBeVisible({ timeout: 12_000 });
-  await accept.click();
-  await expect(
-    page.getByRole("textbox", { name: "Написать сообщение…" }),
-  ).toBeVisible({ timeout: 15_000 });
+  await rail.getByRole("button", { name: "Люди", exact: true }).click({ force: true });
+  await page.getByRole("textbox", { name: "Код для вступления", exact: true }).fill(code);
+  await page.getByRole("button", { name: "Вступить", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "Написать сообщение…" })).toBeVisible({ timeout: 15000 });
 }
 
 test.describe("Pulse stage 3 stress", () => {
@@ -98,7 +82,7 @@ test.describe("Pulse stage 3 stress", () => {
     const contextA = await browser.newContext();
     const contextB = await browser.newContext();
     const contextC = await browser.newContext();
-    await contextA.grantPermissions(["microphone", "camera"]);
+    await contextA.grantPermissions(["microphone", "camera", "clipboard-read", "clipboard-write"]);
     await contextB.grantPermissions(["microphone", "camera"]);
     await contextC.grantPermissions(["microphone", "camera"]);
 
@@ -117,11 +101,12 @@ test.describe("Pulse stage 3 stress", () => {
 
     const groupTitle = `E2E ${Date.now().toString().slice(-6)}`;
     await createGroup(pageA, groupTitle);
-    await inviteUser(pageA, "alice", /Алиса/i);
-    await inviteUser(pageA, "bob", /Боб/i);
-
-    await acceptInvite(pageB);
-    await acceptInvite(pageC);
+    await pageA.bringToFront();
+    await pageA.getByRole("button", { name: "Скопировать код приглашения", exact: true }).click();
+    await expect(pageA.getByText("Код приглашения скопирован", { exact: true })).toBeVisible();
+    const code = await pageA.evaluate(() => navigator.clipboard.readText());
+    await joinByCode(pageB, code);
+    await joinByCode(pageC, code);
 
     await openGroup(pageA, groupTitle);
     await openGroup(pageB, groupTitle);

@@ -7,13 +7,14 @@ import {
   unlinkSync,
 } from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
   dmChatId,
   normalizeRoomId,
 } from "../lib/rooms";
 import type { ChatType, GroupVisibility } from "../lib/types";
 import { getDisplayNameById, getUserById, listUsers } from "./auth";
+import { weeklyGroupInviteCode, normalizeGroupInviteCode } from "./groupInviteCode";
 
 const PROTECTED_CHAT_IDS = new Set<string>();
 
@@ -191,6 +192,17 @@ export function openDm(userIdA: string, userIdB: string) {
   return { ok: true as const, chat };
 }
 
+export function hideDm(chatId: string, userId: string, forBoth: boolean) {
+  const chat = chats.get(chatId);
+  if (!chat || chat.type !== "dm" || !canAccessChat(chat, userId)) {
+    return { ok: false as const, error: "Личный чат не найден" };
+  }
+  const affectedIds = forBoth ? [...chat.memberIds] : [userId];
+  chat.visibleTo = (chat.visibleTo || chat.memberIds).filter(id => !affectedIds.includes(id));
+  saveChats();
+  return { ok: true as const, chat, affectedIds };
+}
+
 export function createGroup(
   ownerId: string,
   titleRaw: string,
@@ -243,6 +255,9 @@ export function searchPublicGroups(viewerId: string, queryRaw: string) {
     createdAt: number;
   }> = [];
 
+  // The People section lists public groups before a search is entered.
+  if ((query.length > 0 && query.length < 2) || query.length > 100) return hits;
+
   for (const chat of chats.values()) {
     if (chat.type !== "group" || groupVisibility(chat) !== "public") continue;
     if (
@@ -279,6 +294,27 @@ export function joinPublicGroup(userId: string, groupId: string) {
     return { ok: false as const, error: "Группа не найдена" };
   }
   return addGroupMember(groupId, userId);
+}
+
+export function getGroupInviteCode(groupId: string, userId: string, now = Date.now()) {
+  const chat = chats.get(groupId);
+  if (!chat || chat.type !== "group" || !chat.memberIds.includes(userId)) {
+    return { ok: false as const, error: "Нет доступа к приглашению" };
+  }
+  return { ok: true as const, invite: weeklyGroupInviteCode(chat.id, now) };
+}
+
+export function joinGroupByCode(userId: string, rawCode: string, now = Date.now()) {
+  const code = normalizeGroupInviteCode(rawCode);
+  const invalid = { ok: false as const, error: "Код недействителен или устарел. Попросите новый код у участника группы." };
+  if (!/^[A-HJ-NP-Z2-9]{12}$/.test(code)) return invalid;
+  for (const chat of chats.values()) {
+    if (chat.type !== "group") continue;
+    if (timingSafeEqual(Buffer.from(normalizeGroupInviteCode(weeklyGroupInviteCode(chat.id, now).code)), Buffer.from(code))) {
+      return addGroupMember(chat.id, userId);
+    }
+  }
+  return invalid;
 }
 
 export function updateGroupVisibility(
@@ -568,15 +604,13 @@ export function leaveGroup(chatId: string, userId: string) {
   if (!chat.memberIds.includes(userId)) {
     return { ok: false as const, error: "Вы не участник этой группы" };
   }
-  if (chat.createdBy === userId) {
-    return {
-      ok: false as const,
-      error: "Создатель не может выйти — удалите группу",
-    };
-  }
-
   chat.memberIds = chat.memberIds.filter((id) => id !== userId);
-  chats.set(chatId, chat);
+  if (chat.memberIds.length === 0) {
+    chats.delete(chatId);
+  } else {
+    if (chat.createdBy === userId) chat.createdBy = chat.memberIds[0];
+    chats.set(chatId, chat);
+  }
   saveChats();
   return { ok: true as const, chat };
 }

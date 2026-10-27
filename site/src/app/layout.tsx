@@ -3,6 +3,9 @@ import { Manrope, Space_Grotesk } from "next/font/google";
 import { BootPoller } from "@/components/chat/BootPoller";
 import "./globals.css";
 
+// Nonces are generated per request by the custom HTTP server.
+export const dynamic = "force-dynamic";
+
 const display = Space_Grotesk({
   variable: "--font-space",
   subsets: ["latin"],

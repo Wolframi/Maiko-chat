@@ -2,12 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
+import { applyChatUpdate, prependHistory } from "@/lib/chatUpdates";
 import type {
   AuthAccount,
   ChatInfo,
   ChatMessage,
   FileAttachment,
   GroupVisibility,
+  GroupInviteCodeResult,
   PeopleUser,
   PublicGroupHit,
   StickerPack,
@@ -43,7 +45,9 @@ import { isChatMuted } from "@/lib/mute";
 import { compressImageFile } from "@/lib/compressImage";
 import { readMediaSize } from "@/lib/mediaSize";
 import { watchAppBoot } from "@/lib/liveReload";
+import { forgetLastRoom } from "@/lib/mediaResume";
 import { parseGiphyMediaUrl } from "@/lib/giphyMedia";
+import { refreshAccountRingtone, syncRingtoneAccount } from "@/lib/ringtone";
 import {
   getAudioPlaybackState,
   stopAudioPlayback,
@@ -90,11 +94,12 @@ export function useChat() {
   const socketRef = useRef<Socket | null>(null);
   const [socket, setSocket] = useState<Socket | null>(null);
   const [connected, setConnected] = useState(false);
+  const [registrationRequired, setRegistrationRequired] = useState(true);
   const [account, setAccount] = useState<AuthAccount | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [online, setOnline] = useState<string[]>([]);
-  
+
   const [chats, setChats] = useState<ChatInfo[]>([]);
   const [people, setPeople] = useState<PeopleUser[]>([]);
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
@@ -112,12 +117,23 @@ export function useChat() {
   const [authReady, setAuthReady] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyVersion, setHistoryVersion] = useState(0);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [hasNewerHistory, setHasNewerHistory] = useState(false);
+  const historyTailRef = useRef({ after: null as string | null, hasNewer: false });
+  const returnToLatestRef = useRef<() => Promise<boolean>>(async () => false);
+  const [loadingOlderHistory, setLoadingOlderHistory] = useState(false);
+  const [historyPageError, setHistoryPageError] = useState<string | null>(null);
+  const historyPageRef = useRef<{ before: string | null; hasMore: boolean }>({ before: null, hasMore: false });
+  const historyGenerationRef = useRef(0);
+  const historyRequestRef = useRef<Promise<boolean> | null>(null);
   const typingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
     new Map(),
   );
   const accountRef = useRef<AuthAccount | null>(null);
   const sessionRef = useRef<Session | null>(null);
   const messagesRef = useRef<ChatMessage[]>([]);
+  const chatsRef = useRef<ChatInfo[]>([]);
   const uploadJobsRef = useRef(new Map<string, UploadJob>());
   const uploadQueueRef = useRef<Promise<void>>(Promise.resolve());
   const expectedRoomRef = useRef<string | null>(null);
@@ -132,6 +148,8 @@ export function useChat() {
   const previousRoomRef = useRef<{
     session: Session;
     messages: ChatMessage[];
+    page: { before: string | null; hasMore: boolean };
+    tail: { after: string | null; hasNewer: boolean };
   } | null>(null);
 
   useEffect(() => {
@@ -145,6 +163,10 @@ export function useChat() {
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useEffect(() => {
+    chatsRef.current = chats;
+  }, [chats]);
 
   const failPendingMessage = useCallback((clientId: string) => {
     const timer = pendingAckTimersRef.current.get(clientId);
@@ -206,6 +228,8 @@ export function useChat() {
   );
 
   const persistAccount = useCallback((next: AuthAccount | null) => {
+    accountRef.current = next;
+    syncRingtoneAccount(next);
     setAccount(next);
     try {
       if (next) localStorage.setItem(TOKEN_KEY, next.token);
@@ -244,6 +268,7 @@ export function useChat() {
   useEffect(() => {
     const socket = io({
       path: "/api/socket",
+      auth: { historyPages: 1, chatPatches: 1 },
       autoConnect: true,
       // Polling first is more reliable behind Cloudflare quick tunnels;
       // socket.io then upgrades to websocket when the proxy allows it.
@@ -260,6 +285,9 @@ export function useChat() {
       timeout: 20_000,
     });
     socketRef.current = socket;
+    socket.on("registration:policy", (policy: { required?: unknown }) => {
+      if (typeof policy?.required === "boolean") setRegistrationRequired(policy.required);
+    });
     setSocket(socket);
 
     const restoreSessionAfterConnect = () => {
@@ -317,6 +345,7 @@ export function useChat() {
     };
 
     socket.on("connect", restoreSessionAfterConnect);
+    socket.on("ringtone:changed", () => { void refreshAccountRingtone(); });
 
     const stopBootWatch = watchAppBoot(socket);
 
@@ -357,6 +386,10 @@ export function useChat() {
     window.addEventListener("focus", onVisibility);
 
     socket.on("chats", (list: ChatInfo[]) => setChats(list));
+    socket.on("chat:update", (update: { chatId: string; chat: ChatInfo | null }) => {
+      if (!update?.chatId) return;
+      setChats(previous => applyChatUpdate(previous, update.chatId, update.chat));
+    });
     socket.on("people", (list: PeopleUser[]) => setPeople(list));
     socket.on(
       "voice:state",
@@ -452,16 +485,27 @@ export function useChat() {
     socket.on("chat:left", (payload: { chatId?: string }) => {
       const chatId = String(payload?.chatId || "");
       if (!chatId) return;
+      forgetLastRoom(chatId);
       historyCacheRef.current.delete(chatId);
+      peerReadCacheRef.current.delete(chatId);
+      if (previousRoomRef.current?.session.room === chatId) previousRoomRef.current = null;
       setChats((prev) => prev.filter((chat) => chat.id !== chatId));
 
       const currentRoom = expectedRoomRef.current || sessionRef.current?.room;
       if (currentRoom === chatId) {
         switchSeqRef.current += 1;
         expectedRoomRef.current = null;
+        sessionRef.current = null;
+        setHistoryLoading(false);
         setSession(null);
         setMessages([]);
         setTypingUsers([]);
+      }
+    });
+
+    socket.on("profile:updated", (updated: AuthAccount) => {
+      if (updated.userId === accountRef.current?.userId && updated.token === accountRef.current?.token) {
+        persistAccount(updated);
       }
     });
 
@@ -487,7 +531,7 @@ export function useChat() {
 
     socket.on(
       "history",
-      (payload: ChatMessage[] | { chatId?: string; messages?: ChatMessage[]; peerReadAt?: number | null }) => {
+      (payload: ChatMessage[] | { chatId?: string; messages?: ChatMessage[]; peerReadAt?: number | null; before?: string | null; hasMore?: boolean }) => {
         const chatId = Array.isArray(payload) ? null : String(payload?.chatId || "");
         const history = Array.isArray(payload)
           ? payload
@@ -509,6 +553,15 @@ export function useChat() {
           }
         }
 
+        historyGenerationRef.current++;
+        historyRequestRef.current = null;
+        historyTailRef.current = { after: null, hasNewer: false };
+        setHasNewerHistory(false);
+        historyPageRef.current = { before: Array.isArray(payload) ? null : payload.before ?? null, hasMore: !Array.isArray(payload) && Boolean(payload.hasMore) };
+        setHasMoreHistory(historyPageRef.current.hasMore);
+        setLoadingOlderHistory(false);
+        setHistoryPageError(null);
+
         pendingAckTimersRef.current.forEach((timer) => window.clearTimeout(timer));
         pendingAckTimersRef.current.clear();
         if (historyWatchdogRef.current) {
@@ -520,6 +573,7 @@ export function useChat() {
           if (key) historyCacheRef.current.set(key, history);
         }
         setMessages(history);
+        setHistoryVersion(version => version + 1);
         setHistoryLoading(false);
         setTypingUsers([]);
         setComposerError(null);
@@ -536,6 +590,13 @@ export function useChat() {
     socket.on("message", (message: ChatMessage) => {
       const currentRoom = expectedRoomRef.current || sessionRef.current?.room;
       const inView = Boolean(currentRoom && message.room === currentRoom);
+
+      // A live message must not bridge an unloaded gap in an older window.
+      if (inView && historyTailRef.current.hasNewer) {
+        if (message.authorId === accountRef.current?.userId) void returnToLatestRef.current();
+        else setMessages(current => current.map(item => item.id === message.id ? message : item));
+        return;
+      }
 
       if (inView) {
         const ackTimer = pendingAckTimersRef.current.get(message.id);
@@ -751,7 +812,7 @@ export function useChat() {
   }, [account?.token, authReady]);
 
   const register = useCallback(
-    (username: string, password: string) => {
+    (username: string, password: string, invitationCode: string) => {
       setAuthError(null);
       authEpochRef.current += 1;
       const epoch = authEpochRef.current;
@@ -762,7 +823,7 @@ export function useChat() {
       }
       socket.emit(
         "auth:register",
-        { username, password },
+        { username, password, invitationCode },
         (result: AuthAck) => {
           if (epoch !== authEpochRef.current) return;
           if (!result?.ok || !result.account) {
@@ -826,16 +887,28 @@ export function useChat() {
 
   const updateProfile = useCallback(
     (patch: {
+      username?: string;
       displayName: string;
       bio: string;
       avatarUrl?: string | null;
     }) =>
       new Promise<boolean>((resolve) => {
         setProfileError(null);
-        socketRef.current?.emit(
+        const socket = socketRef.current;
+        if (!socket?.connected) {
+          setProfileError("Нет соединения с сервером");
+          resolve(false);
+          return;
+        }
+        const timer = window.setTimeout(() => {
+          setProfileError("Сервер не ответил — попробуйте сохранить ещё раз");
+          resolve(false);
+        }, 10_000);
+        socket.emit(
           "profile:update",
           patch,
           (result: AuthAck) => {
+            window.clearTimeout(timer);
             if (!result?.ok || !result.account) {
               setProfileError(result?.error || "Не удалось сохранить профиль");
               resolve(false);
@@ -883,12 +956,24 @@ export function useChat() {
   );
 
   const beginRoomSwitch = useCallback((roomHint?: string) => {
+    const previousPage = historyPageRef.current;
+    const previousTail = historyTailRef.current;
     const seq = ++switchSeqRef.current;
+    historyGenerationRef.current++;
+    historyRequestRef.current = null;
+    historyTailRef.current = { after: null, hasNewer: false };
+    setHasNewerHistory(false);
+    historyPageRef.current = { before: null, hasMore: false };
+    setHasMoreHistory(false);
+    setLoadingOlderHistory(false);
+    setHistoryPageError(null);
     const current = sessionRef.current;
     if (current?.room) {
       previousRoomRef.current = {
         session: current,
         messages: messagesRef.current.filter((item) => item.room === current.room),
+        page: previousPage,
+        tail: previousTail,
       };
       if (messagesRef.current.length) {
         historyCacheRef.current.set(current.room, messagesRef.current);
@@ -942,6 +1027,68 @@ export function useChat() {
     return seq;
   }, []);
 
+  const loadHistory = useCallback((mode: "older" | "newer" | "latest" | "around", around?: string, signal?: AbortSignal): Promise<boolean> => {
+    if (signal?.aborted) return Promise.resolve(false);
+    const replace = mode === "around" || mode === "latest";
+    if (historyRequestRef.current && !replace) return historyRequestRef.current;
+    const socket = socketRef.current;
+    const chatId = expectedRoomRef.current || sessionRef.current?.room;
+    const page = historyPageRef.current;
+    if (mode === "older" && !page.hasMore || mode === "newer" && !historyTailRef.current.hasNewer) return Promise.resolve(true);
+    if (!socket?.connected || !chatId) return Promise.resolve(false);
+    if (replace) historyGenerationRef.current++;
+    const generation = historyGenerationRef.current;
+    const token = accountRef.current?.token;
+    setLoadingOlderHistory(true);
+    setHistoryPageError(null);
+    const payload = { chatId, ...(mode === "older" ? { before: page.before } : mode === "newer" ? { after: historyTailRef.current.after } : mode === "around" ? { around } : {}) };
+    const request = new Promise<boolean>(resolve => {
+      const abort = () => {
+        if (generation === historyGenerationRef.current) {
+          historyGenerationRef.current++;
+          historyRequestRef.current = null;
+          setLoadingOlderHistory(false);
+        }
+        resolve(false);
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      socket.timeout(15_000).emit("history:load", payload,
+        (error: Error | null, result: { ok?: boolean; chatId?: string; messages?: ChatMessage[]; before?: string | null; after?: string | null; hasMore?: boolean; hasNewer?: boolean; error?: string }) => {
+          signal?.removeEventListener("abort", abort);
+          if (generation !== historyGenerationRef.current || token !== accountRef.current?.token || (expectedRoomRef.current || sessionRef.current?.room) !== chatId) { resolve(false); return; }
+          historyRequestRef.current = null;
+          setLoadingOlderHistory(false);
+          if (error || !result?.ok || result.chatId !== chatId || !Array.isArray(result.messages)) {
+            setHistoryPageError(result?.error || "Не удалось загрузить сообщения"); resolve(false); return;
+          }
+          if (mode !== "newer") historyPageRef.current = { before: result.before ?? null, hasMore: Boolean(result.hasMore) };
+          if (mode !== "older") historyTailRef.current = { after: result.after ?? null, hasNewer: Boolean(result.hasNewer) };
+          setHasMoreHistory(historyPageRef.current.hasMore);
+          setHasNewerHistory(historyTailRef.current.hasNewer);
+          if (replace) setHistoryVersion(version => version + 1);
+          setMessages(current => {
+            const known = new Set(current.map(message => message.id));
+            const next = replace
+              ? [...result.messages!.map(message => current.find(item => item.id === message.id) ?? message), ...current.filter(message => message.status === "pending" || message.status === "failed")]
+              : mode === "older" ? prependHistory(result.messages!, current)
+                : [...current, ...result.messages!.filter(message => !known.has(message.id))];
+            historyCacheRef.current.set(chatId, next);
+            return next;
+          });
+          resolve(true);
+        });
+    });
+    historyRequestRef.current = request;
+    return request;
+  }, []);
+
+  const loadOlderMessages = useCallback(() => loadHistory("older"), [loadHistory]);
+  const loadNewerMessages = useCallback(() => loadHistory("newer"), [loadHistory]);
+  const loadLatestMessages = useCallback(() => loadHistory("latest"), [loadHistory]);
+  const loadMessageWindow = useCallback((id: string, signal?: AbortSignal) => messagesRef.current.some(message => message.id === id)
+    ? Promise.resolve(!signal?.aborted) : loadHistory("around", id, signal), [loadHistory]);
+  useEffect(() => { returnToLatestRef.current = loadLatestMessages; }, [loadLatestMessages]);
+
   const restorePreviousRoom = useCallback((error: string) => {
     const prev = previousRoomRef.current;
     setHistoryLoading(false);
@@ -953,10 +1100,15 @@ export function useChat() {
       return;
     }
     expectedRoomRef.current = prev.session.room;
+    historyPageRef.current = prev.page;
+    historyTailRef.current = prev.tail;
+    setHasMoreHistory(prev.page.hasMore);
+    setHasNewerHistory(prev.tail.hasNewer);
     setSession(prev.session);
     const cached =
       historyCacheRef.current.get(prev.session.room) || prev.messages;
     setMessages(cached);
+    setHistoryVersion(version => version + 1);
   }, []);
 
   const openChat = useCallback(
@@ -1067,17 +1219,17 @@ export function useChat() {
     [beginRoomSwitch, restorePreviousRoom],
   );
 
-  const joinPublicGroup = useCallback(
-    (groupId: string) => {
-      return new Promise<{ ok: boolean; error?: string }>((resolve) => {
+  const joinGroup = useCallback(
+    (payload: { groupId: string } | { code: string }) => {
+      return new Promise<{ ok: boolean; error?: string; groupId?: string }>((resolve) => {
         const socket = socketRef.current;
         if (!socket?.connected) {
           resolve({ ok: false, error: "Нет соединения" });
           return;
         }
-        const seq = beginRoomSwitch(groupId);
+        const seq = beginRoomSwitch("groupId" in payload ? payload.groupId : undefined);
         let settled = false;
-        const finish = (result: { ok: boolean; error?: string }) => {
+        const finish = (result: { ok: boolean; error?: string; groupId?: string }) => {
           if (settled) return;
           settled = true;
           window.clearTimeout(timer);
@@ -1088,9 +1240,10 @@ export function useChat() {
           finish({ ok: false, error: "Сервер не ответил" });
         }, 15_000);
         socket.emit(
-          "group:join",
-          { groupId },
+          "code" in payload ? "group:join-code" : "group:join",
+          payload,
           (result: SessionAck) => {
+            if (settled) return;
             if (seq !== switchSeqRef.current) {
               finish({ ok: false, error: "Отменено" });
               return;
@@ -1105,13 +1258,16 @@ export function useChat() {
             }
             expectedRoomRef.current = result.session.room;
             setSession(result.session);
-            finish({ ok: true });
+            finish({ ok: true, groupId: result.session.room });
           },
         );
       });
     },
     [beginRoomSwitch, restorePreviousRoom],
   );
+
+  const joinPublicGroup = useCallback((groupId: string) => joinGroup({ groupId }), [joinGroup]);
+  const joinGroupByCode = useCallback((code: string) => joinGroup({ code }), [joinGroup]);
 
   const updateGroupVisibility = useCallback(
     (groupId: string, visibility: GroupVisibility) =>
@@ -1152,31 +1308,14 @@ export function useChat() {
     [],
   );
 
-  const inviteToGroup = useCallback(
-    (groupId: string, userId: string) =>
-      new Promise<{ ok: boolean; error?: string }>((resolve) => {
-        const socket = socketRef.current;
-        if (!socket?.connected) {
-          resolve({ ok: false, error: "Нет соединения" });
-          return;
-        }
-        const timer = window.setTimeout(() => {
-          resolve({ ok: false, error: "Сервер не ответил" });
-        }, 12_000);
-        socket.emit(
-          "group:invite",
-          { groupId, userId },
-          (result: { ok?: boolean; error?: string }) => {
-            window.clearTimeout(timer);
-            resolve({
-              ok: Boolean(result?.ok),
-              error: result?.error,
-            });
-          },
-        );
-      }),
-    [],
-  );
+  const getGroupInviteCode = useCallback((groupId: string) =>
+    new Promise<GroupInviteCodeResult>((resolve) => {
+      const socket = socketRef.current;
+      if (!socket?.connected) { resolve({ ok: false, error: "Нет соединения" }); return; }
+      socket.timeout(10_000).emit("group:code", { groupId }, (error: Error | null, result: GroupInviteCodeResult) => {
+        resolve(error ? { ok: false, error: "Сервер не ответил" } : result || { ok: false, error: "Не удалось получить код" });
+      });
+    }), []);
 
   const respondGroupInvite = useCallback(
     (chatId: string, messageId: string, accept: boolean) =>
@@ -1733,6 +1872,14 @@ export function useChat() {
         ...batch.filter((file) => !isMedia(file)).map((file) => [file]),
       ];
 
+      // Reserve the final geometry on the very first optimistic render.
+      const pixelSizes = new Map(await runPool(media, 3, async (file) =>
+        [file, await readMediaSize(file)] as const,
+      ));
+      if (sessionRef.current?.room !== chatId || accountRef.current?.token !== account.token) {
+        return { ok: false, completed: [] };
+      }
+
       const now = Date.now();
       let captionUsed = false;
       const optimistic = groups.map((group, index): ChatMessage => {
@@ -1757,6 +1904,7 @@ export function useChat() {
           name: file.name,
           size: file.size,
           mime: file.type,
+          ...pixelSizes.get(file),
         }));
         uploadJobsRef.current.set(clientId, {
           chatId,
@@ -1892,11 +2040,11 @@ export function useChat() {
   const markAllRead = useCallback(() => {
     const socket = socketRef.current;
     if (!socket) return;
-    const unread = chats.filter((chat) => chat.unreadCount > 0);
+    const unread = chatsRef.current.filter((chat) => chat.unreadCount > 0);
     for (const chat of unread) {
       socket.emit("chats:read", { chatId: chat.id });
     }
-  }, [chats]);
+  }, []);
 
   const reactToMessage = useCallback(
     (chatId: string, messageId: string, emoji: string) => {
@@ -2078,6 +2226,7 @@ export function useChat() {
     const room =
       chatId || expectedRoomRef.current || sessionRef.current?.room || "";
     if (!room) return;
+    if (historyTailRef.current.hasNewer && room === sessionRef.current?.room) return;
     if (typeof document !== "undefined" && document.hidden) return;
     socketRef.current?.emit("chats:read", { chatId: room });
   }, []);
@@ -2141,6 +2290,27 @@ export function useChat() {
     });
   }, [people]);
 
+  const deleteDm = useCallback((chatId: string, scope: "self" | "both") => {
+    return new Promise<boolean>((resolve) => {
+      setSidebarError(null);
+      const socket = socketRef.current;
+      if (!socket?.connected) {
+        setSidebarError("Нет соединения с сервером");
+        resolve(false);
+        return;
+      }
+      socket.timeout(15_000).emit("dm:delete", { chatId, scope },
+        (error: Error | null, result: { ok?: boolean; error?: string }) => {
+          if (error || !result?.ok) {
+            setSidebarError(result?.error || "Не удалось удалить чат. Попробуйте ещё раз.");
+            resolve(false);
+            return;
+          }
+          resolve(true);
+        });
+    });
+  }, []);
+
   const deleteGroup = useCallback((chatId: string) => {
     return new Promise<boolean>((resolve) => {
       setSidebarError(null);
@@ -2173,11 +2343,17 @@ export function useChat() {
   const leaveGroup = useCallback((chatId: string) => {
     return new Promise<boolean>((resolve) => {
       setSidebarError(null);
-      socketRef.current?.emit(
+      const socket = socketRef.current;
+      if (!socket?.connected) {
+        setSidebarError("Нет соединения с сервером");
+        resolve(false);
+        return;
+      }
+      socket.timeout(15_000).emit(
         "group:leave",
         { chatId },
-        (result: { ok?: boolean; error?: string }) => {
-          if (!result?.ok) {
+        (error: Error | null, result: { ok?: boolean; error?: string }) => {
+          if (error || !result?.ok) {
             setSidebarError(result?.error || "Не удалось выйти из группы");
             resolve(false);
             return;
@@ -2210,26 +2386,7 @@ export function useChat() {
         "people:search",
         { query },
         (result: { ok?: boolean; users?: PeopleUser[] }) => {
-          resolve(result?.ok && Array.isArray(result.users) ? result.users : []);
-        },
-      );
-    });
-  }, []);
-
-  const suggestPeople = useCallback(() => {
-    return new Promise<PeopleUser[]>((resolve) => {
-      const socket = socketRef.current;
-      if (!socket?.connected) {
-        resolve([]);
-        return;
-      }
-      const timer = window.setTimeout(() => resolve([]), 8_000);
-      socket.emit(
-        "people:suggest",
-        {},
-        (result: { ok?: boolean; users?: PeopleUser[] }) => {
-          window.clearTimeout(timer);
-          resolve(result?.ok && Array.isArray(result.users) ? result.users : []);
+          resolve(result?.ok && Array.isArray(result.users) ? result.users.map(user => ({ ...user, bio: "", online: false })) : []);
         },
       );
     });
@@ -2498,6 +2655,15 @@ const removeStickerFromPack = useCallback((packId: string, stickerId: string) =>
     session,
     messages,
     historyLoading,
+    historyVersion,
+    hasMoreHistory,
+    hasNewerHistory,
+    loadingOlderHistory,
+    historyPageError,
+    loadOlderMessages,
+    loadNewerMessages,
+    loadLatestMessages,
+    loadMessageWindow,
     online,
     chats,
     people,
@@ -2509,6 +2675,7 @@ const removeStickerFromPack = useCallback((packId: string, stickerId: string) =>
     sidebarError,
     composerError,
     profileError,
+    registrationRequired,
     register,
     login,
     logout,
@@ -2518,7 +2685,8 @@ const removeStickerFromPack = useCallback((packId: string, stickerId: string) =>
     openDm,
     createGroup,
     joinPublicGroup,
-    inviteToGroup,
+    getGroupInviteCode,
+    joinGroupByCode,
     respondGroupInvite,
     createVoiceChannel,
     deleteVoiceChannel,
@@ -2538,10 +2706,10 @@ const removeStickerFromPack = useCallback((packId: string, stickerId: string) =>
     forwardMessage,
     markChatVisibleRead,
     refreshChatMembers,
+    deleteDm,
     deleteGroup,
     leaveGroup,
     searchPeople,
-    suggestPeople,
     searchPublicGroups,
     sendFile,
     sendFiles,

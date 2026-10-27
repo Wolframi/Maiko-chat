@@ -80,6 +80,33 @@
   scroll-behavior: auto;
 }
 
+.room__messages.room__messages--virtual {
+  display: block;
+  padding: 0;
+}
+
+.message-virtual-segment {
+  padding: 0 14px 8px;
+  display: flow-root;
+}
+
+.message-history-more {
+  padding: 12px 14px;
+  text-align: center;
+}
+
+.message-history-more button {
+  border: 0;
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+  font: inherit;
+}
+
+.message-history-footer {
+  padding: 4px 14px 12px;
+}
+
 /* Pushes short threads to the bottom without breaking overflow scroll. */
 .room__messages-anchor {
   margin-top: auto;

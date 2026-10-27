@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 type ConfirmDialogProps = {
@@ -10,6 +10,8 @@ type ConfirmDialogProps = {
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;
+  busy?: boolean;
+  children?: ReactNode;
   onConfirm: () => void;
   onCancel: () => void;
 };
@@ -21,13 +23,15 @@ export function ConfirmDialog({
   confirmLabel = "Удалить",
   cancelLabel = "Отмена",
   danger = true,
+  busy = false,
+  children,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
   const cardRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const onCancelRef = useRef(onCancel);
-  useEffect(() => { onCancelRef.current = onCancel; }, [onCancel]);
+  useEffect(() => { onCancelRef.current = busy ? () => undefined : onCancel; }, [onCancel, busy]);
   useEffect(() => {
     if (!open) return;
     const previous = document.activeElement;
@@ -44,7 +48,7 @@ export function ConfirmDialog({
         onCancelRef.current();
       }
       if (event.key === "Tab") {
-        const buttons = cardRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)");
+        const buttons = cardRef.current?.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled)");
         if (!buttons?.length) return;
         const first = buttons[0];
         const last = buttons[buttons.length - 1];
@@ -74,7 +78,7 @@ export function ConfirmDialog({
         type="button"
         className="confirm-dialog__backdrop"
         aria-label="Закрыть"
-        onClick={onCancel}
+        onClick={() => { if (!busy) onCancel(); }}
       />
       <div
         ref={cardRef}
@@ -87,11 +91,13 @@ export function ConfirmDialog({
           {title}
         </h3>
         {body ? <p className="confirm-dialog__body">{body}</p> : null}
+        {children}
         <div className="confirm-dialog__actions">
           <button
             type="button"
             className="confirm-dialog__cancel"
             ref={cancelRef}
+            disabled={busy}
             onClick={onCancel}
           >
             {cancelLabel}
@@ -99,9 +105,10 @@ export function ConfirmDialog({
           <button
             type="button"
             className={`confirm-dialog__confirm ${danger ? "is-danger" : ""}`}
+            disabled={busy}
             onClick={onConfirm}
           >
-            {confirmLabel}
+            {busy ? "Подождите…" : confirmLabel}
           </button>
         </div>
       </div>

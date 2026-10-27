@@ -147,7 +147,7 @@ async function main() {
     for (const [width, height] of [[1000, 700], [900, 650], [1100, 800], [1000, 700]]) {
       await app.evaluate(({ BrowserWindow }, [width, height]) => BrowserWindow.getAllWindows()[0].setBounds({ x: 100, y: 100, width, height }), [width, height]);
       await shell.waitForFunction(([width, height]) => innerWidth === width && innerHeight === height, [width, height]);
-      await site.waitForFunction(([width, height]) => innerWidth === width - 20 && innerHeight === height - 52, [width, height]);
+      await site.waitForFunction(([width, height]) => innerWidth === width && innerHeight === height - 42, [width, height]);
       await shell.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     }
     assert.equal(await shell.evaluate(() => window.resizeStateUpdates), 0, 'Resizing does not rewrite the titlebar or publish unchanged state');
@@ -166,7 +166,7 @@ async function main() {
         win.setAlwaysOnTop(true); win.setBounds({ x: 100, y: 100, width: 1000, height: 700 }); win.show(); win.moveTop();
         return { handle: win.getNativeWindowHandle().readBigUInt64LE().toString(), pid: String(process.pid) };
       });
-      await site.waitForFunction(() => innerWidth === 980 && innerHeight === 648);
+      await site.waitForFunction(() => innerWidth === 1000 && innerHeight === 658);
       await site.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       // The native show transition blends with the backdrop before resizing
       // starts. Sample live resize after that separate animation has finished.
@@ -220,13 +220,20 @@ async function main() {
     for (const [x, y] of [[0, 0], [info.width - 1, 0], [0, info.height - 1], [info.width - 1, info.height - 1]]) {
       assert.equal(data[(y * info.width + x) * 4 + 3], 255, 'Every outer corner is square and opaque');
     }
-    // Side gutters must be dark on BOTH sides, including during resizing.
-    for (const x of [2, info.width - 3]) {
-      const offset = (100 * info.width + x) * 4;
-      assert.ok(data[offset] < 30 && data[offset + 1] < 30 && data[offset + 2] < 30, 'No white side strip');
+    const geometry = await app.evaluate(({ BrowserWindow }) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      const view = win.contentView.children.find(view => view.webContents?.getURL().startsWith('http:'));
+      return { bounds: view.getBounds(), size: win.getContentSize() };
+    });
+    assert.deepEqual(geometry.bounds, { x: 0, y: 42, width: geometry.size[0], height: geometry.size[1] - 42 }, 'No side or bottom gutter exposes the shell');
+    const sitePng = await site.screenshot({ path: path.join(output, 'site-no-gutters.png') });
+    const pixels = await sharp(sitePng).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    for (const [x, y] of [[0, 100], [pixels.info.width - 1, 100], [pixels.info.width / 2 | 0, pixels.info.height - 1]]) {
+      const offset = (y * pixels.info.width + x) * pixels.info.channels;
+      assert.deepEqual([...pixels.data.subarray(offset, offset + 3)], [41, 61, 81], 'Fixture fills both side edges and the bottom');
     }
     await app.close(); app = undefined;
-    console.log('Window/assets regression passed: all 8 native resize boundaries, anchored opposite edges, square opaque corners, dark symmetric gutters, local video/model/WASM/worker, remote POST cookies/body and uploads.');
+    console.log('Window/assets regression passed: all 8 native resize boundaries, anchored opposite edges, square opaque corners, no side/bottom gutters, local video/model/WASM/worker, remote POST cookies/body and uploads.');
   } finally {
     if (app) await app.close();
     await new Promise((resolve) => server.close(resolve));

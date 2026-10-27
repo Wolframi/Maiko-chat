@@ -1,6 +1,26 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
-import {MaikoParticleMotion,MaikoHover,MAIKO_PARTICLE_LIMIT,MAIKO_PARTICLE_CORE_LIMIT,maikoCursorRepulsion,MAIKO_CURSOR_STRENGTH,MAIKO_CURSOR_PULSE,MAIKO_CURSOR_SWIRL} from "../src/lib/maikoParticleMotion";
+import {MaikoParticleMotion,MaikoHover,prepareMaikoParticleGraph,MAIKO_PARTICLE_LIMIT,MAIKO_PARTICLE_CORE_LIMIT,maikoCursorRepulsion,MAIKO_CURSOR_STRENGTH,MAIKO_CURSOR_PULSE,MAIKO_CURSOR_SWIRL} from "../src/lib/maikoParticleMotion";
+import {readFileSync} from "node:fs";
+import {decodeMaikoDance} from "../src/lib/maikoDance";
+
+test("model preparation yields to the UI, preserves neighbours and can be cancelled", async()=>{
+  const bytes=readFileSync(new URL("../public/models/maiko-hiphop.bin",import.meta.url));
+  const dance=decodeMaikoDance(bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength),14000);
+  let ticks=0;
+  const heartbeat=setInterval(()=>{ticks++;},0);
+  try {
+    const graph=await prepareMaikoParticleGraph(dance.data,dance.count);
+    assert.ok(ticks>0,"The browser must get time to paint during preparation");
+    const particles=new MaikoParticleMotion(dance.data,dance.count,0);
+    assert.deepEqual(graph.neighbours,particles.neighbours);
+    assert.equal(graph.contact,particles.contact);
+    const controller=new AbortController();
+    const pending=prepareMaikoParticleGraph(dance.data,dance.count,controller.signal);
+    controller.abort();
+    await assert.rejects(pending,{name:"AbortError"});
+  } finally {clearInterval(heartbeat);}
+});
 
 test("nearby particles repel and their surface springs keep the silhouette bounded",()=>{
   const data=new Float32Array(32);data[0]=-0.0005;data[16]=0.0005;data[15]=0.94;data[31]=0.96;

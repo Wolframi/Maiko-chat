@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
-  existsSync,
   mkdirSync,
   readFileSync,
   unlinkSync,
@@ -11,8 +10,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { parse as parseUrl } from "node:url";
-import { rateLimit } from "./rateLimit";
-import { headObject, putObjectBuffer, readObjectBuffer, s3Enabled } from "./objectStorage";
+import { rateLimit, rateLimitRetrySeconds } from "./rateLimit";
+import { handleRingtonePreference } from "./ringtonePreferences";
+import { restoreSession } from "./auth";
+import { RingtoneClipCache, RingtoneFileCache } from "./ringtoneClipCache";
+import { clientAddress } from "./requestSecurity";
+import { downloadYoutubeRingtone, normalizeRingtoneQuery, searchYoutubeRingtones, youtubeVideoId } from "./youtubeRingtones";
+import { readObjectBuffer, s3Enabled } from "./objectStorage";
+import { RINGTONE_ANALYSIS_RATE, ringtoneAudioPath } from "../lib/ringtoneConfig";
 import {
   fadeFilter,
   findDynamicStartSecAsync,
@@ -22,24 +27,25 @@ import {
 
 export { findDynamicStartSec } from "./ringtoneHook";
 
-const ORIGIN = "https://zvukogram.com";
-const CATEGORY_PATH = "/category/y2k-2000/";
-const CATEGORY_ID = "3105";
-const CATEGORY_TAG = "y2k-2000";
-const PAGE_LIMIT = 50;
 const CACHE_TTL_MS = 20 * 60 * 1000;
 const MAX_PAGE = 20;
 const PROXY_MAX_BYTES = 12 * 1024 * 1024;
-/** Disk mirror for hosts that cannot reach zvukogram (outbound TLS blocked). */
+/** Persist catalog pages and prepared ringtone clips between restarts. */
 const MIRROR_DIR = path.join(process.cwd(), "data", "ringtones");
 const PAGES_DIR = path.join(MIRROR_DIR, "pages");
 const AUDIO_DIR = path.join(MIRROR_DIR, "audio");
 const PEAKS_DIR = path.join(MIRROR_DIR, "peaks");
+const diskClips = new RingtoneClipCache(AUDIO_DIR);
+const diskSources = new RingtoneFileCache(AUDIO_DIR, { pattern: /^[a-f0-9]{40}\.mp3$/, maxBytes: 128 * 1024 * 1024, maxFileBytes: PROXY_MAX_BYTES });
+const diskPages = new RingtoneFileCache(PAGES_DIR, { pattern: /^youtube-[a-f0-9]{40}-\d+\.json$/, maxBytes: 4 * 1024 * 1024, maxFileBytes: 128 * 1024, ttlMs: CACHE_TTL_MS });
+const diskPeaks = new RingtoneFileCache(PEAKS_DIR, { pattern: /^[a-f0-9]{40}\.json$/, maxBytes: 1024 * 1024, maxFileBytes: 1024 });
+let activeSearches = 0;
+let activeSources = 0;
 
 export type RingtoneItem = {
   id: string;
   title: string;
-  /** Absolute mp3 URL on zvukogram. */
+  /** Stable YouTube watch URL (legacy saved items may reference mp3 files). */
   audioUrl: string;
   /** Same-origin proxy path for <audio> / fetch. */
   url: string;
@@ -48,7 +54,7 @@ export type RingtoneItem = {
 };
 
 function proxyPath(remoteUrl: string) {
-  return `/api/ringtones/audio?u=${encodeURIComponent(remoteUrl)}`;
+  return ringtoneAudioPath(remoteUrl);
 }
 
 type PageCache = {
@@ -57,12 +63,49 @@ type PageCache = {
   pages: number;
 };
 
-const pageCache = new Map<number, PageCache>();
+const pageCache = new Map<string, PageCache>();
 const audioJobs = new Map<
   string,
   Promise<{ buffer: Buffer; contentType: string; startSec: number }>
 >();
 const clipJobs = new Map<string, Promise<Buffer | null>>();
+const sourceJobs = new Map<string, Promise<Buffer>>();
+const preparedMemory = new Map<string, { buffer: Buffer; expires: number }>();
+const PREPARED_MEMORY_BYTES = 16 * 1024 * 1024;
+let preparedBytes = 0;
+let audioWorkers = 0;
+const audioQueue: Array<() => void> = [];
+
+function rememberPrepared(key: string, buffer: Buffer) {
+  const previous = preparedMemory.get(key);
+  if (previous) { preparedBytes -= previous.buffer.length; preparedMemory.delete(key); }
+  if (buffer.length > PREPARED_MEMORY_BYTES) return;
+  while (preparedBytes + buffer.length > PREPARED_MEMORY_BYTES && preparedMemory.size) {
+    const oldest = preparedMemory.keys().next().value!;
+    preparedBytes -= preparedMemory.get(oldest)!.buffer.length;
+    preparedMemory.delete(oldest);
+  }
+  preparedMemory.set(key, { buffer, expires: Date.now() + CACHE_TTL_MS });
+  preparedBytes += buffer.length;
+}
+
+async function withAudioSlot<T>(work: () => Promise<T>): Promise<T> {
+  if (audioWorkers >= 2 && audioQueue.length >= 4) throw new RingtoneBusyError();
+  await new Promise<void>((resolve) => {
+    if (audioWorkers < 2) { audioWorkers++; resolve(); }
+    else audioQueue.push(resolve);
+  });
+  try { return await work(); }
+  finally {
+    const next = audioQueue.shift();
+    if (next) next();
+    else audioWorkers--;
+  }
+}
+
+class RingtoneBusyError extends Error {
+  constructor() { super("Сервис рингтонов занят. Попробуйте через минуту"); }
+}
 
 function tmpAudioPath(prefix: string) {
   return path.join(
@@ -81,13 +124,13 @@ function ensureMirrorDirs() {
   mkdirSync(PEAKS_DIR, { recursive: true });
 }
 
-function readPageMirror(
-  page: number,
-): { items: RingtoneItem[]; pages: number } | null {
-  const file = path.join(PAGES_DIR, `${page}.json`);
-  if (!existsSync(file)) return null;
+async function readPageMirror(
+  page: string,
+): Promise<{ items: RingtoneItem[]; pages: number } | null> {
   try {
-    const raw = JSON.parse(readFileSync(file, "utf8")) as {
+    const buffer = await diskPages.read(`${page}.json`);
+    if (!buffer) return null;
+    const raw = JSON.parse(buffer.toString("utf8")) as {
       items?: RingtoneItem[];
       pages?: number;
     };
@@ -96,7 +139,7 @@ function readPageMirror(
       ...item,
       // Audio proxy serves a clip already starting at the drop.
       startSec: 0,
-      url: item.url || proxyPath(item.audioUrl),
+      url: proxyPath(item.audioUrl),
     }));
     return { items, pages: Math.max(1, Number(raw.pages) || 1) };
   } catch {
@@ -104,51 +147,40 @@ function readPageMirror(
   }
 }
 
-function writePageMirror(page: number, items: RingtoneItem[], pages: number) {
+async function writePageMirror(page: string, items: RingtoneItem[], pages: number) {
   try {
-    ensureMirrorDirs();
-    writeFileSync(
-      path.join(PAGES_DIR, `${page}.json`),
-      JSON.stringify({ items, pages }),
-      "utf8",
-    );
+    await diskPages.write(`${page}.json`, Buffer.from(JSON.stringify({ items, pages })));
   } catch (error) {
     console.error("[ringtones:mirror:page]", error);
   }
 }
 
 async function readLocalAudio(remoteUrl: string): Promise<Buffer | null> {
-  if (s3Enabled) return readObjectBuffer(`ringtones/audio/${audioKey(remoteUrl)}.mp3`);
-  const file = path.join(AUDIO_DIR, `${audioKey(remoteUrl)}.mp3`);
-  if (!existsSync(file)) return null;
-  try {
-    const buf = readFileSync(file);
-    return buf.byteLength > 0 ? buf : null;
-  } catch {
-    return null;
-  }
+  const name = `${audioKey(remoteUrl)}.mp3`;
+  const local = await diskSources.read(name);
+  if (local || !s3Enabled) return local;
+  // Read existing cloud mirrors for compatibility. New cache entries stay bounded locally.
+  const buffer = await readObjectBuffer(`ringtones/audio/${name}`);
+  if (!buffer || buffer.length > PROXY_MAX_BYTES) return null;
+  await diskSources.write(name, buffer);
+  return buffer;
 }
 
 async function writeLocalAudio(remoteUrl: string, buffer: Buffer) {
-  if (s3Enabled) {
-    await putObjectBuffer(`ringtones/audio/${audioKey(remoteUrl)}.mp3`, buffer, "audio/mpeg");
-    return;
-  }
   try {
-    ensureMirrorDirs();
-    writeFileSync(path.join(AUDIO_DIR, `${audioKey(remoteUrl)}.mp3`), buffer);
+    await diskSources.write(`${audioKey(remoteUrl)}.mp3`, buffer);
   } catch (error) {
     console.error("[ringtones:mirror:audio]", error);
   }
 }
 
-function readPeakStart(
+async function readPeakStart(
   remoteUrl: string,
-): { startSec: number; durationSec?: number } | null {
-  const file = path.join(PEAKS_DIR, `${audioKey(remoteUrl)}.json`);
-  if (!existsSync(file)) return null;
+): Promise<{ startSec: number; durationSec?: number } | null> {
   try {
-    const raw = JSON.parse(readFileSync(file, "utf8")) as {
+    const buffer = await diskPeaks.read(`${audioKey(remoteUrl)}.json`);
+    if (!buffer) return null;
+    const raw = JSON.parse(buffer.toString("utf8")) as {
       startSec?: number;
       durationSec?: number;
       v?: number;
@@ -169,18 +201,13 @@ function readPeakStart(
   }
 }
 
-function writePeakStart(
+async function writePeakStart(
   remoteUrl: string,
   startSec: number,
   durationSec: number,
 ) {
   try {
-    ensureMirrorDirs();
-    writeFileSync(
-      path.join(PEAKS_DIR, `${audioKey(remoteUrl)}.json`),
-      JSON.stringify({ v: HOOK_CACHE_VERSION, startSec, durationSec }),
-      "utf8",
-    );
+    await diskPeaks.write(`${audioKey(remoteUrl)}.json`, Buffer.from(JSON.stringify({ v: HOOK_CACHE_VERSION, startSec, durationSec })));
   } catch (error) {
     console.error("[ringtones:mirror:peak]", error);
   }
@@ -199,12 +226,12 @@ function runFfmpegPcm(inputPath: string): Promise<Buffer> {
         "-ac",
         "1",
         "-ar",
-        "22050",
+        String(RINGTONE_ANALYSIS_RATE),
         "-f",
         "s16le",
         "-",
       ],
-      { windowsHide: true },
+      { windowsHide: true, timeout: 30_000, killSignal: "SIGKILL" },
     );
     proc.stdout.on("data", (c: Buffer) => chunks.push(c));
     let err = "";
@@ -226,7 +253,7 @@ async function detectPeakStart(
   remoteUrl: string,
   buffer: Buffer,
 ): Promise<{ startSec: number; durationSec: number }> {
-  const cached = readPeakStart(remoteUrl);
+  const cached = await readPeakStart(remoteUrl);
   if (cached && cached.durationSec && cached.durationSec > 0) {
     return { startSec: cached.startSec, durationSec: cached.durationSec };
   }
@@ -234,10 +261,10 @@ async function detectPeakStart(
   try {
     writeFileSync(tmp, buffer);
     const pcm = await runFfmpegPcm(tmp);
-    const durationSec = pcm.byteLength / 2 / 22050;
+    const durationSec = pcm.byteLength / 2 / RINGTONE_ANALYSIS_RATE;
     const startSec =
-      cached?.startSec ?? (await findDynamicStartSecAsync(pcm));
-    writePeakStart(remoteUrl, startSec, durationSec);
+      cached?.startSec ?? (await findDynamicStartSecAsync(pcm, RINGTONE_ANALYSIS_RATE));
+    await writePeakStart(remoteUrl, startSec, durationSec);
     return { startSec, durationSec };
   } catch (error) {
     console.error("[ringtones:peak]", error);
@@ -290,7 +317,7 @@ function runFfmpegCut(
         "5",
         outputPath,
       ],
-      { windowsHide: true },
+      { windowsHide: true, timeout: 30_000, killSignal: "SIGKILL" },
     );
     let err = "";
     proc.stderr.on("data", (c: Buffer) => {
@@ -309,15 +336,27 @@ function runFfmpegCut(
 
 /** Cache a ringtone clip that already starts at the dynamic section. */
 async function readPreparedClip(remoteUrl: string): Promise<Buffer | null> {
-  if (s3Enabled) return readObjectBuffer(`ringtones/audio/${path.basename(fromPeakPath(remoteUrl))}`);
-  const out = fromPeakPath(remoteUrl);
-  if (!existsSync(out)) return null;
-  try {
-    const cached = readFileSync(out);
-    return cached.byteLength > 1000 ? cached : null;
-  } catch {
-    return null;
+  const memory = preparedMemory.get(remoteUrl);
+  if (memory) {
+    if (memory.expires > Date.now()) {
+      preparedMemory.delete(remoteUrl);
+      preparedMemory.set(remoteUrl, memory);
+      return memory.buffer;
+    }
+    preparedBytes -= memory.buffer.length;
+    preparedMemory.delete(remoteUrl);
   }
+  const name = path.basename(fromPeakPath(remoteUrl));
+  const local = await diskClips.read(name);
+  if (local) { rememberPrepared(remoteUrl, local); return local; }
+  if (!s3Enabled) return null;
+  const cached = await readObjectBuffer(`ringtones/audio/${name}`);
+  if (cached && cached.length > 1000 && cached.length <= 2 * 1024 * 1024) {
+    rememberPrepared(remoteUrl, cached);
+    await diskClips.write(name, cached).catch((error) => console.error("[ringtones:disk-cache]", error));
+    return cached;
+  }
+  return null;
 }
 
 async function buildPreparedClip(
@@ -325,28 +364,26 @@ async function buildPreparedClip(
   full: Buffer,
 ): Promise<Buffer | null> {
   ensureMirrorDirs();
-  const existing = await readPreparedClip(remoteUrl);
-  if (existing) return existing;
   const { startSec, durationSec } = await detectPeakStart(remoteUrl, full);
   const clipSec = Math.min(
     RINGTONE_CLIP_SEC,
     Math.max(0.5, durationSec - Math.max(0, startSec)),
   );
-  const out = fromPeakPath(remoteUrl);
+  const name = path.basename(fromPeakPath(remoteUrl));
+  const out = tmpAudioPath(`pulse-rt-clip-${audioKey(remoteUrl).slice(0, 10)}`);
   const tmpIn = tmpAudioPath(`pulse-rt-in-${audioKey(remoteUrl).slice(0, 10)}`);
   try {
     writeFileSync(tmpIn, full);
     await runFfmpegCut(tmpIn, out, startSec, clipSec);
     const clip = readFileSync(out);
-    if (s3Enabled) await putObjectBuffer(`ringtones/audio/${path.basename(out)}`, clip, "audio/mpeg");
+    await diskClips.write(name, clip).catch((error) => console.error("[ringtones:disk-cache]", error));
+    rememberPrepared(remoteUrl, clip);
     return clip;
   } catch (error) {
     console.error("[ringtones:cut]", error);
     return null;
   } finally {
-    if (s3Enabled) {
-      try { unlinkSync(out); } catch { /* already removed */ }
-    }
+    try { unlinkSync(out); } catch { /* already removed */ }
     try {
       unlinkSync(tmpIn);
     } catch {
@@ -367,10 +404,6 @@ function clipJob(remoteUrl: string, full: Buffer): Promise<Buffer | null> {
   return job;
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function materializeFromPeak(
   remoteUrl: string,
   full: Buffer,
@@ -378,66 +411,27 @@ async function materializeFromPeak(
   ensureMirrorDirs();
   const cached = await readPreparedClip(remoteUrl);
   if (cached) return { buffer: cached, startSec: 0 };
-  const prepared = await Promise.race([
-    clipJob(remoteUrl, full).catch((error) => {
-      console.error("[ringtones:clip]", error);
-      return null;
-    }),
-    sleep(4500).then(() => null),
-  ]);
-  if (prepared) return { buffer: prepared, startSec: 0 };
-  return { buffer: full, startSec: 0 };
+  const prepared = await clipJob(remoteUrl, full);
+  if (!prepared) throw new Error("Не удалось подготовить рингтон. Попробуйте ещё раз.");
+  return { buffer: prepared, startSec: 0 };
 }
 
-function clientIp(req: IncomingMessage) {
-  if (process.env.TRUST_PROXY === "1") {
-    const forwarded = String(req.headers["x-forwarded-for"] || "")
-      .split(",")[0]
-      .trim();
-    if (forwarded) return forwarded;
-  }
-  return req.socket.remoteAddress || "unknown";
-}
-
-function decodeHtml(text: string) {
-  return text
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function absoluteMediaUrl(src: string) {
-  if (src.startsWith("https://") || src.startsWith("http://")) return src;
-  if (src.startsWith("//")) return `https:${src}`;
-  if (!src.startsWith("/")) return `${ORIGIN}/${src}`;
-  return `${ORIGIN}${src}`;
-}
-
-/** Only allow mp3 under zvukogram.com/mp3/cats/ (SSRF allowlist). */
+/** Legacy mp3 URLs remain valid for previously saved ringtone preferences. */
 export function isAllowedRingtoneUrl(raw: string) {
+  if (youtubeVideoId(raw)) return true;
   try {
     const parsed = new URL(raw);
-    if (parsed.protocol !== "https:") return false;
-    const host = parsed.hostname.toLowerCase();
-    if (host !== "zvukogram.com" && host !== "www.zvukogram.com") return false;
-    if (parsed.username || parsed.password) return false;
-    if (parsed.port && parsed.port !== "443") return false;
-    const p = parsed.pathname.replace(/\\/g, "/");
-    if (p.includes("..") || /%2e/i.test(p)) return false;
-    if (!p.toLowerCase().startsWith("/mp3/cats/")) return false;
-    if (!p.toLowerCase().endsWith(".mp3")) return false;
-    return true;
-  } catch {
-    return false;
-  }
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password ||
+      (parsed.port && parsed.port !== "443")) return false;
+    if (!["zvukogram.com", "www.zvukogram.com"].includes(parsed.hostname)) return false;
+    return /^\/mp3\/cats\/[^?]*\.mp3$/i.test(parsed.pathname) &&
+      !parsed.pathname.includes("..") && !/%2e|%5c/i.test(parsed.pathname);
+  } catch { return false; }
 }
 
 function normalizeRemoteUrl(raw: string) {
+  const videoId = youtubeVideoId(raw);
+  if (videoId) return `https://www.youtube.com/watch?v=${videoId}`;
   if (!isAllowedRingtoneUrl(raw)) return null;
   const parsed = new URL(raw);
   parsed.hostname = "zvukogram.com";
@@ -446,209 +440,47 @@ function normalizeRemoteUrl(raw: string) {
   return parsed.toString();
 }
 
-function parseRingtoneHtml(html: string): RingtoneItem[] {
-  const items: RingtoneItem[] = [];
-  const seen = new Set<string>();
-  const openRe =
-    /<div class="onetrack accordion"[^>]*data-id="(\d+)"[^>]*data-duration="(\d+)"[^>]*data-track="([^"]+\.mp3)"[^>]*>/gi;
-  let match: RegExpExecArray | null;
-  while ((match = openRe.exec(html))) {
-    const id = match[1];
-    const remoteUrl = normalizeRemoteUrl(absoluteMediaUrl(match[3]));
-    if (!remoteUrl) continue;
-    const chunkEnd = match.index + match[0].length;
-    const chunk = html.slice(chunkEnd, chunkEnd + 1200);
-    const titleMatch =
-      /class="waveTitle"[^>]*data-full="([^"]*)"/i.exec(chunk) ||
-      /class="waveTitle"[^>]*>([\s\S]*?)<\//i.exec(chunk);
-    const title = decodeHtml(
-      (titleMatch?.[1] || "").replace(/<[^>]+>/g, ""),
-    ) || `Трек ${id}`;
-    if (seen.has(remoteUrl)) continue;
-    seen.add(remoteUrl);
-    items.push({
-      id: remoteUrl,
-      title,
-      audioUrl: remoteUrl,
-      url: proxyPath(remoteUrl),
-      // Playback uses a from-peak clip from /api/ringtones/audio — seek is 0.
-      startSec: 0,
-    });
-  }
-  return items;
+async function refreshFromRemote(page: number, query: string, key: string) {
+  if (activeSearches >= 4 || !rateLimit("ringtone-search-global", 120, 60_000)) throw new RingtoneBusyError();
+  activeSearches++;
+  try {
+    const data = await searchYoutubeRingtones(page, query);
+    rememberPage(key, data);
+    await writePageMirror(key, data.items, data.pages);
+    return data;
+  } finally { activeSearches--; }
 }
 
-async function fetchCategoryHtml() {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const res = await fetch(`${ORIGIN}${CATEGORY_PATH}?sort=popular`, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (compatible; PulseChat/1.0; +https://localhost)",
-          Accept: "text/html,application/xhtml+xml",
-        },
-        redirect: "follow",
-        signal: AbortSignal.timeout(20_000),
-      });
-      if (!res.ok) throw new Error(`Каталог недоступен (${res.status})`);
-      const finalHost = new URL(res.url).hostname.toLowerCase();
-      if (finalHost !== "zvukogram.com" && finalHost !== "www.zvukogram.com") {
-        throw new Error("Каталог недоступен");
-      }
-      return res.text();
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
-    }
-  }
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("Каталог недоступен");
+function rememberPage(key: string, data: { items: RingtoneItem[]; pages: number }) {
+  if (pageCache.size >= 100) pageCache.delete(pageCache.keys().next().value!);
+  pageCache.set(key, { expires: Date.now() + CACHE_TTL_MS, ...data });
 }
 
-async function fetchCategoryAjax(page: number) {
-  const params = new URLSearchParams({
-    category_id: CATEGORY_ID,
-    tag: CATEGORY_TAG,
-    sort: "popular",
-    page: String(page),
-    limit: String(PAGE_LIMIT),
-  });
-  const url = `${ORIGIN}/index.php?r=categoryV3/categoryTracksAjax&${params}`;
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (compatible; PulseChat/1.0; +https://localhost)",
-      Accept: "application/json",
-      "X-Requested-With": "XMLHttpRequest",
-      Referer: `${ORIGIN}${CATEGORY_PATH}?sort=popular`,
-    },
-    redirect: "follow",
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) throw new Error(`Каталог недоступен (${res.status})`);
-  const data = (await res.json()) as {
-    status?: number;
-    html?: string;
-    page?: number;
-    hasMore?: boolean;
-    total?: number;
-    error?: string;
-  };
-  if (!data?.status) {
-    throw new Error(data?.error || "Каталог недоступен");
-  }
-  const total = Number(data.total) || 0;
-  const pages =
-    total > 0
-      ? Math.min(MAX_PAGE, Math.max(1, Math.ceil(total / PAGE_LIMIT)))
-      : data.hasMore
-        ? Math.min(MAX_PAGE, page + 1)
-        : page;
-  return { html: String(data.html || ""), pages };
-}
-
-async function refreshFromRemote(safePage: number) {
-  let html: string;
-  let pages: number;
-  if (safePage <= 1) {
-    html = await fetchCategoryHtml();
-    // Probe total via ajax page 1 metadata when possible.
-    try {
-      const meta = await fetchCategoryAjax(1);
-      pages = meta.pages;
-      // Prefer first-page HTML from the category document (same tracks).
-    } catch {
-      pages = safePage;
-    }
-  } else {
-    const ajax = await fetchCategoryAjax(safePage);
-    html = ajax.html;
-    pages = ajax.pages;
-  }
-  const items = parseRingtoneHtml(html);
-  pages = Math.max(pages, safePage);
-  pageCache.set(safePage, {
-    expires: Date.now() + CACHE_TTL_MS,
-    items,
-    pages,
-  });
-  writePageMirror(safePage, items, pages);
-  return { items, pages };
-}
-
-function warmupCatalogAudio(items: RingtoneItem[]) {
-  items.slice(0, 10).forEach((item, index) => {
-    setTimeout(() => {
-      void proxyRingtoneAudio(item.audioUrl).catch(() => undefined);
-    }, 300 * index);
-  });
-}
-
-function uniqueCatalog(items: RingtoneItem[]): RingtoneItem[] {
-  const seen = new Set<string>();
-  const out: RingtoneItem[] = [];
-  for (const item of items) {
-    const id = item.id || item.audioUrl || item.url;
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    out.push({ ...item, id });
-  }
-  return out;
-}
-
-export async function listRingtones(page = 1) {
+export async function listRingtones(page = 1, query = "") {
   const safePage = Math.max(1, Math.min(MAX_PAGE, Math.floor(page) || 1));
-  const cached = pageCache.get(safePage);
+  const q = normalizeRingtoneQuery(query);
+  if (q.length < 2) return { items: [], page: 1, pages: 1, source: "YouTube" };
+  const key = `youtube-${audioKey(q)}-${safePage}`;
+  const cached = pageCache.get(key);
   if (cached && cached.expires > Date.now()) {
-    const items = uniqueCatalog(cached.items);
-    warmupCatalogAudio(items);
-    return {
-      items,
-      page: safePage,
-      pages: cached.pages,
-      source: "zvukogram.com",
-    };
+    return { items: cached.items, page: safePage, pages: cached.pages, source: "YouTube" };
   }
-
-  const mirrored = readPageMirror(safePage);
+  const mirrored = await readPageMirror(key);
   if (mirrored) {
-    pageCache.set(safePage, {
-      expires: Date.now() + CACHE_TTL_MS,
-      items: mirrored.items,
-      pages: mirrored.pages,
-    });
-    void refreshFromRemote(safePage).catch(() => {
-      /* keep mirror */
-    });
-    const items = uniqueCatalog(mirrored.items);
-    warmupCatalogAudio(items);
-    return {
-      items,
-      page: safePage,
-      pages: mirrored.pages,
-      source: "mirror",
-    };
+    rememberPage(key, mirrored);
+    return { ...mirrored, page: safePage, source: "YouTube" };
   }
-
-  const fresh = await refreshFromRemote(safePage);
-  const items = uniqueCatalog(fresh.items);
-  warmupCatalogAudio(items);
-  return {
-    items,
-    page: safePage,
-    pages: fresh.pages,
-    source: "zvukogram.com",
-  };
+  const fresh = await refreshFromRemote(safePage, q, key);
+  return { ...fresh, page: safePage, source: "YouTube" };
 }
 
 async function downloadRemoteAudio(target: string) {
+  if (!rateLimit("ringtone-download-global", 60, 60 * 60_000)) throw new RingtoneBusyError();
   const headers = {
     "User-Agent":
       "Mozilla/5.0 (compatible; PulseChat/1.0; +https://localhost)",
     Accept: "audio/mpeg,audio/*;q=0.9,*/*;q=0.5",
-    Referer: `${ORIGIN}${CATEGORY_PATH}`,
+    Referer: "https://zvukogram.com/",
   };
   const res = await fetch(target, {
     headers,
@@ -684,9 +516,40 @@ async function downloadRemoteAudio(target: string) {
   return { buffer, contentType: final.headers.get("content-type") || "audio/mpeg" };
 }
 
+async function youtubeSource(target: string, persist = true): Promise<Buffer> {
+  const existing = sourceJobs.get(target);
+  if (existing) return existing;
+  const job = (async () => {
+    const cached = await readLocalAudio(target);
+    if (cached) return cached;
+    if (!rateLimit("ringtone-download-global", 60, 60 * 60_000)) throw new RingtoneBusyError();
+    const buffer = await downloadYoutubeRingtone(target);
+    if (persist) await writeLocalAudio(target, buffer);
+    return buffer;
+  })().finally(() => sourceJobs.delete(target));
+  sourceJobs.set(target, job);
+  return job;
+}
+
+export async function ringtoneSource(remoteUrl: string) {
+  const id = youtubeVideoId(remoteUrl);
+  if (!id) throw new Error("Некорректная ссылка YouTube");
+  const buffer = await youtubeSource(`https://www.youtube.com/watch?v=${id}`);
+  const contentType = buffer.toString("ascii", 4, 8) === "ftyp" ? "audio/mp4"
+    : buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3])) ? "audio/webm"
+    : buffer.toString("ascii", 0, 4) === "OggS" ? "audio/ogg" : "audio/mpeg";
+  return { buffer, contentType };
+}
+
 async function proxyRingtoneAudioOnce(target: string) {
   const clip = await readPreparedClip(target);
   if (clip) return { buffer: clip, startSec: 0, contentType: "audio/mpeg" };
+  if (youtubeVideoId(target)) {
+    const full = await youtubeSource(target, false);
+    const prepared = await clipJob(target, full);
+    if (!prepared) throw new Error("Не удалось подготовить рингтон. Попробуйте ещё раз.");
+    return { buffer: prepared, startSec: 0, contentType: "audio/mpeg" };
+  }
   const local = await readLocalAudio(target);
   if (local) {
     const prepared = await materializeFromPeak(target, local);
@@ -701,6 +564,7 @@ async function proxyRingtoneAudioOnce(target: string) {
       const prepared = await materializeFromPeak(target, buffer);
       return { ...prepared, contentType };
     } catch (error) {
+      if (error instanceof RingtoneBusyError) throw error;
       lastError = error;
       const again = await readLocalAudio(target);
       if (again) {
@@ -720,7 +584,7 @@ export async function proxyRingtoneAudio(remoteUrl: string) {
   }
   const existing = audioJobs.get(target);
   if (existing) return existing;
-  const job = proxyRingtoneAudioOnce(target).finally(() => {
+  const job = withAudioSlot(() => proxyRingtoneAudioOnce(target)).finally(() => {
     if (audioJobs.get(target) === job) audioJobs.delete(target);
   });
   audioJobs.set(target, job);
@@ -736,49 +600,87 @@ function json(res: ServerResponse, status: number, body: unknown) {
 export async function handleRingtones(
   req: IncomingMessage,
   res: ServerResponse,
+  onPreferenceChanged: (userId: string) => void = () => {},
 ) {
+  if (await handleRingtonePreference(req, res, onPreferenceChanged, isAllowedRingtoneUrl)) return;
   const parsed = parseUrl(req.url || "", true);
   const pathname = parsed.pathname || "";
-  const ip = clientIp(req);
+  const ip = clientAddress(req);
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("Vary", "x-pulse-token");
 
   if (req.method !== "GET" && req.method !== "HEAD") {
     json(res, 405, { ok: false, error: "Method not allowed" });
     return;
   }
 
+  const auth = restoreSession(String(req.headers["x-pulse-token"] || ""));
+  if (!auth.ok) {
+    json(res, 401, { ok: false, error: "Сначала войдите в аккаунт" });
+    return;
+  }
+  const userId = auth.account.userId;
+  const limited = (kind: string, perMinute: number, perHour?: number) => {
+    const limits: Array<[string, number, number]> = [
+      [`ringtone-${kind}:${userId}`, perMinute, 60_000],
+      [`ringtone-${kind}-ip:${ip}`, perMinute * 3, 60_000],
+    ];
+    if (perHour !== undefined) limits.push([`ringtone-${kind}-hour:${userId}`, perHour, 60 * 60_000]);
+    for (const [key, limit, window] of limits) {
+      if (!rateLimit(key, limit, window)) {
+        res.setHeader("Retry-After", String(rateLimitRetrySeconds(key)));
+        return true;
+      }
+    }
+    return false;
+  };
+  const rejectLimit = () => {
+    json(res, 429, { ok: false, error: "Слишком много запросов рингтонов. Попробуйте позже" });
+  };
+
   try {
     if (pathname === "/api/ringtones" || pathname === "/api/ringtones/") {
-      if (!rateLimit(`ringtone-catalog:${ip}`, 80, 60_000)) {
-        json(res, 429, { ok: false, error: "Слишком много запросов" });
-        return;
-      }
+      if (limited("catalog", 30)) { rejectLimit(); return; }
       const page = Number(parsed.query.page || 1);
-      const data = await listRingtones(page);
+      const query = String(parsed.query.q || "");
+      const data = await listRingtones(page, query);
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json; charset=utf-8");
-      res.setHeader("Cache-Control", "public, max-age=60");
-      res.end(JSON.stringify({ ok: true, ...data }));
+      res.end(req.method === "HEAD" ? undefined : JSON.stringify({ ok: true, ...data }));
+      return;
+    }
+
+    if (pathname === "/api/ringtones/source") {
+      if (limited("source", 6, 30)) { rejectLimit(); return; }
+      const remote = String(parsed.query.u || "");
+      if (!youtubeVideoId(remote)) {
+        json(res, 400, { ok: false, error: "Некорректная ссылка YouTube" });
+        return;
+      }
+      if (activeSources >= 2) throw new RingtoneBusyError();
+      activeSources++;
+      let source: Awaited<ReturnType<typeof ringtoneSource>>;
+      try { source = await ringtoneSource(remote); }
+      finally { activeSources--; }
+      const { buffer, contentType } = source;
+      res.writeHead(200, {
+        "Content-Type": contentType,
+        "Content-Length": String(buffer.length),
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+      });
+      res.end(req.method === "HEAD" ? undefined : buffer);
       return;
     }
 
     if (pathname === "/api/ringtones/audio") {
       const remote = String(parsed.query.u || "");
-      const target = normalizeRemoteUrl(remote);
-      const cached = target
-        ? s3Enabled
-          ? Boolean(await headObject(`ringtones/audio/${audioKey(target)}.mp3`))
-          : Boolean(await readLocalAudio(target) || await readPreparedClip(target))
-        : false;
-      if (!cached && !rateLimit(`ringtone-proxy:${ip}`, 90, 60_000)) {
-        json(res, 429, { ok: false, error: "Слишком много запросов" });
-        return;
-      }
+      if (!normalizeRemoteUrl(remote)) { json(res, 400, { ok: false, error: "Недопустимый адрес рингтона" }); return; }
+      if (limited("audio", 30, 120)) { rejectLimit(); return; }
       const { buffer, contentType, startSec } =
         await proxyRingtoneAudio(remote);
       res.statusCode = 200;
       res.setHeader("Content-Type", contentType);
-      res.setHeader("Cache-Control", "public, max-age=86400");
-      res.setHeader("Accept-Ranges", "bytes");
       res.setHeader("Content-Length", String(buffer.length));
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("X-Pulse-Start-Sec", String(startSec));
@@ -792,6 +694,11 @@ export async function handleRingtones(
 
     json(res, 404, { ok: false, error: "Not found" });
   } catch (error) {
+    if (error instanceof RingtoneBusyError) {
+      res.setHeader("Retry-After", "60");
+      json(res, 503, { ok: false, error: error.message });
+      return;
+    }
     const message =
       error instanceof Error ? error.message : "Ошибка каталога рингтонов";
     json(res, 502, { ok: false, error: message });

@@ -100,6 +100,24 @@ function createDownloads({ directory, historyPath, siteSession, getSite, trusted
   return {
     snapshot,
     siteProgress,
+    async saveLocal(source, filename) {
+      const entry = { id: randomUUID(), name: safeFilename(filename), path: '', phase: 'downloading',
+        received: 0, total: 0, createdAt: Date.now(), message: 'Сохраняем…' };
+      try {
+        entry.total = (await fs.promises.stat(source)).size;
+        entry.path = reservePath(directory, entry.name); entry.name = path.basename(entry.path);
+        entries.unshift(entry); send();
+        await fs.promises.copyFile(source, entry.path);
+        entry.received = entry.total; entry.phase = 'completed'; entry.message = 'Сохранено';
+        trimHistory(); save(); send();
+        return { name: entry.name, bytes: entry.total };
+      } catch (error) {
+        if (entry.path) await fs.promises.unlink(entry.path).catch(() => {});
+        entry.phase = 'error'; entry.message = 'Не удалось сохранить VST3. Проверьте доступ к папке загрузок.';
+        trimHistory(); send(); log(`Bundled download failed: ${error.message}`);
+        throw new Error(entry.message);
+      }
+    },
     async action(command, id) {
       if (command === 'folder') {
         fs.mkdirSync(directory, { recursive: true });

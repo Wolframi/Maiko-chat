@@ -456,10 +456,11 @@ export function useBrowserVoiceChannel({
     [socket],
   );
 
+  const clearSfuError = sfu.clearError;
   const clearError = useCallback(() => {
     setError(null);
-    sfu.clearError();
-  }, [sfu]);
+    clearSfuError();
+  }, [clearSfuError]);
 
   const setMinimizedBoth = useCallback(
     (next: boolean | ((current: boolean) => boolean)) => {
@@ -486,6 +487,7 @@ export function useBrowserVoiceChannel({
     minimized,
     joining: joining || sfu.joining,
     connectionQuality: sfu.connectionQuality,
+    rttMs: sfu.rttMs,
     connectionLabel:
       sfu.linkPhase === "failed"
         ? "Связь потеряна — подключитесь к каналу снова"
@@ -503,6 +505,8 @@ export function useBrowserVoiceChannel({
     toggleDeafen: sfu.toggleDeafen,
     toggleCamera: sfu.toggleCamera,
     flipCamera: sfu.flipCamera,
+    selectCamera: sfu.selectCamera,
+    cameraDeviceId: sfu.cameraDeviceId,
     canFlipCamera: sfu.canFlipCamera,
     toggleScreenShare: sfu.toggleScreenShare,
     toggleNoiseFilter: sfu.toggleNoiseFilter,

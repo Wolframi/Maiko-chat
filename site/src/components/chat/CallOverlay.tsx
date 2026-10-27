@@ -12,8 +12,6 @@ import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "motion/react";
 import type { CallMode, IncomingCall } from "@/lib/types";
 import {
-  IconCamera,
-  IconCameraOff,
   IconSwitchCamera,
   IconMic,
   IconMicOff,
@@ -25,6 +23,7 @@ import {
   IconNoise,
 } from "@/lib/icons";
 import { ConnectionSignal } from "@/components/chat/ConnectionSignal";
+import { CameraControl } from "@/components/chat/CameraControl";
 import { Avatar } from "@/components/chat/Avatar";
 import { MediaVideo } from "@/components/chat/MediaVideo";
 import {
@@ -105,6 +104,8 @@ type CallMediaProps = {
   onToggleDeafen?: () => void;
   onToggleNoiseFilter?: () => void;
   onToggleCamera: () => void;
+  onSelectCamera?: (deviceId: string) => void;
+  cameraDeviceId?: string;
   onFlipCamera?: () => void;
   canFlipCamera?: boolean;
   onToggleScreenShare: () => void;
@@ -144,6 +145,8 @@ type CallOverlayProps = {
   onToggleDeafen?: () => void;
   onToggleNoiseFilter?: () => void;
   onToggleCamera: () => void;
+  onSelectCamera?: (deviceId: string) => void;
+  cameraDeviceId?: string;
   onFlipCamera?: () => void;
   canFlipCamera?: boolean;
   onToggleScreenShare: () => void;
@@ -214,6 +217,8 @@ export function CallPanel({
   onToggleDeafen,
   onToggleNoiseFilter,
   onToggleCamera,
+  onSelectCamera,
+  cameraDeviceId,
   onFlipCamera,
   canFlipCamera = false,
   onToggleScreenShare,
@@ -243,6 +248,7 @@ export function CallPanel({
       id: "local",
       label: "Ваш экран",
       stream: localScreenStream,
+      audioStream: localStream,
       local: true,
     });
   }
@@ -251,6 +257,7 @@ export function CallPanel({
       id: active.peerId,
       label: "Экран собеседника",
       stream: remoteScreenStream || remoteStream!,
+      audioStream: remoteStream,
     });
   }
 
@@ -473,20 +480,14 @@ export function CallPanel({
               <IconNoise size={20} />
             </button>
           ) : null}
-          <button
-            type="button"
-            className={`call__btn call__btn--circle ${cameraOff ? "is-off" : ""}`}
-            onClick={onToggleCamera}
-            disabled={mediaBusy}
-            aria-label={cameraOff ? "Включить камеру" : "Выключить камеру"}
-            title={cameraOff ? "Камера выкл." : "Камера"}
-          >
-            {cameraOff ? (
-              <IconCameraOff size={20} />
-            ) : (
-              <IconCamera size={20} />
-            )}
-          </button>
+          <CameraControl
+            cameraOff={cameraOff}
+            mediaBusy={mediaBusy}
+            cameraDeviceId={cameraDeviceId}
+            localStream={localStream}
+            onToggleCamera={onToggleCamera}
+            onSelectCamera={onSelectCamera}
+          />
           {canFlipCamera && !cameraOff && onFlipCamera ? (
             <button
               type="button"
@@ -583,6 +584,8 @@ export function CallOverlay({
   onToggleDeafen,
   onToggleNoiseFilter,
   onToggleCamera,
+  onSelectCamera,
+  cameraDeviceId,
   onFlipCamera,
   canFlipCamera = false,
   onToggleScreenShare,
@@ -720,6 +723,8 @@ export function CallOverlay({
               onToggleDeafen={onToggleDeafen}
               onToggleNoiseFilter={onToggleNoiseFilter}
               onToggleCamera={onToggleCamera}
+              onSelectCamera={onSelectCamera}
+              cameraDeviceId={cameraDeviceId}
               onFlipCamera={onFlipCamera}
               canFlipCamera={canFlipCamera}
               onToggleScreenShare={onToggleScreenShare}

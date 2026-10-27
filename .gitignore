@@ -71,6 +71,7 @@ yarn-error.log*
 .deepgram-keyterms
 .turn-user
 .turn-pass
+.turn-auth-secret
 .livekit-url
 .livekit-api-key
 .livekit-api-secret

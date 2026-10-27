@@ -28,6 +28,13 @@ contextBridge.exposeInIsolatedWorld(1001, 'maikoDownloadProgress', Object.freeze
 // window-control bridge. The main process accepts this only from its site.
 contextBridge.exposeInMainWorld('maikoScreenAudio', Object.freeze({
   takePolicy: () => ipcRenderer.invoke('desktop:capture-audio-policy'),
+  startDaw: (token) => ipcRenderer.invoke('desktop:capture-daw-start', token),
+  stopDaw: (token) => ipcRenderer.invoke('desktop:capture-daw-stop', token),
+  onDawAudio: (callback) => {
+    const handler = (_event, packet) => callback(packet);
+    ipcRenderer.on('desktop:capture-daw-audio', handler);
+    return () => ipcRenderer.removeListener('desktop:capture-daw-audio', handler);
+  },
 }));
 
 contextBridge.executeInMainWorld({ func: () => {
@@ -35,7 +42,7 @@ contextBridge.executeInMainWorld({ func: () => {
   if (!devices?.getDisplayMedia) return;
   const capture = devices.getDisplayMedia.bind(devices);
   let capturing = false;
-  function describeIsolatedTrack(track) {
+  function describeIsolatedTrack(track, onClone) {
     const settings = track.getSettings.bind(track);
     const clone = track.clone.bind(track);
     // Chromium on Windows 10 reports restrictOwnAudio=false even for its
@@ -46,7 +53,7 @@ contextBridge.executeInMainWorld({ func: () => {
       value: () => ({ ...settings(), restrictOwnAudio: true }),
     });
     Object.defineProperty(track, 'clone', {
-      value: () => { const cloned = clone(); describeIsolatedTrack(cloned); return cloned; },
+      value: () => { const cloned = clone(); describeIsolatedTrack(cloned, onClone); onClone?.(cloned); return cloned; },
     });
   }
   Object.defineProperty(devices, 'getDisplayMedia', {
@@ -57,15 +64,21 @@ contextBridge.executeInMainWorld({ func: () => {
       try {
         stream = await capture(options);
         const policy = await window.maikoScreenAudio.takePolicy();
-        if (policy?.isolated === true) {
-          for (const track of stream.getAudioTracks()) describeIsolatedTrack(track);
+        if (policy?.isolated === true && policy.token) {
+          const { attachAutomaticAudio } = await import('/__maiko_desktop/automatic-audio.js');
+          await attachAutomaticAudio(stream, policy, describeIsolatedTrack);
         } else {
-          // A missing policy must never produce an unfiltered call loopback.
           for (const track of stream.getAudioTracks()) { track.stop(); stream.removeTrack(track); }
         }
         return stream;
       } catch (error) {
         stream?.getTracks().forEach((track) => track.stop());
+        // Chromium can report a closed picker as NotReadableError. Preserve
+        // actual capture failures and normalize only explicit user cancellation.
+        if (!stream) {
+          const outcome = await window.maikoScreenAudio.takePolicy().catch(() => null);
+          if (outcome?.cancelled) throw new DOMException('Выбор демонстрации отменён', 'AbortError');
+        }
         throw error;
       } finally { capturing = false; }
     },

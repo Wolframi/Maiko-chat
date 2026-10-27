@@ -8,7 +8,8 @@ import { easeOutSoft } from "@/lib/motion";
 type JoinGateProps = {
   connected: boolean;
   error?: string | null;
-  onRegister: (username: string, password: string) => void;
+  registrationRequired: boolean;
+  onRegister: (username: string, password: string, invitationCode: string) => void;
   onLogin: (username: string, password: string) => void;
 };
 
@@ -20,6 +21,7 @@ const MASCOT_LOOP_END_S = 16.767;
 export function JoinGate({
   connected,
   error,
+  registrationRequired,
   onRegister,
   onLogin,
 }: JoinGateProps) {
@@ -29,6 +31,7 @@ export function JoinGate({
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [invitationCode, setInvitationCode] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -124,7 +127,7 @@ export function JoinGate({
         return;
       }
       setSubmitting(true);
-      onRegister(username.trim(), password);
+      onRegister(username.trim(), password, invitationCode.trim());
       return;
     }
 
@@ -277,6 +280,19 @@ export function JoinGate({
               </motion.label>
             )}
           </AnimatePresence>
+
+          {mode === "register" && registrationRequired && (
+            <label className="field">
+              <span>Код приглашения</span>
+              <input value={invitationCode} onChange={event => setInvitationCode(event.target.value.toUpperCase())}
+                placeholder="XXXX-XXXX-XXXX-XXXX-XXXX" maxLength={64} required
+                autoComplete="off" autoCapitalize="characters" spellCheck={false} disabled={submitting}
+                aria-describedby="registration-invite-hint" />
+              <small id="registration-invite-hint" className="registration-invite-hint">
+                Попросите код у участника Майко. Он находится в профиле → «Приглашения» и обновляется раз в неделю.
+              </small>
+            </label>
+          )}
 
           <AnimatePresence initial={false}>
             {(localError || error) && (

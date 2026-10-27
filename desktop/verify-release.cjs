@@ -16,4 +16,24 @@ if (!file || file.sha512 !== hash || metadata.sha512 !== hash || file.size !== b
 for (const name of [`${installer}.blockmap`]) {
   if (!fs.statSync(path.join(release, name)).size) throw new Error(`Empty artifact: ${name}`);
 }
-console.log(`Verified ${version}: installer SHA-512, blockmap and latest.yml.`);
+const bridge = path.join('native', 'Maiko DAW Bridge.vst3', 'Contents', 'x86_64-win', 'Maiko DAW Bridge.vst3');
+const packagedBridge = fs.readFileSync(path.join(release, 'win-unpacked/resources/app.asar.unpacked', bridge));
+if (!packagedBridge.length || !packagedBridge.equals(fs.readFileSync(path.join(__dirname, bridge)))) {
+  throw new Error('Packaged Maiko DAW Bridge is missing or differs from the verified native build');
+}
+const asar = require('@electron/asar');
+const archive = path.join(release, 'win-unpacked/resources/app.asar');
+require('./verify-protection.cjs').verify(archive);
+if (asar.listPackage(archive).some((name) => /native[\\/].*\.zip$/.test(name))) throw new Error('VST3 ZIP must not be bundled');
+for (const helper of ['capture-processes.exe', 'window-processes.exe', 'update-window.exe']) {
+  const packed = fs.readFileSync(path.join(release, 'win-unpacked/resources/app.asar.unpacked/native', helper));
+  if (!packed.equals(fs.readFileSync(path.join(__dirname, 'native', helper)))) throw new Error(`Packaged ${helper} differs`);
+}
+for (const module of ['ui/automatic-audio.js', 'ui/daw-worklet.js', 'ui/startup-model.js']) {
+  if (!asar.extractFile(archive, module).equals(fs.readFileSync(path.join(__dirname, '.protected', module)))) throw new Error(`Packaged ${module} differs`);
+}
+for (const intro of ['hiphop', 'samba']) {
+  const model = path.join('bundled-assets', 'models', `maiko-${intro}.bin`);
+  if (!asar.extractFile(archive, model).equals(fs.readFileSync(path.join(__dirname, model)))) throw new Error(`Packaged startup model ${intro} differs`);
+}
+console.log(`Verified ${version}: installer SHA-512, blockmap, feed, native helpers, automatic audio and direct VST3 installation without ZIP.`);

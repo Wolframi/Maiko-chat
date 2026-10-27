@@ -88,6 +88,13 @@ async function collectCachedDeployment(archive) {
 }
 
 async function main() {
+  // Reuse the site's model renderer in the local startup surface, without a
+  // network request or a second React application inside the Electron shell.
+  await require('esbuild').build({
+    entryPoints: [path.join(__dirname, 'startup-model.ts')],
+    outfile: path.join(__dirname, 'ui/startup-model.js'),
+    bundle: true, platform: 'browser', format: 'iife', target: 'chrome150', minify: true,
+  });
   // Ship the same viewport fixes with the EXE, including when the online site
   // still serves an older frontend. This is a local stylesheet, not server data.
   await fs.copyFile(path.join(project, 'src/app/styles/viewport.css'), path.join(__dirname, 'ui/site-layout.css'));

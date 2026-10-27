@@ -38,8 +38,9 @@ export function buildIceServers(options?: {
   turnPass?: string;
 }): IceServerConfig[] {
   const host = (options?.turnHost || turnHostFromEnv() || "").trim();
-  const user = (options?.turnUser || process.env.TURN_USER || process.env.NEXT_PUBLIC_TURN_USER || "").trim();
-  const pass = (options?.turnPass || process.env.TURN_PASS || process.env.NEXT_PUBLIC_TURN_PASS || "").trim();
+  // Credentials come only from the authenticated server API and expire shortly.
+  const user = (options?.turnUser || "").trim();
+  const pass = (options?.turnPass || "").trim();
 
   // Several STUN for faster candidate gathering and resilience.
   const servers: IceServerConfig[] = [
@@ -65,19 +66,6 @@ export function buildIceServers(options?: {
     });
   }
 
-  // Last-resort public TURN if local is not configured.
-  if (!user || !pass || !host) {
-    servers.push({
-      urls: [
-        "turn:openrelay.metered.ca:80",
-        "turn:openrelay.metered.ca:80?transport=tcp",
-        "turn:openrelay.metered.ca:443",
-        "turns:openrelay.metered.ca:443",
-      ],
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    });
-  }
 
   return servers.length ? servers : FALLBACK_ICE;
 }
@@ -86,10 +74,15 @@ let cachedClientIce: RTCIceServer[] | null = null;
 let clientIcePromise: Promise<RTCIceServer[]> | null = null;
 let cachedClientIceAt = 0;
 /** Refresh the ICE list occasionally — TURN config may change server-side. */
-const CLIENT_ICE_TTL_MS = 30 * 60_000;
+const CLIENT_ICE_TTL_MS = 2 * 60_000;
+let cachedClientToken: string | null | undefined;
 
-/** Browser: fetch signed ICE from API (falls back to public STUN/TURN). */
+/** Browser: fetch expiring ICE credentials from API (falls back to STUN only). */
 export async function getClientIceServers(token?: string | null): Promise<RTCIceServer[]> {
+  if (token !== cachedClientToken) {
+    clearClientIceCache();
+    cachedClientToken = token;
+  }
   if (cachedClientIce && Date.now() - cachedClientIceAt < CLIENT_ICE_TTL_MS) {
     return cachedClientIce;
   }
@@ -110,17 +103,21 @@ export async function getClientIceServers(token?: string | null): Promise<RTCIce
         if (res.ok) {
           const data = (await res.json()) as { iceServers?: RTCIceServer[] };
           if (Array.isArray(data.iceServers) && data.iceServers.length) {
-            cachedClientIce = data.iceServers;
-            cachedClientIceAt = Date.now();
-            return cachedClientIce;
+            if (cachedClientToken === token) {
+              cachedClientIce = data.iceServers;
+              cachedClientIceAt = Date.now();
+            }
+            return data.iceServers;
           }
         }
       } catch {
         /* fall through */
       }
       const built = buildIceServers() as RTCIceServer[];
-      cachedClientIce = built;
-      cachedClientIceAt = Date.now();
+      if (cachedClientToken === token) {
+        cachedClientIce = built;
+        cachedClientIceAt = Date.now();
+      }
       return built;
     })();
   }
@@ -131,4 +128,5 @@ export function clearClientIceCache() {
   cachedClientIce = null;
   clientIcePromise = null;
   cachedClientIceAt = 0;
+  cachedClientToken = undefined;
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  useCallback,
   useEffect,
   useId,
   useRef,
@@ -10,6 +11,8 @@ import {
 } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import type { AuthAccount } from "@/lib/types";
+import type { Socket } from "socket.io-client";
+import { RegistrationInvitesPanel } from "@/components/chat/RegistrationInvitesPanel";
 import { Avatar } from "@/components/chat/Avatar";
 import { ConfirmDialog } from "@/components/chat/ConfirmDialog";
 import dynamic from "next/dynamic";
@@ -52,6 +55,7 @@ import {
   getSavedRingtone,
   previewRingtone,
   previewRingtoneFrom,
+  prepareRingtone,
   setRingtonePreviewVolume,
   setSavedRingtone,
   type CatalogRingtone,
@@ -67,8 +71,11 @@ import {
   validateRingtoneFile,
 } from "@/lib/customRingtone";
 import { VoiceSettings } from "@/components/chat/VoiceSettings";
+import { getAccountRingtoneSettings, getRingtoneAccount } from "@/lib/ringtoneAccount";
+import { validateNickname } from "@/lib/username";
 
 type ProfilePanelProps = {
+  socket: Socket | null;
   open: boolean;
   account: AuthAccount;
   connected: boolean;
@@ -76,6 +83,7 @@ type ProfilePanelProps = {
   error?: string | null;
   onClose: () => void;
   onSave: (patch: {
+    username?: string;
     displayName: string;
     bio: string;
     avatarUrl?: string | null;
@@ -85,6 +93,7 @@ type ProfilePanelProps = {
 };
 
 export function ProfilePanel({
+  socket,
   open,
   account,
   connected,
@@ -95,6 +104,7 @@ export function ProfilePanel({
   onUploadAvatar,
   onLogout,
 }: ProfilePanelProps) {
+  const [username, setUsername] = useState(account.username);
   const [displayName, setDisplayName] = useState(account.displayName);
   const [bio, setBio] = useState(account.bio || "");
   const [avatarUrl, setAvatarUrl] = useState(account.avatarUrl || "");
@@ -106,11 +116,15 @@ export function ProfilePanel({
     useState<NotifyPermission>("unsupported");
   const [notifyBusy, setNotifyBusy] = useState(false);
   const [ringtone, setRingtone] = useState<SavedRingtone | null>(null);
+  const [ringtoneSaving, setRingtoneSaving] = useState(false);
   const [catalog, setCatalog] = useState<CatalogRingtone[]>([]);
   const [catalogPage, setCatalogPage] = useState(1);
   const [catalogPages, setCatalogPages] = useState(1);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [catalogSearch, setCatalogSearch] = useState("");
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const catalogRequestRef = useRef(0);
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [previewVolume, setPreviewVolumeState] = useState(0.85);
   const [previewMuted, setPreviewMuted] = useState(false);
@@ -120,37 +134,58 @@ export function ProfilePanel({
   const [trimFile, setTrimFile] = useState<File | null>(null);
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(0);
+  const [trimLimit, setTrimLimit] = useState(30);
+  const catalogControllerRef = useRef<AbortController | null>(null);
   const [confirmDeleteCustom, setConfirmDeleteCustom] = useState(false);
-  const [tab, setTab] = useState<"account" | "voice" | "ringtone">("account");
+  const [tab, setTab] = useState<"account" | "voice" | "ringtone" | "invites">("account");
   const stopPreviewRef = useRef<(() => void) | null>(null);
   const fileInputId = useId();
   const ringtoneInputRef = useRef<HTMLInputElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
 
-  function stopPreview() {
+  const stopPreview = useCallback(() => {
     stopPreviewRef.current?.();
     stopPreviewRef.current = null;
     setPreviewId(null);
-  }
+  }, []);
 
-  async function loadCatalog(page: number) {
-    setCatalogLoading(true);
-    setCatalogError(null);
+  const loadCatalog = useCallback(async (page: number, query: string) => {
+    const request = ++catalogRequestRef.current;
+    catalogControllerRef.current?.abort();
+    const q = query.trim().replace(/\s+/g, " ").slice(0, 120);
     stopPreview();
+    setCatalogError(null);
+    setCatalogQuery(q.length >= 2 ? q : "");
+    if (q.length < 2) {
+      setCatalog([]);
+      setCatalogPage(1);
+      setCatalogPages(1);
+      setCatalogLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    catalogControllerRef.current = controller;
+    setCatalog([]);
+    setCatalogLoading(true);
     try {
-      const data = await fetchRingtoneCatalog(page);
+      const data = await fetchRingtoneCatalog(page, q, controller.signal);
+      if (request !== catalogRequestRef.current) return;
       setCatalog(data.items);
       setCatalogPage(data.page);
       setCatalogPages(Math.max(1, data.pages));
-    } catch {
-      setCatalogError("Не удалось загрузить каталог");
+    } catch (error) {
+      if (request !== catalogRequestRef.current) return;
+      setCatalogError(error instanceof Error ? error.message : "Не удалось загрузить каталог YouTube");
     } finally {
-      setCatalogLoading(false);
+      if (request === catalogRequestRef.current) setCatalogLoading(false);
     }
-  }
+  }, [stopPreview]);
 
   useEffect(() => {
     if (!open) return;
+    const pendingRequests = catalogRequestRef;
+    const catalogController = catalogControllerRef;
+    setUsername(account.username);
     setDisplayName(account.displayName);
     setBio(account.bio || "");
     setAvatarUrl(account.avatarUrl || "");
@@ -160,19 +195,52 @@ export function ProfilePanel({
     const saved = getSavedRingtone();
     setRingtone(saved);
     if (saved?.id === CUSTOM_RINGTONE_ID) setCustomTitle(saved.title);
-    void hasCustomRingtone().then(setHasCustom);
+    void hasCustomRingtone().then(setHasCustom).catch(() => undefined);
     setCatalogError(null);
     setCatalog([]);
     setCatalogPage(1);
     setCatalogPages(1);
+    setCatalogSearch("");
+    setCatalogQuery("");
+    setCatalogLoading(false);
     setConfirmDeleteCustom(false);
     setTab("account");
     closeRef.current?.focus();
-    void loadCatalog(1);
     return () => {
+      pendingRequests.current++;
+      catalogController.current?.abort();
       stopPreview();
     };
-  }, [open, account]);
+  }, [open, account, loadCatalog, stopPreview]);
+
+  useEffect(() => {
+    if (!open) return;
+    const refresh = () => {
+      setRingtone(getSavedRingtone());
+      const custom = getAccountRingtoneSettings()?.custom;
+      setHasCustom(Boolean(custom));
+      setCustomTitle(custom?.title || "Свой рингтон");
+    };
+    window.addEventListener("pulse:ringtone-settings", refresh);
+    refresh();
+    return () => window.removeEventListener("pulse:ringtone-settings", refresh);
+  }, [open]);
+
+  async function selectRingtone(next: SavedRingtone | null) {
+    stopPreview();
+    setRingtoneSaving(true);
+    setCatalogError(null);
+    try {
+      if (next?.id.startsWith("youtube:")) {
+        await prepareRingtone(next.url);
+        if (getRingtoneAccount()?.token !== account.token) throw new Error("Аккаунт изменился");
+      }
+      await setSavedRingtone(next);
+      setRingtone(getSavedRingtone());
+    }
+    catch (error) { setCatalogError(error instanceof Error ? error.message : "Не удалось сохранить рингтон"); }
+    finally { setRingtoneSaving(false); }
+  }
 
   useEffect(() => {
     if (!open) return;
@@ -199,11 +267,14 @@ export function ProfilePanel({
     stopPreview();
     setTrimStart(0);
     setTrimEnd(0);
+    setTrimLimit(30);
     setTrimFile(file);
   }
 
   async function openCustomTrim() {
-    const source = await loadCustomSource();
+    let source;
+    try { source = await loadCustomSource(); }
+    catch { setCatalogError("Не удалось загрузить исходный рингтон"); return; }
     if (!source) {
       ringtoneInputRef.current?.click();
       return;
@@ -211,6 +282,7 @@ export function ProfilePanel({
     stopPreview();
     setTrimStart(source.startSec);
     setTrimEnd(source.endSec);
+    setTrimLimit(30);
     setTrimFile(source.file);
   }
 
@@ -221,41 +293,40 @@ export function ProfilePanel({
     startSec: number;
     endSec: number;
   }) {
-    await saveCustomRingtone({
-      trimmed: payload.trimmed,
-      source: payload.source,
-      sourceName: payload.source.name,
-      startSec: payload.startSec,
-      endSec: payload.endSec,
-      title: payload.title,
-    });
-    const next: SavedRingtone = {
-      id: CUSTOM_RINGTONE_ID,
-      title: payload.title,
-      url: CUSTOM_RINGTONE_URL,
-      startSec: 0,
-    };
-    setSavedRingtone(next);
-    setRingtone(next);
-    setCustomTitle(payload.title);
-    setHasCustom(true);
-    setTrimFile(null);
+    setRingtoneSaving(true);
+    setCatalogError(null);
+    try {
+      await saveCustomRingtone({
+        trimmed: payload.trimmed,
+        source: payload.source,
+        sourceName: payload.source.name,
+        startSec: payload.startSec,
+        endSec: payload.endSec,
+        title: payload.title,
+      });
+      setRingtone(getSavedRingtone());
+      setCustomTitle(payload.title);
+      setHasCustom(true);
+      setTrimFile(null);
+    } catch (error) {
+      setCatalogError(error instanceof Error ? error.message : "Не удалось сохранить рингтон");
+      throw error;
+    } finally { setRingtoneSaving(false); }
   }
 
   async function removeCustomRingtone() {
     stopPreview();
+    setRingtoneSaving(true);
     try {
       await clearCustomRingtone();
-      if (getSavedRingtone()?.id === CUSTOM_RINGTONE_ID) {
-        setSavedRingtone(null);
-        setRingtone(null);
-      }
+      setRingtone(getSavedRingtone());
       setHasCustom(false);
       setCustomTitle("Свой рингтон");
       setCatalogError(null);
     } catch {
       setCatalogError("Не удалось удалить рингтон");
     } finally {
+      setRingtoneSaving(false);
       setConfirmDeleteCustom(false);
     }
   }
@@ -331,8 +402,15 @@ export function ProfilePanel({
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
+    const nickname = username.trim();
+    const nicknameError = validateNickname(nickname);
+    if (nicknameError) {
+      setLocalError(nicknameError);
+      return;
+    }
     setLocalError(null);
     const ok = await onSave({
+      username: nickname,
       displayName,
       bio,
       avatarUrl: avatarUrl || null,
@@ -371,7 +449,7 @@ export function ProfilePanel({
               <div>
                 <p className="profile__eyebrow">Профиль</p>
                 <h2>
-                  {tab === "ringtone"
+                  {tab === "invites" ? "Приглашения" : tab === "ringtone"
                     ? "Рингтон"
                     : tab === "voice"
                       ? "Голос и звук"
@@ -423,19 +501,26 @@ export function ProfilePanel({
               >
                 Рингтон
               </button>
+              <button type="button" role="tab" aria-selected={tab === "invites"}
+                className={`profile__tab ${tab === "invites" ? "is-active" : ""}`}
+                onClick={() => { stopPreview(); setTab("invites"); }}>
+                Приглашения
+              </button>
             </div>
 
-            {tab === "voice" ? (
+            {tab === "invites" ? (
+              <RegistrationInvitesPanel key={account.token} socket={socket} connected={connected} />
+            ) : tab === "voice" ? (
               <VoiceSettings />
             ) : tab === "ringtone" ? (
               <section
                 className="profile__ringtone profile__ringtone--tab"
                 aria-label="Рингтон"
               >
-                <p className="profile__ringtone-now" title={ringtone?.title}>
+                <p className="profile__ringtone-now" title={ringtone?.title} aria-live="polite">
                   Сейчас:{" "}
                   <strong>
-                    {ringtone ? ringtone.title : "стандартный сигнал"}
+                    {ringtoneSaving ? "Подготавливаем рингтон…" : ringtone ? ringtone.title : "стандартный сигнал"}
                   </strong>
                 </p>
 
@@ -513,29 +598,57 @@ export function ProfilePanel({
                   ) : null}
                 </div>
 
-                <div className="profile__ringtone-pager">
+                <form
+                  className="profile__ringtone-search"
+                  role="search"
+                  aria-label="Музыка YouTube"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void loadCatalog(1, catalogSearch.trim());
+                  }}
+                >
+                  <input
+                    type="search"
+                    aria-label="Поиск музыки на YouTube"
+                    placeholder="Название трека или исполнитель"
+                    maxLength={120}
+                    value={catalogSearch}
+                    onChange={(event) => {
+                      setCatalogSearch(event.target.value);
+                      if (event.target.value.trim().length < 2) void loadCatalog(1, "");
+                    }}
+                  />
+                  <button type="submit" className="profile__ringtone-upload" disabled={catalogLoading || catalogSearch.trim().length < 2}>
+                    Найти
+                  </button>
+                </form>
+                <p className="profile__ringtone-source">Самый энергичный фрагмент до 30 секунд выбирается автоматически</p>
+
+                {catalogQuery && catalogPages > 1 && <div className="profile__ringtone-pager">
                   <button
                     type="button"
                     className="profile__ringtone-page-btn"
                     disabled={catalogLoading || catalogPage <= 1}
                     aria-label="Предыдущая страница"
-                    onClick={() => void loadCatalog(catalogPage - 1)}
+                    onClick={() => void loadCatalog(catalogPage - 1, catalogQuery)}
                   >
                     ‹
                   </button>
                   <span className="profile__ringtone-page-label">
-                    {catalogLoading ? "…" : `${catalogPage} / ${catalogPages}`}
+                    {catalogLoading ? "…" : `Страница ${catalogPage}`}
                   </span>
                   <button
                     type="button"
                     className="profile__ringtone-page-btn"
                     disabled={catalogLoading || catalogPage >= catalogPages}
                     aria-label="Следующая страница"
-                    onClick={() => void loadCatalog(catalogPage + 1)}
+                    onClick={() => void loadCatalog(catalogPage + 1, catalogQuery)}
                   >
                     ›
                   </button>
                 </div>
+
+                }
 
                 {catalogError && (
                   <p className="profile__ringtone-status is-error">
@@ -552,11 +665,8 @@ export function ProfilePanel({
                     <button
                       type="button"
                       className="profile__ringtone-select"
-                      onClick={() => {
-                        stopPreview();
-                        setSavedRingtone(null);
-                        setRingtone(null);
-                      }}
+                      disabled={ringtoneSaving || !connected}
+                      onClick={() => { void selectRingtone(null); }}
                     >
                       <span className="profile__ringtone-check" aria-hidden>
                         {!ringtone ? "✓" : ""}
@@ -589,6 +699,7 @@ export function ProfilePanel({
                       <button
                         type="button"
                         className="profile__ringtone-select"
+                        disabled={ringtoneSaving || !connected}
                         onClick={() => {
                           const next: SavedRingtone = {
                             id: CUSTOM_RINGTONE_ID,
@@ -596,8 +707,7 @@ export function ProfilePanel({
                             url: CUSTOM_RINGTONE_URL,
                             startSec: 0,
                           };
-                          setSavedRingtone(next);
-                          setRingtone(next);
+                          void selectRingtone(next);
                         }}
                       >
                         <span className="profile__ringtone-check" aria-hidden>
@@ -663,7 +773,9 @@ export function ProfilePanel({
                       catalog.length === 0 &&
                       !catalogLoading && (
                         <li>
-                          <p className="profile__ringtone-status">Пусто</p>
+                          <p className="profile__ringtone-status">
+                            {catalogQuery ? "Треки не найдены" : "Введите название трека или исполнителя и нажмите «Найти»"}
+                          </p>
                         </li>
                       )}
 
@@ -680,6 +792,7 @@ export function ProfilePanel({
                             <button
                               type="button"
                               className="profile__ringtone-select"
+                              disabled={ringtoneSaving || !connected}
                               title={item.title}
                               onClick={() => {
                                 const next: SavedRingtone = {
@@ -688,8 +801,7 @@ export function ProfilePanel({
                                   url: item.url,
                                   startSec: item.startSec || 0,
                                 };
-                                setSavedRingtone(next);
-                                setRingtone(next);
+                                void selectRingtone(next);
                               }}
                             >
                               <span
@@ -789,6 +901,25 @@ export function ProfilePanel({
               </label>
 
               <label className="field">
+                <span>Никнейм</span>
+                <span className="profile__nickname-input">
+                  <span aria-hidden>@</span>
+                  <input
+                    value={username}
+                    onChange={(event) => setUsername(event.target.value.replace(/^@/, ""))}
+                    placeholder="nickname"
+                    aria-label="Никнейм"
+                    autoComplete="username"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    maxLength={24}
+                    required
+                    disabled={saving}
+                  />
+                </span>
+              </label>
+
+              <label className="field">
                 <span>Статус</span>
                 <input
                   value={bio}
@@ -799,7 +930,7 @@ export function ProfilePanel({
               </label>
 
               <div className="profile__meta">
-                <span>Логин</span>
+                <span>Ваш никнейм</span>
                 <strong>@{account.username}</strong>
                 {connected && <em className="is-on">подключено</em>}
               </div>
@@ -864,14 +995,14 @@ export function ProfilePanel({
               </div>
 
               {(localError || error) && (
-                <p className="profile__error">{localError || error}</p>
+                <p className="profile__error" role="alert">{localError || error}</p>
               )}
 
               <div className="profile__actions">
                 <button
                   type="submit"
                   className="profile__save"
-                  disabled={saving || uploading}
+                  disabled={saving || uploading || !connected}
                 >
                   {saving ? "Сохранение…" : "Сохранить"}
                 </button>
@@ -903,15 +1034,14 @@ export function ProfilePanel({
         file={trimFile}
         initialStart={trimStart}
         initialEnd={trimEnd}
+        maxDuration={trimLimit}
         onCancel={() => setTrimFile(null)}
-        onComplete={(payload) => {
-          void applyCustomRingtone(payload);
-        }}
+        onComplete={applyCustomRingtone}
       />
       <ConfirmDialog
         open={confirmDeleteCustom}
         title="Удалить свой рингтон?"
-        body="Файл пропадёт с этого устройства. Можно снова загрузить другой."
+        body="Рингтон будет удалён из аккаунта на всех устройствах."
         confirmLabel="Удалить"
         onCancel={() => setConfirmDeleteCustom(false)}
         onConfirm={() => {

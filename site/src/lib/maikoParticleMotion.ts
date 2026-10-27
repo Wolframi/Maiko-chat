@@ -41,23 +41,17 @@ export function maikoHoverWave(distance:number,age:number,focus:number) {
  * neighbours. Offsets follow the skeleton, so a dancing arm keeps its detail.
  * The fixed neighbour graph avoids rebuilding an 84,000-point grid every frame.
  */
-export class MaikoParticleMotion {
-  readonly offsets:Float32Array;
-  readonly velocity:Float32Array;
-  readonly neighbours:Int32Array;
-  readonly contact:number;
-  private accumulator=0;
+export type MaikoParticleGraph = { neighbours:Int32Array; contact:number };
 
-  constructor(private readonly data:Float32Array, readonly count:number, private readonly agitation=MAIKO_PARTICLE_AGITATION) {
-    this.offsets=new Float32Array(count*3);
-    this.velocity=new Float32Array(count*3);
-    this.neighbours=new Int32Array(count*3).fill(-1);
-    this.contact=Math.min(0.022,Math.max(0.007,0.007*Math.sqrt(84000/count)));
-    const size=this.contact*2,heads=new Int32Array(HASH_SIZE).fill(-1),next=new Int32Array(count),cells=new Int32Array(count*3);
+function* buildMaikoParticleGraph(data:Float32Array,count:number):Generator<void,MaikoParticleGraph> {
+    const neighbours=new Int32Array(count*3).fill(-1);
+    const contact=Math.min(0.022,Math.max(0.007,0.007*Math.sqrt(84000/count)));
+    const size=contact*2,heads=new Int32Array(HASH_SIZE).fill(-1),next=new Int32Array(count),cells=new Int32Array(count*3);
     for(let i=0;i<count;i++) {
       const k=i*3,d=i*16;
       const x=cells[k]=Math.floor(data[d]/size),y=cells[k+1]=Math.floor(data[d+1]/size),z=cells[k+2]=Math.floor(data[d+2]/size);
       const bucket=hash(x,y,z);next[i]=heads[bucket];heads[bucket]=i;
+      if((i&1023)===1023) yield;
     }
     for(let i=0;i<count;i++) {
       const k=i*3,d=i*16,cx=cells[k],cy=cells[k+1],cz=cells[k+2];
@@ -67,12 +61,49 @@ export class MaikoParticleMotion {
           const q=j*3,e=j*16;
           if(i===j||cells[q]!==x||cells[q+1]!==y||cells[q+2]!==z) continue;
           const dx=data[d]-data[e],dy=data[d+1]-data[e+1],dz=data[d+2]-data[e+2],distance=dx*dx+dy*dy+dz*dz;
-          if(distance<first) {third=second;second=first;first=distance;this.neighbours[k+2]=this.neighbours[k+1];this.neighbours[k+1]=this.neighbours[k];this.neighbours[k]=j;}
-          else if(distance<second) {third=second;second=distance;this.neighbours[k+2]=this.neighbours[k+1];this.neighbours[k+1]=j;}
-          else if(distance<third) {third=distance;this.neighbours[k+2]=j;}
+          if(distance<first) {third=second;second=first;first=distance;neighbours[k+2]=neighbours[k+1];neighbours[k+1]=neighbours[k];neighbours[k]=j;}
+          else if(distance<second) {third=second;second=distance;neighbours[k+2]=neighbours[k+1];neighbours[k+1]=j;}
+          else if(distance<third) {third=distance;neighbours[k+2]=j;}
         }
       }
+      if((i&63)===63) yield;
     }
+    return {neighbours,contact};
+}
+
+export function createMaikoParticleGraph(data:Float32Array,count:number) {
+  const builder=buildMaikoParticleGraph(data,count);
+  let result=builder.next();
+  while(!result.done) result=builder.next();
+  return result.value;
+}
+
+/** Yield to input and painting while preparing the full-detail model. */
+export async function prepareMaikoParticleGraph(data:Float32Array,count:number,signal?:AbortSignal) {
+  const builder=buildMaikoParticleGraph(data,count);
+  for(;;) {
+    signal?.throwIfAborted();
+    const deadline=performance.now()+4;
+    let result=builder.next();
+    while(!result.done&&performance.now()<deadline) result=builder.next();
+    if(result.done) return result.value;
+    await new Promise<void>(resolve=>setTimeout(resolve,0));
+  }
+}
+
+export class MaikoParticleMotion {
+  readonly offsets:Float32Array;
+  readonly velocity:Float32Array;
+  readonly neighbours:Int32Array;
+  readonly contact:number;
+  private accumulator=0;
+
+  constructor(private readonly data:Float32Array, readonly count:number, private readonly agitation=MAIKO_PARTICLE_AGITATION, prepared?:MaikoParticleGraph) {
+    this.offsets=new Float32Array(count*3);
+    this.velocity=new Float32Array(count*3);
+    const graph=prepared??createMaikoParticleGraph(data,count);
+    this.neighbours=graph.neighbours;
+    this.contact=graph.contact;
   }
 
   advance(delta:number,time:number) {

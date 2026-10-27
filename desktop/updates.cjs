@@ -7,7 +7,7 @@ function newerVersion(value, current) {
 }
 
 // The local shell owns update commands; the remote site never gets this API.
-function createUpdates({ app, publish, log, prepareInstall = async () => {}, testing = false,
+function createUpdates({ app, publish, log, prepareInstall = async () => {}, cancelInstall = async () => {}, testing = false,
   notificationUrl,
   getUpdateSocket = (url) => require('socket.io-client').io(new URL('/desktop-updates', url).href,
     { path: '/api/socket', transports: ['websocket'], reconnection: true }),
@@ -17,6 +17,7 @@ function createUpdates({ app, publish, log, prepareInstall = async () => {}, tes
     message: 'Проверяем новые версии автоматически.' };
   let busy = false, downloadedVersion = '', installStarted = false, interval, socket;
   let started = false, disposed = false, pendingPushCheck = false;
+  let cancelling = Promise.resolve();
   const send = (patch) => { state = { ...state, ...patch }; publish({ update: { ...state } }); };
   if (!app.isPackaged || testing || platform !== 'win32' || portable) {
     send({ phase: 'disabled', message: portable
@@ -26,7 +27,7 @@ function createUpdates({ app, publish, log, prepareInstall = async () => {}, tes
   }
   const updater = getUpdater();
   updater.autoDownload = false;
-  updater.autoInstallOnAppQuit = true;
+  updater.autoInstallOnAppQuit = false;
   updater.autoRunAppAfterInstall = false;
   updater.disableWebInstaller = true;
   updater.disableDifferentialDownload = false;
@@ -37,15 +38,16 @@ function createUpdates({ app, publish, log, prepareInstall = async () => {}, tes
     'checking-for-update': () => send({ phase: 'checking', message: 'Проверяем обновления…', progress: 0 }),
     'update-available': (info) => send({ phase: 'available', version: info.version, message: `Доступна версия ${info.version}.` }),
     'update-not-available': () => send({ phase: 'current', version: '', progress: 0, retryAction: '', message: 'Обновлено. Установлена последняя версия.' }),
-    'download-progress': (info) => send({ phase: 'downloading', progress: Math.min(100, Math.max(0, Math.round(info.percent))), message: 'Скачиваем обновление…' }),
+    'download-progress': (info) => send({ phase: 'downloading', progress: Math.min(100, Math.max(0, Math.round(info.percent))), message: 'Скачиваем обновление в фоне. Можно продолжать пользоваться Майко.' }),
     'update-downloaded': (info) => {
       downloadedVersion = info.version;
-      if (!installStarted) send({ phase: 'downloaded', version: info.version, progress: 100, message: `Версия ${info.version} скачана. Готовим установку…` });
+      if (!installStarted) send({ phase: 'downloaded', version: info.version, progress: 100, message: `Версия ${info.version} скачана. Готовим автоматическую установку…` });
     },
     'error': (error) => {
       log(`Update error: ${error.stack || error.message}`);
       const retryAction = downloadedVersion ? 'apply' : state.phase === 'downloading' ? 'download' : 'check';
       installStarted = false;
+      cancelling = Promise.resolve().then(cancelInstall).catch(error => log(`Update window cleanup: ${error.message}`));
       send({ phase: 'error', retryAction, message: downloadedVersion
         ? 'Не удалось запустить установку. Повторите попытку — обновление уже скачано.'
         : 'Не удалось обновить приложение. Проверьте соединение и повторите.' });
@@ -54,7 +56,7 @@ function createUpdates({ app, publish, log, prepareInstall = async () => {}, tes
   for (const [event, handler] of Object.entries(handlers)) updater.on(event, handler);
   send({});
 
-  async function action(command) {
+  async function action(command, downloadAvailable = false) {
     if (!['check', 'download', 'apply'].includes(command)) throw new Error('Неизвестная команда обновления');
     if (disposed || busy || installStarted) return;
     if (command === 'check' && downloadedVersion) return;
@@ -64,11 +66,12 @@ function createUpdates({ app, publish, log, prepareInstall = async () => {}, tes
     if (command === 'apply' && !downloadedVersion) throw new Error('Обновление ещё не скачано.');
     busy = true;
     try {
-      if (command === 'check') await updater.checkForUpdates();
-      else if (command === 'download') {
-        send({ phase: 'downloading', progress: 0, message: 'Скачиваем обновление…' });
-        await updater.downloadUpdate();
-        if (state.phase === 'downloaded') await installDownloaded();
+      if (command === 'check') {
+        await updater.checkForUpdates();
+        // A verified download proceeds to installation without another click.
+        if (downloadAvailable && !disposed && state.phase === 'available') await download();
+      } else if (command === 'download') {
+        await download();
       } else {
         await installDownloaded();
       }
@@ -83,9 +86,16 @@ function createUpdates({ app, publish, log, prepareInstall = async () => {}, tes
       }
     }
   }
+  async function download() {
+    send({ phase: 'downloading', progress: 0, retryAction: '', message: 'Скачиваем обновление в фоне. Можно продолжать пользоваться Майко.' });
+    await updater.downloadUpdate();
+    if (!disposed && state.phase === 'downloaded') await installDownloaded();
+  }
   async function installDownloaded() {
+    await cancelling;
     send({ phase: 'installing', retryAction: '', message: `Устанавливаем версию ${downloadedVersion}. Майко откроется автоматически после установки.` });
-    await prepareInstall();
+    await prepareInstall(downloadedVersion);
+    if (disposed) { await cancelInstall(); return; }
     installStarted = true;
     // NSIS owns the next launch: --force-run starts the new EXE only after
     // installation finishes. app.relaunch() could reopen the old EXE too early.
@@ -96,7 +106,7 @@ function createUpdates({ app, publish, log, prepareInstall = async () => {}, tes
     start() {
       if (started || disposed) return;
       started = true;
-      void action('check');
+      void action('check', true);
       interval = setInterval(() => { void action('check'); }, CHECK_INTERVAL);
       interval.unref?.();
       if (notificationUrl) {

@@ -98,5 +98,14 @@ test('downloads never overwrite names; reveal only completed files and restore s
     controller.dispose(); controller = createDownloads(options);
     assert.equal(state.entries.length, 15);
     assert.equal(state.entries.at(-1).name, 'Файл 2.pdf');
+    const bundled = path.join(temporary, 'bundled.zip');
+    fs.writeFileSync(bundled, Buffer.from('PK complete VST3 bundle'));
+    const saved = await controller.saveLocal(bundled, 'Maiko-DAW-Bridge.vst3.zip');
+    assert.deepEqual(saved, { name: 'Maiko-DAW-Bridge.vst3.zip', bytes: 23 });
+    assert.deepEqual(fs.readFileSync(state.entries[0].path), fs.readFileSync(bundled));
+    const again = await controller.saveLocal(bundled, 'Maiko-DAW-Bridge.vst3.zip');
+    assert.equal(again.name, 'Maiko-DAW-Bridge.vst3 (1).zip');
+    assert.equal(state.entries[0].phase, 'completed');
+    await assert.rejects(controller.saveLocal(path.join(temporary, 'missing.zip'), 'missing.zip'), /Не удалось сохранить/);
   } finally { controller.dispose(); fs.rmSync(temporary, { recursive: true, force: true }); }
 });

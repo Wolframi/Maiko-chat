@@ -184,6 +184,11 @@ async function main() {
     await app.evaluate(({ BrowserWindow }) => { const win = BrowserWindow.getAllWindows()[0]; win.show(); win.focus(); });
     await folderButton.hover();
     await panel.locator('#files').hover();
+    // Native child views can receive a synthetic leave while Playwright waits
+    // for a compositor frame. Hover behavior was checked above; keep this
+    // surface explicitly open only while recording the verification image.
+    await panel.evaluate(() => window.maikoDownloads.hover(true));
+    await shell.waitForFunction(() => document.getElementById('downloads-action').getAttribute('aria-expanded') === 'true');
     await panel.screenshot({ path: path.join(output, 'recent-downloads.png') });
     await panel.keyboard.press('Escape');
     await app.close(); app = undefined;

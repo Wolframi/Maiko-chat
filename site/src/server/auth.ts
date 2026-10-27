@@ -13,6 +13,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import type { SavedRingtone } from "../lib/ringtoneSettings";
+import { allowRegistration } from "./requestSecurity";
+import { nicknameValue, validateNickname } from "../lib/username";
+import { initializeRegistrationInvites, registrationInviter, registrationPolicy } from "./registrationInvites";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const MIN_PASSWORD = 8;
@@ -27,6 +31,8 @@ export type StoredUser = {
   avatarUrl?: string;
   bio?: string;
   lastSeenAt?: number;
+  invitedBy?: string;
+  ringtoneSettings?: { ringtone: SavedRingtone | null; custom: SavedRingtone | null };
 };
 
 export type AuthAccount = {
@@ -137,6 +143,8 @@ function saveUsers() {
     avatarUrl: user.avatarUrl,
     bio: user.bio,
     lastSeenAt: user.lastSeenAt,
+    ringtoneSettings: user.ringtoneSettings,
+    invitedBy: user.invitedBy,
   }));
   if (safe.length === 0 && existsSync(USERS_FILE)) {
     console.error("[auth] refuse to replace users.json with an empty list");
@@ -220,6 +228,7 @@ function loadSessions() {
 {
   const migrated = loadUsers();
   loadSessions();
+  initializeRegistrationInvites([...usersByName.values()]);
   if (migrated) persistAuth();
 }
 
@@ -339,7 +348,9 @@ function isPlausibleAvatarUrl(url: string) {
   );
 }
 
-export function registerUser(usernameRaw: string, passwordRaw: string): AuthResult {
+export function registerUser(usernameRaw: string, passwordRaw: string, clientIp?: string, invitationCode?: unknown): AuthResult {
+  const invalid = authCredentialsError(usernameRaw, passwordRaw);
+  if (invalid) return { ok: false, error: invalid };
   const username = normalizeUsername(usernameRaw);
   const password = String(passwordRaw || "");
   const usernameError = validateUsername(username);
@@ -349,6 +360,14 @@ export function registerUser(usernameRaw: string, passwordRaw: string): AuthResu
   if (usersByName.has(username.toLowerCase())) {
     return { ok: false, error: "Такой логин уже занят" };
   }
+  const inviter = registrationInviter(invitationCode, [...usersByName.values()]);
+  if (registrationPolicy().required && !inviter) {
+    return { ok: false, error: "Код приглашения недействителен или устарел. Попросите новый код у участника Майко" };
+  }
+  // Long windows count account creation, not malformed requests or occupied names.
+  if (clientIp && !allowRegistration(clientIp)) {
+    return { ok: false, error: "Лимит новых аккаунтов: 3 в минуту и 10 в час с одного адреса. Попробуйте позже" };
+  }
 
   const user: StoredUser = {
     id: randomUUID(),
@@ -357,6 +376,7 @@ export function registerUser(usernameRaw: string, passwordRaw: string): AuthResu
     passwordHash: hashPassword(password),
     createdAt: Date.now(),
     bio: "",
+    invitedBy: inviter?.id,
   };
   usersByName.set(username.toLowerCase(), user);
   persistAuth();
@@ -430,6 +450,7 @@ export function ensureDemoUsers() {
 }
 
 export function loginUser(usernameRaw: string, passwordRaw: string): AuthResult {
+  if (authCredentialsError(usernameRaw, passwordRaw)) return { ok: false, error: "Неверный логин или пароль" };
   const username = normalizeUsername(usernameRaw);
   const password = String(passwordRaw || "");
   const user = usersByName.get(username.toLowerCase());
@@ -441,6 +462,12 @@ export function loginUser(usernameRaw: string, passwordRaw: string): AuthResult 
     return { ok: false, error: "Неверный логин или пароль" };
   }
   return { ok: true, account: issueSession(user) };
+}
+
+/** Cheap validation before consuming attempt quotas or running scrypt. */
+export function authCredentialsError(username: unknown, password: unknown): string | null {
+  if (typeof username !== "string" || typeof password !== "string" || username.length > 128) return "Введите логин и пароль";
+  return validateUsername(normalizeUsername(username)) || validatePassword(password);
 }
 
 export function restoreSession(token?: string): AuthResult {
@@ -460,6 +487,7 @@ export function restoreSession(token?: string): AuthResult {
 export function updateProfile(
   userId: string,
   patch: {
+    username?: string;
     displayName?: string;
     bio?: string;
     avatarUrl?: string | null;
@@ -476,35 +504,61 @@ export function updateProfile(
     }
   }
 
+  // Validate a copy first: a rejected patch must not change the live profile.
+  const next = { ...user };
+
+  if (patch.username !== undefined) {
+    if (typeof patch.username !== "string") {
+      return { ok: false, error: "Некорректный никнейм" };
+    }
+    const username = nicknameValue(patch.username);
+    const usernameError = validateNickname(username);
+    if (usernameError) return { ok: false, error: usernameError };
+    const existing = usersByName.get(username.toLowerCase());
+    if (existing && existing.id !== userId) {
+      return { ok: false, error: "Этот никнейм уже занят" };
+    }
+    next.username = username;
+  }
+
   if (patch.displayName !== undefined) {
-    const displayName = normalizeDisplayName(patch.displayName, user.username);
+    const displayName = normalizeDisplayName(patch.displayName, next.username);
     if (displayName.length < 2) {
       return { ok: false, error: "Имя от 2 символов" };
     }
-    user.displayName = displayName;
+    next.displayName = displayName;
   }
 
   if (patch.bio !== undefined) {
-    user.bio = normalizeBio(patch.bio);
+    next.bio = normalizeBio(patch.bio);
   }
 
   if (patch.avatarUrl !== undefined) {
     if (patch.avatarUrl === null || patch.avatarUrl === "") {
-      delete user.avatarUrl;
+      delete next.avatarUrl;
     } else if (
       typeof patch.avatarUrl === "string" &&
       isPlausibleAvatarUrl(patch.avatarUrl)
     ) {
-      user.avatarUrl = patch.avatarUrl;
+      next.avatarUrl = patch.avatarUrl;
     } else {
       return { ok: false, error: "Некорректный аватар" };
     }
   }
 
-  usersByName.set(user.username.toLowerCase(), user);
-  persistAuth();
+  const previousKey = user.username.toLowerCase();
+  const nextKey = next.username.toLowerCase();
+  usersByName.delete(previousKey);
+  usersByName.set(nextKey, next);
+  try {
+    saveUsers();
+  } catch (error) {
+    usersByName.delete(nextKey);
+    usersByName.set(previousKey, user);
+    throw error;
+  }
 
-  return { ok: true, account: toAccount(user, token) };
+  return { ok: true, account: toAccount(next, token) };
 }
 
 export function bindSocketAuth(socketId: string, token: string) {
@@ -534,6 +588,15 @@ export function logoutToken(token?: string) {
 
 export function getUserById(userId: string) {
   return findUserById(userId);
+}
+
+export function saveUserRingtoneSettings(userId: string, settings: NonNullable<StoredUser["ringtoneSettings"]>) {
+  const user = findUserById(userId);
+  if (!user) throw new Error("Пользователь не найден");
+  const next = { ...user, ringtoneSettings: settings };
+  usersByName.set(user.username.toLowerCase(), next);
+  try { saveUsers(); }
+  catch (error) { usersByName.set(user.username.toLowerCase(), user); throw error; }
 }
 
 export function listUsers() {

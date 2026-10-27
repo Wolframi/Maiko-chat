@@ -9,6 +9,21 @@ export function isLocalMediaUrl(url?: string | null) {
   return String(url || "").startsWith("blob:");
 }
 
+/** Rotating upload credentials identify the same media; other query options matter. */
+export function mediaResourceKey(url: string) {
+  if (!url.startsWith("/uploads/")) return url;
+  const parsed = new URL(url, "http://media.local");
+  parsed.searchParams.delete("exp");
+  parsed.searchParams.delete("sig");
+  return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+}
+
+export function retryMediaSrc(url: string, attempt: number) {
+  if (!attempt || /^(blob:|data:)/i.test(url)) return url;
+  const [base, hash] = url.split("#", 2);
+  return `${base}${base.includes("?") ? "&" : "?"}retry=${attempt}${hash ? `#${hash}` : ""}`;
+}
+
 export function mediaSrc(url: string) {
   if (isLocalMediaUrl(url)) return url;
   const bare = bareMediaUrl(url);
@@ -64,6 +79,11 @@ export function thumbSrc(url: string, width = 430) {
   const encoded = signedMediaSrc(url) || mediaSrc(url);
   if (!encoded) return "";
   return `${encoded}${encoded.includes("?") ? "&" : "?"}w=${width}`;
+}
+
+/** A static video cover; blob and external videos keep browser previews. */
+export function videoPosterSrc(url: string, width = 430) {
+  return url.startsWith("/uploads/") ? `${thumbSrc(url, width)}&poster=1` : "";
 }
 
 /** Drop `w=` so a failed thumbnail can fall back to the original file. */

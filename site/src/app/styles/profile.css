@@ -149,11 +149,16 @@
 }
 
 .profile__ringtone--tab {
+  display: flex;
+  flex-direction: column;
   gap: 10px;
   /* Keep profile card height stable across pages */
-  grid-template-rows: auto auto auto auto minmax(0, 1fr);
   height: min(58dvh, 460px);
   min-height: 320px;
+}
+
+.profile__ringtone--tab > :not(.profile__ringtone-box) {
+  flex-shrink: 0;
 }
 
 .profile__ringtone-now {
@@ -215,14 +220,19 @@
 }
 
 .profile__ringtone-box {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
+  flex: 1;
   min-height: 0;
-  height: 100%;
+  height: auto;
   border: 1px solid var(--line);
   border-radius: 12px;
   overflow: hidden;
   background: var(--surface);
+}
+
+.profile__ringtone-box > .profile__ringtone-row {
+  flex-shrink: 0;
 }
 
 .profile__ringtone-row--pinned {
@@ -231,7 +241,8 @@
 }
 
 .profile__ringtone-list--tab {
-  height: 100%;
+  flex: 1;
+  height: auto;
   max-height: none;
   gap: 0;
   border: 0;

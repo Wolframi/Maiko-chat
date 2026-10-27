@@ -27,7 +27,7 @@ function audioPolicy(source, owners, ownProcess = process.pid) {
   if (!Number.isSafeInteger(owner) || owner <= 0 || owner === ownProcess) return null;
   // WASAPI process loopback includes only the owning app and its children.
   // Never fall back to global loopback when an app cannot be resolved.
-  return { kind: 'application', device: { id: `applicationLoopback:${owner}`, name: 'Звук выбранного приложения' } };
+  return { kind: 'application', processId: owner, device: { id: `applicationLoopback:${owner}`, name: 'Звук выбранного приложения' } };
 }
 
 module.exports = { windowProcesses, audioPolicy };

@@ -17,14 +17,17 @@ function readImageSize(file: File): Promise<MediaPixelSize | null> {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
-    img.onload = () => {
+    const finish = (size: MediaPixelSize | null) => {
+      window.clearTimeout(timer);
+      img.onload = null;
+      img.onerror = null;
       URL.revokeObjectURL(url);
-      resolve(finishSize(img.naturalWidth, img.naturalHeight));
+      img.removeAttribute("src");
+      resolve(size);
     };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      resolve(null);
-    };
+    const timer = window.setTimeout(() => finish(null), 5000);
+    img.onload = () => finish(finishSize(img.naturalWidth, img.naturalHeight));
+    img.onerror = () => finish(null);
     img.src = url;
   });
 }
@@ -36,15 +39,18 @@ function readVideoSize(file: File): Promise<MediaPixelSize | null> {
     video.muted = true;
     video.playsInline = true;
     video.preload = "metadata";
-    video.onloadedmetadata = () => {
-      const size = finishSize(video.videoWidth, video.videoHeight);
+    const finish = (size: MediaPixelSize | null) => {
+      window.clearTimeout(timer);
+      video.onloadedmetadata = null;
+      video.onerror = null;
       URL.revokeObjectURL(url);
+      video.removeAttribute("src");
+      video.load();
       resolve(size);
     };
-    video.onerror = () => {
-      URL.revokeObjectURL(url);
-      resolve(null);
-    };
+    const timer = window.setTimeout(() => finish(null), 5000);
+    video.onloadedmetadata = () => finish(finishSize(video.videoWidth, video.videoHeight));
+    video.onerror = () => finish(null);
     video.src = url;
   });
 }

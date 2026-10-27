@@ -2,13 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  AudioPresets,
   ConnectionQuality,
   LocalAudioTrack,
   LocalVideoTrack,
   Room,
   RoomEvent,
-  ScreenSharePresets,
   Track,
   VideoPresets,
   VideoQuality,
@@ -31,6 +29,8 @@ import {
 import {
   applyAudioOutput,
   getMicDeviceId,
+  getCameraDeviceId,
+  setCameraDeviceId,
   getSpeakerDeviceId,
   resolveMicDeviceId,
   setMicDeviceId,
@@ -39,10 +39,16 @@ import {
   type VoiceSettingsChange,
 } from "@/lib/mediaDevices";
 import { registerScreenAudio, unregisterScreenAudio } from "@/lib/screenAudio";
+import { withScreenAudioTracks } from "@/lib/screenAudioSignal";
 import {
   CAMERA_SEND_PARAMS,
+  AUDIO_SEND_PARAMS,
+  SCREEN_AUDIO_SEND_PARAMS,
   SCREEN_SEND_PARAMS,
   captureScreenShare,
+  isScreenCaptureCancelled,
+  readMediaRtt,
+  openCameraStream,
   phoneCanFlipCamera,
   prepareScreenAudioTrack,
   prepareScreenTrack,
@@ -90,7 +96,7 @@ type LiveKitTokenResponse = {
   error?: string;
 };
 
-function cameraCapture(facing: CameraFacing, tier: "high" | "mid" = "high") {
+function cameraCapture(facing: CameraFacing, tier: "high" | "mid" = "high", deviceId = "") {
   const resolution =
     tier === "high"
       ? VideoPresets.h1080.resolution
@@ -98,7 +104,7 @@ function cameraCapture(facing: CameraFacing, tier: "high" | "mid" = "high") {
   return {
     resolution,
     frameRate: tier === "high" ? 30 : 24,
-    facingMode: facing,
+    ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: facing }),
   };
 }
 
@@ -111,15 +117,17 @@ const SCREEN_VIDEO_PUBLISH = {
   videoEncoding: {
     maxBitrate: SCREEN_SEND_PARAMS.maxBitrate,
     maxFramerate: SCREEN_SEND_PARAMS.maxFramerate,
+    priority: "medium" as const,
   },
   screenShareEncoding: {
     maxBitrate: SCREEN_SEND_PARAMS.maxBitrate,
     maxFramerate: SCREEN_SEND_PARAMS.maxFramerate,
+    priority: "medium" as const,
   },
 };
 
 const ROOM_PUBLISH_DEFAULTS = {
-  audioPreset: { maxBitrate: 64_000 },
+  audioPreset: { ...AUDIO_SEND_PARAMS, priority: "high" as const },
   // Mute must not stop the mic capture. Re-opening the device renegotiates
   // the peer connection and blinks camera and screen share.
   stopMicTrackOnMute: false,
@@ -131,11 +139,12 @@ const ROOM_PUBLISH_DEFAULTS = {
   videoEncoding: {
     maxBitrate: CAMERA_SEND_PARAMS.maxBitrate,
     maxFramerate: CAMERA_SEND_PARAMS.maxFramerate,
+    priority: "medium" as const,
   },
   videoSimulcastLayers: [VideoPresets.h360, VideoPresets.h720],
   screenShareEncoding: {
-    maxBitrate: ScreenSharePresets.h1080fps30.encoding.maxBitrate,
-    maxFramerate: ScreenSharePresets.h1080fps30.encoding.maxFramerate,
+    maxBitrate: SCREEN_SEND_PARAMS.maxBitrate,
+    maxFramerate: SCREEN_SEND_PARAMS.maxFramerate,
   },
   screenShareSimulcastLayers: [],
 };
@@ -175,7 +184,7 @@ async function enableLiveKitScreenShare(
   try {
     await room.localParticipant.publishTrack(audioTrack, {
       source: Track.Source.ScreenShareAudio,
-      audioPreset: AudioPresets.musicHighQualityStereo,
+      audioPreset: { ...SCREEN_AUDIO_SEND_PARAMS, priority: "high" },
       dtx: false,
       forceStereo: true,
       red: false,
@@ -185,12 +194,12 @@ async function enableLiveKitScreenShare(
   }
 }
 
-async function enableLiveKitCamera(room: Room, facing: CameraFacing) {
+async function enableLiveKitCamera(room: Room, facing: CameraFacing, deviceId = "") {
   const attempts = [
-    cameraCapture(facing, "high"),
-    cameraCapture(facing, "mid"),
-    { facingMode: facing },
-    { frameRate: 30 },
+    cameraCapture(facing, "high", deviceId),
+    cameraCapture(facing, "mid", deviceId),
+    deviceId ? { deviceId: { exact: deviceId } } : { facingMode: facing },
+    deviceId ? { deviceId: { exact: deviceId }, frameRate: 30 } : { frameRate: 30 },
   ];
   let lastError: unknown;
   for (const capture of attempts) {
@@ -216,6 +225,7 @@ function liveKitAudioCapture(micId = "") {
     noiseSuppression: Boolean(constraints.noiseSuppression),
     autoGainControl: true as const,
     channelCount: 1,
+    sampleRate: 48000,
     // ideal — если микрофон отключили, браузер просто возьмёт дефолтный,
     // а не упадёт с «Requested device not found».
     ...(micId ? { deviceId: { ideal: micId } } : {}),
@@ -244,6 +254,7 @@ export function useVoiceChannelLiveKit({
   const [minimized, setMinimized] = useState(false);
   const [joining, setJoining] = useState(false);
   const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality>(ConnectionQuality.Unknown);
+  const [rttMs, setRttMs] = useState<number | null>(null);
   const [linkPhase, setLinkPhase] = useState<
     "connecting" | "reconnecting" | "switching" | "failed" | null
   >(null);
@@ -262,6 +273,8 @@ export function useVoiceChannelLiveKit({
   const deafenedRef = useRef(false);
   const cameraOffRef = useRef(true);
   const cameraFacingRef = useRef<CameraFacing>("user");
+  const cameraDeviceIdRef = useRef(getCameraDeviceId());
+  const [cameraDeviceId, updateCameraDeviceId] = useState(getCameraDeviceId);
   const sharingScreenRef = useRef(false);
   const [canFlipCamera, setCanFlipCamera] = useState(false);
   const mediaBusyRef = useRef(false);
@@ -400,9 +413,11 @@ export function useVoiceChannelLiveKit({
     );
     setLocalStream((previous) => {
       const before = previous?.getTracks() ?? [];
-      return previous && before.length === tracks.length && tracks.every((track) => before.includes(track))
+      const stream = previous && before.length === tracks.length && tracks.every((track) => before.includes(track))
         ? previous
         : new MediaStream(tracks);
+      const screenAudio = participant.getTrackPublication(Track.Source.ScreenShareAudio)?.track?.mediaStreamTrack;
+      return withScreenAudioTracks(stream, screenAudio ? [screenAudio] : []);
     });
   }, []);
 
@@ -422,6 +437,8 @@ export function useVoiceChannelLiveKit({
         next[userId] = before.length === videos.length && videos.every((track) => before.includes(track))
           ? previous[userId]
           : new MediaStream(videos);
+        const audio = remoteAudioTracksRef.current.get(`${userId}::screen`)?.mediaStreamTrack;
+        withScreenAudioTracks(next[userId], audio ? [audio] : []);
       }
     }
     return Object.keys(previous).length === Object.keys(next).length &&
@@ -440,6 +457,7 @@ export function useVoiceChannelLiveKit({
       qualitySettleRef.current = null;
     }
     setConnectionQuality(ConnectionQuality.Unknown);
+    setRttMs(null);
     if (room) {
       room.removeAllListeners();
       void room.disconnect(true).catch(() => undefined);
@@ -550,6 +568,7 @@ export function useVoiceChannelLiveKit({
     ) => {
       if (publication.source === Track.Source.ScreenShareAudio) {
         attachRemoteAudio(`${participant.identity}::screen`, track);
+        syncRemoteStreams();
         return;
       }
       if (
@@ -591,6 +610,7 @@ export function useVoiceChannelLiveKit({
         const attached = remoteAudioTracksRef.current.get(key);
         if (!attached || attached.sid === track.sid) {
           detachRemoteAudio(key);
+          syncRemoteStreams();
         }
         return;
       }
@@ -696,6 +716,7 @@ export function useVoiceChannelLiveKit({
       const reconnecting = () => {
         setLinkPhase("reconnecting");
         setConnectionQuality(ConnectionQuality.Unknown);
+        setRttMs(null);
       };
       room.on(RoomEvent.Reconnecting, reconnecting);
       room.on(RoomEvent.SignalReconnecting, reconnecting);
@@ -1091,7 +1112,7 @@ export function useVoiceChannelLiveKit({
           }
         }
         if (!keepCameraOff && !reusedCamera) {
-          await enableLiveKitCamera(room, cameraFacingRef.current)
+          await enableLiveKitCamera(room, cameraFacingRef.current, cameraDeviceIdRef.current)
             .then(async () => setCanFlipCamera(await phoneCanFlipCamera()))
             .catch(() => undefined);
         }
@@ -1112,7 +1133,7 @@ export function useVoiceChannelLiveKit({
               try {
                 await room.localParticipant.publishTrack(held.screenAudio, {
                   source: Track.Source.ScreenShareAudio,
-                  audioPreset: AudioPresets.musicHighQualityStereo,
+                  audioPreset: { ...SCREEN_AUDIO_SEND_PARAMS, priority: "high" },
                   dtx: false,
                   forceStereo: true,
                   red: false,
@@ -1357,6 +1378,10 @@ export function useVoiceChannelLiveKit({
 
   const applyVoiceSettings = useCallback(
     async (change: VoiceSettingsChange) => {
+      if (change.camera && cameraOffRef.current) {
+        cameraDeviceIdRef.current = getCameraDeviceId();
+        updateCameraDeviceId(cameraDeviceIdRef.current);
+      }
       const room = roomRef.current;
       setNoiseFilterEnabled(getNeuralNoiseEnabled());
       if (change.speaker) {
@@ -1402,7 +1427,7 @@ export function useVoiceChannelLiveKit({
     try {
       const turningOn = cameraOffRef.current;
       if (turningOn) {
-        await enableLiveKitCamera(room, cameraFacingRef.current);
+        await enableLiveKitCamera(room, cameraFacingRef.current, cameraDeviceIdRef.current);
         setCanFlipCamera(await phoneCanFlipCamera());
       } else {
         await room.localParticipant.setCameraEnabled(false);
@@ -1424,7 +1449,7 @@ export function useVoiceChannelLiveKit({
     }
   }, [emitMediaState, syncLocalStream]);
 
-  const flipCamera = useCallback(async () => {
+  const replaceCamera = useCallback(async (deviceId: string, facing: CameraFacing) => {
     const room = roomRef.current;
     if (!room || cameraOffRef.current || mediaBusyRef.current) return;
     const publication = room.localParticipant.getTrackPublication(
@@ -1432,21 +1457,27 @@ export function useVoiceChannelLiveKit({
     );
     const track = publication?.track;
     if (!(track instanceof LocalVideoTrack)) return;
-    const next: CameraFacing =
-      cameraFacingRef.current === "user" ? "environment" : "user";
+    let nextTrack: MediaStreamTrack | undefined;
     mediaBusyRef.current = true;
     setMediaBusy(true);
     try {
-      try {
-        await track.restartTrack(cameraCapture(next, "high"));
-      } catch {
-        await track.restartTrack(cameraCapture(next, "mid"));
+      const stream = await openCameraStream(facing, deviceId);
+      nextTrack = stream.getVideoTracks()[0];
+      if (!nextTrack) throw new Error("no-video");
+      if (roomRef.current !== room || cameraOffRef.current) {
+        nextTrack.stop();
+        return;
       }
+      // Acquire before replacing: permission/device errors must leave the current camera running.
+      await track.replaceTrack(nextTrack, { userProvidedTrack: false });
       if (roomRef.current !== room) return;
-      cameraFacingRef.current = next;
-      setCanFlipCamera(true);
+      cameraFacingRef.current = facing;
+      cameraDeviceIdRef.current = deviceId;
+      updateCameraDeviceId(deviceId);
+      setCameraDeviceId(deviceId);
       syncLocalStream(room);
     } catch {
+      if (nextTrack && track.mediaStreamTrack !== nextTrack) nextTrack.stop();
       if (roomRef.current !== room) return;
       setError("Не удалось переключить камеру");
     } finally {
@@ -1454,6 +1485,21 @@ export function useVoiceChannelLiveKit({
       setMediaBusy(false);
     }
   }, [syncLocalStream]);
+
+  const selectCamera = useCallback(async (deviceId: string) => {
+    if (mediaBusyRef.current) return;
+    if (cameraOffRef.current) {
+      cameraDeviceIdRef.current = deviceId;
+      updateCameraDeviceId(deviceId);
+      setCameraDeviceId(deviceId);
+      return;
+    }
+    await replaceCamera(deviceId, cameraFacingRef.current);
+  }, [replaceCamera]);
+
+  const flipCamera = useCallback(async () => {
+    await replaceCamera("", cameraFacingRef.current === "user" ? "environment" : "user");
+  }, [replaceCamera]);
 
   const stopScreenShare = useCallback(async () => {
     const room = roomRef.current;
@@ -1525,11 +1571,12 @@ export function useVoiceChannelLiveKit({
       }
       emitMediaState(cameraOffRef.current, true);
       syncLocalStream(room);
-    } catch {
+    } catch (error) {
       if (roomRef.current !== room) {
         void room.disconnect(true).catch(() => undefined);
         return;
       }
+      if (isScreenCaptureCancelled(error)) return;
       setError("Демонстрация экрана недоступна");
       sharingScreenRef.current = false;
       setSharingScreen(false);
@@ -1659,6 +1706,35 @@ export function useVoiceChannelLiveKit({
       socket.off("connect", onConnect);
     };
   }, [cleanupRoom, emitMediaState, managedPresence, resetState, selfId, socket]);
+
+  useEffect(() => {
+    if (!active) return;
+    let disposed = false;
+    let sampling = false;
+    const sample = async () => {
+      if (sampling) return;
+      const room = roomRef.current;
+      if (!room || room.state !== "connected") {
+        setRttMs(null);
+        return;
+      }
+      sampling = true;
+      try {
+        const track = room.localParticipant.getTrackPublication(Track.Source.Microphone)?.track;
+        const report = track instanceof LocalAudioTrack ? await track.getRTCStatsReport() : undefined;
+        if (!disposed && roomRef.current === room && room.state === "connected") {
+          setRttMs(report ? readMediaRtt(report) : null);
+        }
+      } catch {
+        if (!disposed && roomRef.current === room) setRttMs(null);
+      } finally {
+        sampling = false;
+      }
+    };
+    void sample();
+    const timer = window.setInterval(() => { void sample(); }, 2000);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [active]);
 
   useEffect(() => {
     if (!active) return;
@@ -1835,6 +1911,7 @@ export function useVoiceChannelLiveKit({
     joining,
     linkPhase,
     connectionQuality,
+    rttMs,
     error,
     join,
     leave,
@@ -1847,6 +1924,8 @@ export function useVoiceChannelLiveKit({
     toggleNoiseFilter,
     toggleCamera,
     flipCamera,
+    selectCamera,
+    cameraDeviceId,
     canFlipCamera,
     toggleScreenShare,
     setMinimized,

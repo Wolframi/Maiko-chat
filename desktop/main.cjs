@@ -7,7 +7,9 @@ const { RADIUS, MIN_WIDTH, MIN_HEIGHT, siteBounds, makeWindowRectangular } = req
 const { configureLocalAssets } = require('./local-assets.cjs');
 const { startLocalServer } = require('./local-server.cjs');
 const { configureCapture } = require('./screen-capture.cjs');
+const { createDawInstaller } = require('./daw-install.cjs');
 const { createUpdates } = require('./updates.cjs');
+const { createUpdateHandoff } = require('./update-handoff.cjs');
 const { createDownloads } = require('./downloads.cjs');
 const { configureDownloadsPanel } = require('./downloads-panel.cjs');
 
@@ -21,10 +23,15 @@ if (process.env.MAIKO_DESKTOP_USER_DATA) {
 const testing = process.env.MAIKO_DESKTOP_TEST === '1';
 const defaults = readJson(path.join(__dirname, 'config.json'));
 let win, site, localServer, shuttingDown = false;
-let updates, downloads, downloadsPanel;
+let updates, downloads, downloadsPanel, updateHandoff;
+let revealSite = () => {};
+let showLoadedSite = () => {};
+let startupIntroFinished = false, startupIntroFallback;
 let loadGeneration = 0;
 let layoutExpanded;
 let siteUpdateTimer;
+let siteUpdateRemaining = 0;
+let siteUpdateStartedAt;
 let state = { phase: 'loading', message: 'Запускаем Майко…', url: '', mode: process.argv.includes('--local') ? 'local' : 'remote', maximized: false };
 const uiUrl = pathToFileURL(path.join(__dirname, 'ui', 'index.html')).href;
 const siteLayoutCSS = fs.readFileSync(path.join(__dirname, 'ui/site-layout.css'), 'utf8') + '\n' +
@@ -39,7 +46,15 @@ function publish(patch = {}) {
   const next = { ...state, ...patch, maximized: !!win && !win.isDestroyed() && (win.isMaximized() || win.isFullScreen()) };
   if (Object.keys(next).every((key) => next[key] === state[key])) return;
   state = next;
+  if (state.phase === 'error') {
+    startupIntroFinished = true;
+    clearTimeout(startupIntroFallback);
+  }
   if (win && !win.isDestroyed()) win.webContents.send('desktop:state-changed', state);
+  if (win && !win.isDestroyed() && state.phase === 'error' && updateHandoff?.incoming) {
+    void updateHandoff.finish(win.webContents).then(() => { publish({ startupCovered: false }); updates?.start(); })
+      .catch(error => log(`Update handoff: ${error.message}`));
+  }
   downloadsPanel?.publish(state.downloads);
   if (patch.downloads && site && !site.webContents.isDestroyed() && trusted(site.webContents.getURL())) {
     site.webContents.send('desktop:site-downloads-changed', downloads?.siteProgress() || []);
@@ -55,13 +70,13 @@ function layout() {
   }
   if (site) {
     const [width, height] = win.getContentSize();
-    sizeSite(width, height, expanded);
+    sizeSite(width, height);
   }
   publish();
 }
-function sizeSite(width, height, expanded) {
+function sizeSite(width, height) {
   if (!site) return;
-  const next = siteBounds(width, height, expanded);
+  const next = siteBounds(width, height);
   const current = site.getBounds();
   if (Object.keys(next).some((key) => next[key] !== current[key])) site.setBounds(next);
 }
@@ -71,6 +86,12 @@ function toggleMaximize() {
   else win.maximize();
 }
 function trusted(url) { return state.url && isSameOrigin(url, state.url); }
+function finishStartupIntro() {
+  if (startupIntroFinished) return;
+  startupIntroFinished = true;
+  clearTimeout(startupIntroFallback);
+  showLoadedSite();
+}
 function requireShell(event) {
   if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame || event.senderFrame.url !== uiUrl) {
     throw new Error('Недоступно для этой страницы');
@@ -89,8 +110,31 @@ function refreshInterface() {
 function siteUpdateState(phase) {
   if (phase === 'ready' && !['loading', 'error'].includes(state.siteUpdatePhase)) return;
   clearTimeout(siteUpdateTimer);
+  siteUpdateTimer = undefined;
+  siteUpdateStartedAt = undefined;
+  siteUpdateRemaining = phase === 'ready' ? 6000 : 0;
   publish({ siteUpdatePhase: phase });
-  if (phase === 'ready') siteUpdateTimer = setTimeout(() => publish({ siteUpdatePhase: 'idle' }), 6000);
+  resumeSiteUpdateTimer();
+}
+function pauseSiteUpdateTimer() {
+  if (siteUpdateTimer === undefined) return;
+  clearTimeout(siteUpdateTimer);
+  siteUpdateTimer = undefined;
+  siteUpdateRemaining = Math.max(0, siteUpdateRemaining - (performance.now() - siteUpdateStartedAt));
+  siteUpdateStartedAt = undefined;
+}
+function resumeSiteUpdateTimer() {
+  // Count only the time the user can see the dock. Updates still finish in
+  // the background, and repeated ready reports keep the existing countdown.
+  if (state.siteUpdatePhase !== 'ready' || siteUpdateTimer !== undefined ||
+      !win || win.isDestroyed() || !win.isVisible() || win.isMinimized()) return;
+  siteUpdateStartedAt = performance.now();
+  siteUpdateTimer = setTimeout(() => {
+    siteUpdateTimer = undefined;
+    siteUpdateStartedAt = undefined;
+    siteUpdateRemaining = 0;
+    publish({ siteUpdatePhase: 'idle' });
+  }, siteUpdateRemaining);
 }
 
 async function siteEntryUrl(target) {
@@ -133,14 +177,28 @@ function createSite() {
     if (!trusted(event.url)) { event.preventDefault(); void openExternal(event.url); }
   });
   contents.on('will-attach-webview', (event) => event.preventDefault());
+  let helpersReady = false, interfaceReady = false, waitsForInterface = false;
   contents.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
-    if (isMainFrame && !inPlace) publish({ phase: 'loading', message: 'Подключаемся…' });
+    if (isMainFrame && !inPlace) {
+      helpersReady = false; interfaceReady = false;
+      publish({ phase: 'loading', message: 'Подключаемся…' });
+    }
   });
   const showSite = () => {
-    if (!trusted(contents.getURL())) return;
+    if (contents.isDestroyed() || state.phase === 'error' || !startupIntroFinished || !helpersReady || (waitsForInterface && !interfaceReady) || !trusted(contents.getURL())) return;
     publish({ phase: 'ready', message: state.mode === 'local' ? 'Локальный сервер' : 'Подключено' });
     view.setVisible(true);
     contents.focus();
+    if (updateHandoff?.incoming) {
+      void updateHandoff.finish().then(() => { publish({ startupCovered: false }); updates?.start(); })
+        .catch(error => log(`Update handoff: ${error.message}`));
+    }
+  };
+  showLoadedSite = showSite;
+  revealSite = () => {
+    if (interfaceReady) return;
+    interfaceReady = true;
+    if (waitsForInterface) showSite();
   };
   contents.on('dom-ready', () => {
     if (!trusted(contents.getURL())) return;
@@ -160,7 +218,7 @@ function createSite() {
                 childDocument.head.append(style);
                 ((document, window, globalThis, location, matchMedia, requestAnimationFrame, maikoDownloadProgress) => {
                   ${compactMembersJS}
-                  ${downloadProgressJS.replace('const api = window.maikoDownloadProgress;', 'const api = maikoDownloadProgress;')}
+                  ${downloadProgressJS}
                 })(childDocument, frame.contentWindow, frame.contentWindow, frame.contentWindow.location,
                   frame.contentWindow.matchMedia.bind(frame.contentWindow), frame.contentWindow.requestAnimationFrame.bind(frame.contentWindow), window.maikoDownloadProgress);
               } catch { /* Do not grant anything to a cross-origin frame. */ }
@@ -176,14 +234,20 @@ function createSite() {
           }).observe(document.body, { childList: true, subtree: true });
         })();
       ` : compactMembersJS + '\n' + downloadProgressJS }]),
-    ]).then(showSite).catch((error) => {
+      contents.executeJavaScriptInIsolatedWorld(1001, [{ code: `Boolean(document.querySelector('meta[name="maiko-desktop-startup"][content="local-model"]'))` }]),
+    ]).then((results) => {
+      waitsForInterface = results[2];
+      helpersReady = true;
+      showSite();
+    }).catch((error) => {
       log(`Desktop layout helpers unavailable: ${error.message}`);
+      helpersReady = true;
       showSite();
     });
   });
   contents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
     if (code === -3) return;
-    if (!isMainFrame) { siteUpdateState('error'); return; }
+    if (!isMainFrame && state.phase === 'ready') { siteUpdateState('error'); return; }
     view.setVisible(false);
     publish({ phase: 'error', message: `Не удалось открыть Майко (${description}). Проверьте соединение и попробуйте снова.` });
   });
@@ -236,6 +300,10 @@ function saveWindow() {
   fs.writeFileSync(settingsPath(), JSON.stringify({ bounds: win.getNormalBounds(), maximized: win.isMaximized() }, null, 2));
 }
 function createWindow() {
+  startupIntroFinished = !!updateHandoff?.incoming;
+  clearTimeout(startupIntroFallback);
+  // A missing renderer or failed graphics initialization must not hold the UI.
+  if (!startupIntroFinished) startupIntroFallback = setTimeout(finishStartupIntro, 15_000);
   const saved = readJson(settingsPath());
   win = new BrowserWindow({
     ...visibleBounds(saved.bounds, screen.getAllDisplays()),
@@ -265,10 +333,17 @@ function createWindow() {
   win.on('resized', layout);
   win.on('resize', () => downloadsPanel?.hide());
   win.on('blur', () => downloadsPanel?.hide());
+  for (const event of ['minimize', 'hide']) win.on(event, pauseSiteUpdateTimer);
+  for (const event of ['restore', 'show']) win.on(event, resumeSiteUpdateTimer);
   for (const event of ['maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen']) win.on(event, layout);
   win.on('close', () => { saveWindow(); });
   win.on('closed', () => {
+    clearTimeout(startupIntroFallback);
+    showLoadedSite = () => {};
     clearTimeout(siteUpdateTimer);
+    siteUpdateTimer = undefined;
+    siteUpdateStartedAt = undefined;
+    siteUpdateRemaining = 0;
     loadGeneration++;
     downloadsPanel?.dispose();
     if (site && !site.webContents.isDestroyed()) site.webContents.close();
@@ -277,7 +352,7 @@ function createWindow() {
   win.once('ready-to-show', () => {
     if (saved.maximized) toggleMaximize();
     layout();
-    if (!testing) win.show();
+    if (!testing && !updateHandoff?.incoming) win.show();
   });
   const createdWindow = win;
   makeWindowRectangular(createdWindow);
@@ -298,6 +373,8 @@ else {
   app.whenReady().then(() => {
     app.setAppUserModelId('io.maiko.desktop');
     Menu.setApplicationMenu(null);
+    updateHandoff = createUpdateHandoff({ app, getWindow: () => win, getSite: () => site, log });
+    state = { ...state, startupCovered: updateHandoff.incoming };
     const siteSession = session.fromPartition('persist:maiko-site');
     configureLocalAssets({ siteSession, trusted, log });
     const allowed = new Set(['media', 'notifications', 'display-capture', 'fullscreen', 'clipboard-sanitized-write']);
@@ -306,7 +383,8 @@ else {
     siteSession.setPermissionRequestHandler((contents, permission, callback, details) => {
       callback(!!site && contents === site.webContents && trusted(details.requestingUrl || contents.getURL()) && allowed.has(permission));
     });
-    configureCapture({ siteSession, getWindow: () => win, getSite: () => site, trusted, testing, log });
+    const dawInstaller = createDawInstaller(testing && process.env.MAIKO_DAW_PLUGIN_DIR ? { directory: process.env.MAIKO_DAW_PLUGIN_DIR } : {});
+    configureCapture({ siteSession, getWindow: () => win, getSite: () => site, trusted, testing, dawInstaller, log });
     downloads = createDownloads({
       directory: path.join(testing && process.env.MAIKO_DESKTOP_DOWNLOADS_DIR || app.getPath('downloads'), 'Maiko'),
       historyPath: path.join(app.getPath('userData'), 'downloads.json'),
@@ -321,23 +399,30 @@ else {
         throw new Error('Недоступное состояние обновления');
       }
       siteUpdateState(phase);
+      if (phase === 'ready') revealSite();
     });
     ipcMain.handle('desktop:downloads', (event, command, id) => {
       requireShell(event);
       return downloads.action(command, id);
     });
-    updates = createUpdates({ app, publish, log, testing, notificationUrl: defaults.url, prepareInstall: async () => {
+    updates = createUpdates({ app, publish, log, testing, notificationUrl: defaults.url, cancelInstall: () => updateHandoff.cancel(), prepareInstall: async version => {
       saveWindow();
       siteSession.flushStorageData();
       await siteSession.cookies.flushStore();
-      // Stop an owned server before NSIS starts waiting for our processes.
-      if (localServer?.owned) {
-        await localServer.stop();
-        localServer = undefined;
-      }
+      await updateHandoff.prepare(version);
+      // before-quit stops an owned server after the helper is on screen.
     } });
     ipcMain.handle('desktop:update', (event, action) => { requireShell(event); return updates.action(action); });
     ipcMain.handle('desktop:state', (event) => { requireShell(event); return state; });
+    ipcMain.handle('desktop:startup-model', (event, intro) => {
+      requireShell(event);
+      if (!['hiphop', 'samba'].includes(intro)) throw new Error('Неизвестная анимация');
+      return fs.promises.readFile(path.join(__dirname, 'bundled-assets', 'models', `maiko-${intro}.bin`));
+    });
+    ipcMain.handle('desktop:startup-model-finished', (event) => {
+      requireShell(event);
+      finishStartupIntro();
+    });
     ipcMain.handle('desktop:control', (event, action) => {
       requireShell(event);
       if (action === 'minimize') win.minimize();
@@ -350,7 +435,7 @@ else {
       else throw new Error('Неизвестная команда окна');
     });
     createWindow();
-    updates.start();
+    if (!updateHandoff.incoming) updates.start();
     app.once('will-quit', () => { updates.dispose(); downloads.dispose(); });
     app.on('activate', () => { if (!win) createWindow(); });
   }).catch((error) => { log(error.stack); app.quit(); });

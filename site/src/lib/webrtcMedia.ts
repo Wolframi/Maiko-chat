@@ -1,5 +1,7 @@
 /** Shared WebRTC media helpers for calls and voice channels. */
 
+import { getCameraDeviceId } from "@/lib/mediaDevices";
+
 export type CameraFacing = "user" | "environment";
 
 /** Ideal, not exact: a bare facingMode string is an exact match and drops cameras that omit it. */
@@ -21,14 +23,14 @@ export const CAMERA_SEND_PARAMS = {
   maxFramerate: 30,
 } as const;
 
-/** Opus speech cap. 64 kbps stays intelligible on lossy links without starving video. */
+/** Full-band Opus voice; congestion control can still reduce the actual bitrate. */
 export const AUDIO_SEND_PARAMS = {
-  maxBitrate: 64_000,
+  maxBitrate: 96_000,
 } as const;
 
 /** System/tab audio from a screen share — stereo, not a speech codec. */
 export const SCREEN_AUDIO_SEND_PARAMS = {
-  maxBitrate: 128_000,
+  maxBitrate: 192_000,
 } as const;
 
 export type CallNetworkLevel = "good" | "ok" | "poor";
@@ -41,7 +43,7 @@ export type CallNetworkSample = {
 };
 
 export type CallVideoQuality = {
-  label: "1080" | "720" | "540" | "360";
+  label: "1440" | "1080" | "720" | "540" | "360";
   maxBitrate: number;
   maxFramerate: number;
   scale: number;
@@ -55,8 +57,8 @@ export type CallStatsCursor = {
 export const SCREEN_CAPTURE_CONSTRAINTS = {
   video: {
     displaySurface: "monitor",
-    width: { ideal: 1920, max: 2560 },
-    height: { ideal: 1080, max: 1440 },
+    width: { ideal: 2560, max: 2560 },
+    height: { ideal: 1440, max: 1440 },
     frameRate: { ideal: 30, max: 30 },
   } as MediaTrackConstraints,
   audio: {
@@ -64,6 +66,7 @@ export const SCREEN_CAPTURE_CONSTRAINTS = {
     noiseSuppression: false,
     autoGainControl: false,
     channelCount: { ideal: 2 },
+    sampleRate: { ideal: 48000 },
     suppressLocalAudioPlayback: false,
     // Best effort: isolate the call when available; warn if a window's
     // audio source cannot exclude the call.
@@ -72,12 +75,40 @@ export const SCREEN_CAPTURE_CONSTRAINTS = {
 };
 
 export const SCREEN_SEND_PARAMS = {
-  maxBitrate: 5_000_000,
+  maxBitrate: 8_000_000,
   maxFramerate: 30,
 } as const;
 
 export function emptyCallStatsCursor(): CallStatsCursor {
   return { lost: 0, recv: 0 };
+}
+
+/** RTT of the active media transport, in milliseconds (never signaling latency). */
+export function readMediaRtt(report: RTCStatsReport): number | null {
+  const selected = new Set<string>();
+  report.forEach(stat => {
+    if (stat.type === "transport" && typeof stat.selectedCandidatePairId === "string") {
+      selected.add(stat.selectedCandidatePairId);
+    }
+  });
+  let iceRtt: number | null = null;
+  let rtcpRtt: number | null = null;
+  report.forEach(stat => {
+    if (stat.type === "candidate-pair" &&
+      (selected.size ? selected.has(stat.id) : stat.state === "succeeded" && stat.nominated)) {
+      const value = stat.currentRoundTripTime;
+      if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+        iceRtt = Math.max(iceRtt ?? 0, Math.round(value * 1000));
+      }
+    }
+    if (stat.type === "remote-inbound-rtp") {
+      const value = stat.roundTripTime;
+      if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+        rtcpRtt = Math.max(rtcpRtt ?? 0, Math.round(value * 1000));
+      }
+    }
+  });
+  return iceRtt ?? rtcpRtt;
 }
 
 export function readCallNetworkSample(
@@ -178,20 +209,20 @@ export function videoQualityForCall(
   level: CallNetworkLevel,
   hidden = false,
 ): CallVideoQuality {
-  if (hidden) {
-    return kind === "screen"
-      ? { label: "720", maxBitrate: 1_200_000, maxFramerate: 8, scale: 1.5 }
-      : { label: "360", maxBitrate: 400_000, maxFramerate: 12, scale: 2 };
+  // The presenter normally switches to the shared app. Their tab visibility
+  // says nothing about whether the remote participant is watching the screen.
+  if (hidden && kind === "camera") {
+    return { label: "360", maxBitrate: 400_000, maxFramerate: 12, scale: 2 };
   }
   if (kind === "screen") {
     if (level === "poor") {
-      return { label: "720", maxBitrate: 1_800_000, maxFramerate: 15, scale: 1.5 };
+      return { label: "720", maxBitrate: 1_800_000, maxFramerate: 15, scale: 2 };
     }
     if (level === "ok") {
-      return { label: "1080", maxBitrate: 3_000_000, maxFramerate: 24, scale: 1 };
+      return { label: "1440", maxBitrate: 3_000_000, maxFramerate: 15, scale: 1 };
     }
     return {
-      label: "1080",
+      label: "1440",
       maxBitrate: SCREEN_SEND_PARAMS.maxBitrate,
       maxFramerate: SCREEN_SEND_PARAMS.maxFramerate,
       scale: 1,
@@ -348,6 +379,11 @@ function displayCaptureFailed(error: unknown) {
     name === "OverconstrainedError" ||
     name === "TypeError"
   );
+}
+
+export function isScreenCaptureCancelled(error: unknown) {
+  const name = error && typeof error === "object" && "name" in error ? String(error.name) : "";
+  return name === "AbortError" || name === "NotAllowedError" || name === "PermissionDeniedError";
 }
 
 /** Capture source audio, attempting call isolation when the browser supports it. */
@@ -532,7 +568,7 @@ export async function phoneCanFlipCamera() {
 }
 
 /** Front/back phone cameras, with fallbacks when 1080p or facingMode is rejected. */
-export async function openCameraStream(facing: CameraFacing = "user") {
+export async function openCameraStream(facing: CameraFacing = "user", deviceId = getCameraDeviceId()) {
   const attempts: MediaStreamConstraints[] = [
     { audio: false, video: cameraVideoConstraints(facing) },
     {
@@ -547,6 +583,15 @@ export async function openCameraStream(facing: CameraFacing = "user") {
     { audio: false, video: { facingMode: { ideal: facing } } },
     { audio: false, video: true },
   ];
+  // Keep the selected camera in every quality fallback; never open another device silently.
+  if (deviceId) {
+    for (const attempt of attempts) {
+      const video = typeof attempt.video === "object" ? attempt.video : {};
+      const selected: MediaTrackConstraints = { ...video, deviceId: { exact: deviceId } };
+      delete selected.facingMode;
+      attempt.video = selected;
+    }
+  }
   let lastError: unknown;
   for (const constraints of attempts) {
     try {
@@ -760,7 +805,7 @@ export async function applyVideoSenderParams(
     scaleResolutionDownBy?: number;
   },
 ) {
-  if (!sender) return;
+  if (!sender) return false;
   try {
     const params = sender.getParameters();
     if (!params.encodings || params.encodings.length === 0) {
@@ -772,16 +817,18 @@ export async function applyVideoSenderParams(
     encoding.maxBitrate = opts.maxBitrate;
     encoding.maxFramerate = opts.maxFramerate;
     encoding.scaleResolutionDownBy = opts.scaleResolutionDownBy ?? 1;
-    encoding.priority = "high";
-    encoding.networkPriority = "high";
+    encoding.priority = "medium";
+    encoding.networkPriority = "medium";
     (params as RTCRtpSendParameters & {
       degradationPreference?: RTCDegradationPreference;
     }).degradationPreference = opts.maintainResolution
       ? "maintain-resolution"
       : "maintain-framerate";
     await sender.setParameters(params);
+    return true;
   } catch {
     /* browser may reject mid-call tweaks */
+    return false;
   }
 }
 
@@ -795,7 +842,12 @@ export async function applyAudioSenderParams(
     if (!params.encodings || params.encodings.length === 0) {
       params.encodings = [{}];
     }
-    params.encodings[0].maxBitrate = maxBitrate;
+    const encoding = params.encodings[0] as RTCRtpEncodingParameters & {
+      networkPriority?: RTCPriorityType;
+    };
+    encoding.maxBitrate = maxBitrate;
+    encoding.priority = "high";
+    encoding.networkPriority = "high";
     await sender.setParameters(params);
   } catch {
     /* encodings are empty until the first negotiation on some browsers */
@@ -847,10 +899,12 @@ function preferOpusCodecs(pc: RTCPeerConnection) {
 }
 
 function upsertFmtp(params: string, key: string, value: string) {
-  const next = params.replace(/^;+/, "");
-  const re = new RegExp(`${key}=[^;]*`, "i");
-  if (re.test(next)) return next.replace(re, `${key}=${value}`);
-  return next ? `${next};${key}=${value}` : `${key}=${value}`;
+  // Match complete names: "stereo" must never replace "sprop-stereo".
+  const entries = params.split(";").map(entry => entry.trim()).filter(Boolean);
+  const index = entries.findIndex(entry => entry.split("=", 1)[0].trim().toLowerCase() === key.toLowerCase());
+  if (index >= 0) entries[index] = `${key}=${value}`;
+  else entries.push(`${key}=${value}`);
+  return entries.join(";");
 }
 
 function patchOpusSection(section: string, screen: boolean, eol: string) {
@@ -912,7 +966,15 @@ export async function setLocalDescriptionTuned(
 ) {
   const original = desc.sdp;
   try {
-    if (desc.sdp) desc.sdp = patchOpusSdp(desc.sdp, localScreenAudioMids(pc, desc.sdp));
+    if (desc.sdp) {
+      // A receive-only answer has no local screen sender. Its Opus fmtp still
+      // advertises the receiver's stereo/bitrate preferences to the presenter.
+      const screenMids = new Set([
+        ...localScreenAudioMids(pc, desc.sdp),
+        ...(remoteScreenAudioMids.get(pc) || []),
+      ]);
+      desc.sdp = patchOpusSdp(desc.sdp, screenMids);
+    }
     await pc.setLocalDescription(desc);
   } catch {
     if (original) desc.sdp = original;

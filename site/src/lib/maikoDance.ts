@@ -1,10 +1,7 @@
-import { MaikoParticleMotion, MaikoHover, maikoHoverWave, maikoCursorRepulsion, MAIKO_PARTICLE_ROAM_THRESHOLD, MAIKO_CURSOR_FALLOFF, MAIKO_CURSOR_STRENGTH, MAIKO_CURSOR_PULSE, MAIKO_CURSOR_SWIRL } from "./maikoParticleMotion";
+import { MaikoParticleMotion, MaikoHover, maikoHoverWave, maikoCursorRepulsion, prepareMaikoParticleGraph, type MaikoParticleGraph, MAIKO_PARTICLE_ROAM_THRESHOLD, MAIKO_CURSOR_FALLOFF, MAIKO_CURSOR_STRENGTH, MAIKO_CURSOR_PULSE, MAIKO_CURSOR_SWIRL } from "./maikoParticleMotion";
 import {createMaikoParticleGpu} from "./maikoParticleGpu";
 
-export type MaikoIntro = "hiphop" | "samba";
-export const maikoIntroDuration = { hiphop: 8150, samba: 8150 } as const;
-export const chooseMaikoIntro = (random: number) : MaikoIntro => random < 0.5 ? "hiphop" : "samba";
-export const maikoIntroAsset = (intro: MaikoIntro) => `/models/maiko-${intro}.bin?v=bind-axes-1`;
+export { chooseMaikoIntro, maikoIntroAsset, maikoIntroDuration, type MaikoIntro } from "./maikoIntro";
 export const MAIKO_GROUND_Y = -1.2;
 export const MAIKO_DANCE_SECONDS = 6;
 export const chooseMaikoDanceStart = (duration:number,random:number) => Math.max(0,duration-MAIKO_DANCE_SECONDS)*clamp(random);
@@ -40,6 +37,14 @@ export function decodeMaikoDance(buffer: ArrayBuffer, limit = 84000) {
   return {data,palette,count,bones,frames,fps,duration};
 }
 export type MaikoDance = ReturnType<typeof decodeMaikoDance>;
+type PreparedMaikoDance = { dance:MaikoDance; graph:MaikoParticleGraph };
+export async function prepareMaikoDance(buffer:ArrayBuffer,limit:number,signal?:AbortSignal):Promise<PreparedMaikoDance> {
+  signal?.throwIfAborted();
+  const dance=decodeMaikoDance(buffer,limit);
+  const graph=await prepareMaikoParticleGraph(dance.data,dance.count,signal);
+  signal?.throwIfAborted();
+  return {dance,graph};
+}
 const clamp=(x:number)=>Math.max(0,Math.min(1,x));
 const smooth=(a:number,b:number,t:number)=>{const x=clamp((t-a)/(b-a));return x*x*(3-2*x);};
 
@@ -189,8 +194,8 @@ void main() {
   color=vec4(vec3(1.0),(1.0-smoothstep(0.28,0.5,radius))*vAlpha);
 }`;
 
-export function createMaikoRenderer(canvas: HTMLCanvasElement, buffer: ArrayBuffer, limit: number, startRandom=0) {
-  const dance=decodeMaikoDance(buffer,limit);
+export function createMaikoRenderer(canvas: HTMLCanvasElement, buffer: ArrayBuffer, limit: number, startRandom=0, prepared?:PreparedMaikoDance) {
+  const dance=prepared?.dance??decodeMaikoDance(buffer,limit);
   const startSeconds=chooseMaikoDanceStart(dance.duration,startRandom);
   const gl=canvas.getContext("webgl2",{alpha:true,antialias:false,premultipliedAlpha:true,powerPreference:"low-power"});
   if(!gl) throw new Error("WebGL2 unavailable");
@@ -221,7 +226,7 @@ export function createMaikoRenderer(canvas: HTMLCanvasElement, buffer: ArrayBuff
     gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
     gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,dance.bones*4,dance.frames,0,gl.RGBA,gl.FLOAT,dance.palette);
     if(gl.getError()!==gl.NO_ERROR) throw new Error("Unable to upload Maiko palette");
-    particles=createMaikoParticleGpu(gl,dance.data,dance.count);
+    particles=createMaikoParticleGpu(gl,dance.data,dance.count,prepared?.graph);
     const uniforms=Object.fromEntries(["uPalette","uOffsets","uFrame","uViewport","uPointer","uTime","uScale","uDpr","uMotion","uExit","uFocus","uHoverTime","uLayer"].map(name=>[name,gl.getUniformLocation(program,name)]));
     gl.useProgram(program);
     gl.uniform1i(uniforms.uPalette,0);
@@ -250,11 +255,11 @@ export function createMaikoRenderer(canvas: HTMLCanvasElement, buffer: ArrayBuff
   } catch(error) {dispose();throw error;}
 }
 
-export function createMaikoCanvasRenderer(canvas: HTMLCanvasElement, buffer: ArrayBuffer, limit: number, startRandom=0) {
+export function createMaikoCanvasRenderer(canvas: HTMLCanvasElement, buffer: ArrayBuffer, limit: number, startRandom=0, prepared?:PreparedMaikoDance) {
   const ctx=canvas.getContext("2d",{alpha:true});
   if(!ctx) throw new Error("Canvas unavailable");
-  const dance=decodeMaikoDance(buffer,limit), point=new Float32Array(6),anchor=new Float32Array(6);
-  const startSeconds=chooseMaikoDanceStart(dance.duration,startRandom),particles=new MaikoParticleMotion(dance.data,dance.count);
+  const dance=prepared?.dance??decodeMaikoDance(buffer,limit), point=new Float32Array(6),anchor=new Float32Array(6);
+  const startSeconds=chooseMaikoDanceStart(dance.duration,startRandom),particles=new MaikoParticleMotion(dance.data,dance.count,undefined,prepared?.graph);
   const batches:number[][]=Array.from({length:16},()=>[]);
   let lastTime=0;
   const hover=new MaikoHover();

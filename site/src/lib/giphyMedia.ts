@@ -17,6 +17,7 @@ type GiphyImageSet = {
   downsized?: GiphyRendition;
   downsized_medium?: GiphyRendition;
   fixed_width?: GiphyRendition;
+  fixed_width_downsampled?: GiphyRendition;
 };
 
 const GIPHY_HOST = /^(media\d*\.giphy\.com|i\.giphy\.com)$/i;
@@ -88,8 +89,10 @@ function asAsset(url?: string, size?: string | number, mime?: string) {
 export function pickGiphySendAsset(images?: GiphyImageSet | null) {
   if (!images) return null;
   return (
-    asAsset(images.original?.webp, images.original?.webp_size, "image/webp") ||
+    asAsset(images.fixed_width?.webp, images.fixed_width?.webp_size, "image/webp") ||
+    asAsset(images.fixed_width?.url, images.fixed_width?.size) ||
     asAsset(images.downsized?.url, images.downsized?.size) ||
+    asAsset(images.original?.webp, images.original?.webp_size, "image/webp") ||
     asAsset(images.downsized_medium?.url, images.downsized_medium?.size) ||
     asAsset(images.original?.url, images.original?.size)
   );
@@ -98,6 +101,8 @@ export function pickGiphySendAsset(images?: GiphyImageSet | null) {
 export function pickGiphyPreviewUrl(images?: GiphyImageSet | null) {
   if (!images) return "";
   return (
+    asAsset(images.fixed_width_downsampled?.webp)?.url ||
+    asAsset(images.fixed_width_downsampled?.url)?.url ||
     String(images.fixed_width?.webp || "").trim() ||
     String(images.fixed_width?.url || "").trim() ||
     String(images.downsized?.url || "").trim() ||

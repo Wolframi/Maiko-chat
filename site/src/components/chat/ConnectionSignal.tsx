@@ -5,21 +5,18 @@ export type SignalQuality = "excellent" | "good" | "ok" | "poor" | "lost" | "unk
 export function ConnectionSignal({ quality = "unknown", pending, rttMs }: {
   quality?: SignalQuality;
   pending?: string | null;
-  rttMs?: number;
+  rttMs?: number | null;
 }) {
   const level = pending ? "unknown" : quality;
-  const labels: Record<SignalQuality, string> = {
-    excellent: "Отличная связь", good: "Хорошая связь", ok: "Средняя связь",
-    poor: "Слабая связь", lost: "Связь потеряна", unknown: "Проверяем качество связи…",
-  };
-  const label = pending || labels[level];
+  const ping = rttMs != null && Number.isFinite(rttMs) && rttMs >= 0 ? `${Math.round(rttMs)} мс` : "—";
+  const label = pending || (level === "lost" ? "Связь потеряна" : `Пинг: ${ping}`);
   const bars = level === "excellent" || level === "good" ? 3 : level === "ok" ? 2 : level === "poor" ? 1 : 0;
   return (
     <span className={`connection-signal connection-signal--${level}`} title={label} role="status" aria-label={label}>
       <span className="connection-signal__bars" aria-hidden="true">
         {[1, 2, 3].map((bar) => <i key={bar} className={bar <= bars ? "is-lit" : ""} />)}
       </span>
-      <span>{label}{!pending && rttMs != null ? ` · ${rttMs} мс` : ""}</span>
+      <span>{label}</span>
     </span>
   );
 }

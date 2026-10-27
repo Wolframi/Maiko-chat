@@ -23,14 +23,14 @@ function fixture(options = {}) {
   const controller = createUpdates({ app: { isPackaged: true, getVersion: () => '1.1.8' },
     platform: 'win32', portable: false, getUpdater: () => updater,
     publish: (patch) => { state = patch.update; }, log: () => {},
-    ...options, prepareInstall: async () => { await options.prepareInstall?.(); prepared++; } });
+    ...options, prepareInstall: async version => { assert.equal(version, '1.1.9'); await options.prepareInstall?.(version); prepared++; } });
   return { updater, controller, state: () => state, installs, prepared: () => prepared };
 }
 
-test('completed downloads automatically install silently and let NSIS launch the new version', async () => {
+test('one download action automatically prepares the handoff and installs, without installing on exit', async () => {
   const f = fixture();
   assert.equal(f.updater.autoDownload, false);
-  assert.equal(f.updater.autoInstallOnAppQuit, true);
+  assert.equal(f.updater.autoInstallOnAppQuit, false);
   assert.equal(f.updater.autoRunAppAfterInstall, false, 'A normal close must not reopen the app');
   assert.equal(f.updater.disableWebInstaller, true);
   assert.equal(f.updater.disableDifferentialDownload, false);
@@ -43,6 +43,7 @@ test('completed downloads automatically install silently and let NSIS launch the
   assert.equal(f.state().phase, 'installing');
   assert.equal(f.state().progress, 100);
   assert.equal(f.state().currentVersion, '1.1.8', 'Never report a downloaded version as running');
+  assert.equal(f.prepared(), 1, 'Prepare the independent update window before quitting');
   assert.deepEqual(f.installs, [[true, true]], 'Silent install, force run only after replacement');
   await f.controller.action('check');
   await f.controller.action('apply');
@@ -117,12 +118,12 @@ test('preparation finishes before quitting and cannot start twice concurrently',
   let finish;
   const f = fixture({ prepareInstall: () => new Promise(resolve => { finish = resolve; }) });
   await f.controller.action('check');
-  const downloading = f.controller.action('download');
+  const applying = f.controller.action('download');
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.state().phase, 'installing');
   assert.equal(f.installs.length, 0);
   await f.controller.action('apply'); await f.controller.action('check');
-  finish(); await downloading;
+  finish(); await applying;
   assert.deepEqual(f.installs, [[true, true]]);
   f.controller.dispose();
 });
@@ -164,6 +165,85 @@ test('development, portable and test runs never instantiate the updater', async 
     assert.equal(f.state().phase, 'disabled');
     await assert.rejects(f.controller.action('check'));
     f.controller.start(); f.controller.dispose();
+  }
+});
+
+test('startup downloads and installs automatically after the handoff is prepared', async () => {
+  const f = fixture();
+  let finish, downloads = 0;
+  f.updater.downloadUpdate = async () => {
+    downloads++;
+    await new Promise(resolve => { finish = resolve; });
+    f.updater.emit('update-downloaded', { version: '1.1.9' });
+  };
+  f.controller.start(); f.controller.start();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.state().phase, 'downloading');
+  await f.controller.action('check'); await f.controller.action('download');
+  assert.equal(downloads, 1);
+  assert.equal(f.installs.length, 0);
+  finish();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.state().phase, 'installing');
+  assert.equal(f.state().currentVersion, '1.1.8');
+  assert.equal(f.prepared(), 1);
+  assert.deepEqual(f.installs, [[true, true]]);
+  f.controller.dispose();
+});
+
+test('startup with no update or an offline feed keeps the running app without downloading', async () => {
+  for (const offline of [false, true]) {
+    const f = fixture();
+    f.updater.checkForUpdates = async () => {
+      if (offline) throw new Error('Offline');
+      f.updater.emit('update-not-available');
+    };
+    f.updater.downloadUpdate = () => { assert.fail('No update to download'); };
+    f.controller.start();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.state().phase, offline ? 'error' : 'current');
+    assert.deepEqual(f.installs, []);
+    assert.equal(f.prepared(), 0);
+    f.controller.dispose();
+  }
+});
+
+test('failed startup downloads offer a retry and never quit before a verified download', async () => {
+  const f = fixture();
+  const download = f.updater.downloadUpdate;
+  f.updater.downloadUpdate = async () => {
+    const error = new Error('Invalid publisher signature');
+    f.updater.emit('error', error);
+    throw error;
+  };
+  f.controller.start();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.state().phase, 'error');
+  assert.equal(f.state().retryAction, 'download');
+  assert.deepEqual(f.installs, []);
+  assert.equal(f.prepared(), 0);
+  f.updater.downloadUpdate = download;
+  await f.controller.action('download');
+  assert.equal(f.state().phase, 'installing');
+  assert.deepEqual(f.installs, [[true, true]]);
+  f.controller.dispose();
+});
+
+test('disposal during startup check, download or preparation never starts an installer', async () => {
+  for (const stage of ['check', 'download', 'prepare']) {
+    let finish;
+    const pause = () => new Promise(resolve => { finish = resolve; });
+    const f = fixture({ prepareInstall: stage === 'prepare' ? pause : undefined });
+    const check = f.updater.checkForUpdates, download = f.updater.downloadUpdate;
+    let downloads = 0;
+    f.updater.checkForUpdates = async () => { if (stage === 'check') await pause(); await check(); };
+    f.updater.downloadUpdate = async () => { downloads++; if (stage === 'download') await pause(); await download(); };
+    f.controller.start();
+    await new Promise(resolve => setImmediate(resolve));
+    f.controller.dispose(); finish();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(downloads, stage === 'check' ? 0 : 1);
+    assert.deepEqual(f.installs, []);
   }
 });
 

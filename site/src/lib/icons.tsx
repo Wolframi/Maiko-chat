@@ -49,6 +49,7 @@ import {
   Reply,
   ScreenShare,
   Search,
+  Scissors,
   Send,
   Settings,
   Smile,
@@ -345,6 +346,10 @@ export function IconPin(props: IconProps) {
 }
 export function IconEdit(props: IconProps) {
   return wrap(Pencil, props);
+}
+
+export function IconScissors(props: IconProps) {
+  return wrap(Scissors, props);
 }
 export function IconForward(props: IconProps) {
   return wrap(Forward, props);

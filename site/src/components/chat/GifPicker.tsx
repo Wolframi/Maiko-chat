@@ -4,6 +4,8 @@ import { useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } fr
 import { motion } from "motion/react";
 import { IconSearch, IconClose } from "@/lib/icons";
 import { layoutGifMosaic } from "@/lib/gifMosaic";
+import { ChatImage } from "@/components/chat/ChatImage";
+import { sessionHeaders } from "@/lib/sessionHeaders";
 
 type GifResult = {
   id: string;
@@ -59,13 +61,14 @@ export function GifPicker({ onSelect, onClose, open }: GifPickerProps) {
   const [nextPos, setNextPos] = useState<string>("");
   const [hasMore, setHasMore] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const searchQuery = query.trim().length >= 2 ? query.trim() : "";
 
   const gridRef = useRef<HTMLDivElement>(null);
   const widthProbeRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<IntersectionObserver | null>(null);
-  const searchTimeout = useRef<NodeJS.Timeout | undefined>(undefined);
+  const requestRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
   const lastQueryRef = useRef<string>("");
   const isLoadingMoreRef = useRef<boolean>(false);
   const [mosaicWidth, setMosaicWidth] = useState(0);
@@ -103,141 +106,78 @@ export function GifPicker({ onSelect, onClose, open }: GifPickerProps) {
   // ============================================
   // Загрузка с кэшированием
   // ============================================
-  const loadGifs = useCallback(
-    async (reset: boolean = false, currentQuery: string) => {
-      // Защита от параллельных запросов
-      if (loading && !reset) return;
-      if (isLoadingMoreRef.current && !reset) return;
-
-      const ttl = currentQuery.trim().length >= 2
-        ? CLIENT_TTL_SEARCH
-        : CLIENT_TTL_TRENDING;
-
-      const offset = reset ? 0 : Number(nextPos) || 0;
-      const cacheKey = getClientCacheKey(currentQuery, offset);
-
-      // 1. Проверяем клиентский кэш
-      const cached = getClientCache(cacheKey, ttl);
-      if (cached) {
-        console.log(`⚡ Client cache HIT: ${cacheKey}`);
-        if (reset) {
-          setGifs(cached.results);
-        } else {
-          setGifs(prev => {
-            // Защита от дубликатов
-            const existingIds = new Set(prev.map(g => g.id));
-            const newGifs = cached.results.filter(g => !existingIds.has(g.id));
-            return [...prev, ...newGifs];
-          });
-        }
-        setNextPos(cached.next);
-        setHasMore(Boolean(cached.next));
-        return;
-      }
-
-      if (reset) {
-        setLoading(true);
-      }
-      isLoadingMoreRef.current = true;
-      setError(null);
-
-      try {
-        const params = new URLSearchParams();
-        if (currentQuery.trim()) {
-          params.set('q', currentQuery.trim());
-        }
-        if (!reset && offset > 0) {
-          params.set('pos', String(offset));
-        }
-        params.set('limit', '20');
-
-        const res = await fetch(`/api/gif?${params.toString()}`);
-
-        if (!res.ok) {
-          throw new Error(`API error: ${res.status}`);
-        }
-
-        const data = await res.json();
-        const newGifs: GifResult[] = data.results || [];
-
-        // 2. Сохраняем в клиентский кэш
-        clientCache.set(cacheKey, {
-          results: newGifs,
-          next: data.next || '',
-          timestamp: Date.now(),
+  const loadGifs = useCallback(async (reset: boolean, currentQuery: string, offset = 0) => {
+    if (isLoadingMoreRef.current && !reset) return;
+    requestRef.current.controller?.abort();
+    const controller = new AbortController();
+    const id = ++requestRef.current.id;
+    requestRef.current.controller = controller;
+    isLoadingMoreRef.current = true;
+    setLoading(true);
+    setError(null);
+    const current = () => requestRef.current.id === id && !controller.signal.aborted;
+    const cacheKey = getClientCacheKey(currentQuery, offset);
+    const ttl = currentQuery ? CLIENT_TTL_SEARCH : CLIENT_TTL_TRENDING;
+    try {
+      let entry = getClientCache(cacheKey, ttl);
+      if (!entry) {
+        const params = new URLSearchParams({ limit: "20" });
+        if (currentQuery) params.set("q", currentQuery);
+        if (offset) params.set("pos", String(offset));
+        const response = await fetch(`/api/gif?${params}`, {
+          headers: sessionHeaders(), cache: "no-store", signal: controller.signal,
         });
-
-        if (reset) {
-          setGifs(newGifs);
-        } else {
-          // Защита от дубликатов
-          setGifs(prev => {
-            const existingIds = new Set(prev.map(g => g.id));
-            const filtered = newGifs.filter(g => !existingIds.has(g.id));
-            return [...prev, ...filtered];
-          });
-        }
-
-        setNextPos(data.next || '');
-        setHasMore(Boolean(data.next) && newGifs.length > 0);
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : 'Не удалось загрузить GIF'
-        );
-      } finally {
+        if (!response.ok) throw new Error("Не удалось загрузить GIF. Попробуйте ещё раз.");
+        const data = await response.json();
+        if (!current()) return;
+        entry = { results: data.results || [], next: data.next || "", timestamp: Date.now() };
+        while (clientCache.size >= 64) clientCache.delete(clientCache.keys().next().value!);
+        clientCache.set(cacheKey, entry);
+      }
+      if (!current()) return;
+      const { results, next } = entry;
+      setGifs(previous => {
+        if (reset) return results;
+        const ids = new Set(previous.map(gif => gif.id));
+        return [...previous, ...results.filter(gif => !ids.has(gif.id))];
+      });
+      setNextPos(next);
+      setHasMore(Boolean(next) && results.length > 0);
+    } catch (error) {
+      if (current()) setError(error instanceof Error ? error.message : "Не удалось загрузить GIF");
+    } finally {
+      if (current()) {
         setLoading(false);
         isLoadingMoreRef.current = false;
       }
-    },
-    [loading, nextPos]
-  );
-
-  // ============================================
-  // Загрузка при открытии (только один раз)
-  // ============================================
-  useEffect(() => {
-    if (open && gifs.length === 0 && !loading) {
-      lastQueryRef.current = "";
-      loadGifs(true, "");
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, []);
 
-  // ============================================
-  // Поиск с увеличенным debounce (600мс)
-  // ============================================
+  // Cancel stale searches immediately, including during the debounce interval.
   useEffect(() => {
     if (!open) return;
-
-    // Не ищем, если запрос не изменился
-    if (query === lastQueryRef.current) return;
-
-    if (searchTimeout.current) {
-      clearTimeout(searchTimeout.current);
-    }
-
-    // Минимум 2 символа для поиска
-    const shouldSearch = query.trim().length >= 2;
-
-    searchTimeout.current = setTimeout(() => {
-      lastQueryRef.current = query;
+    const request = requestRef.current;
+    const currentQuery = searchQuery;
+    lastQueryRef.current = currentQuery;
+    isLoadingMoreRef.current = true;
+    setLoading(true);
+    setError(null);
+    const delay = getClientCache(getClientCacheKey(currentQuery, 0), currentQuery ? CLIENT_TTL_SEARCH : CLIENT_TTL_TRENDING)
+      ? 0 : currentQuery ? 300 : 0;
+    const timer = setTimeout(() => {
       setGifs([]);
       setNextPos("");
       setHasMore(true);
-      loadGifs(true, shouldSearch ? query : "");
-    }, 600);
-
+      void loadGifs(true, currentQuery);
+    }, delay);
     return () => {
-      if (searchTimeout.current) {
-        clearTimeout(searchTimeout.current);
-      }
+      clearTimeout(timer);
+      request.controller?.abort();
+      request.id++;
+      isLoadingMoreRef.current = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, open]);
+  }, [open, searchQuery, loadGifs]);
 
-  // ============================================
-  // Бесконечная загрузка через Intersection Observer
-  // ============================================
   useEffect(() => {
     if (!open || !gridRef.current) return;
 
@@ -255,10 +195,7 @@ export function GifPicker({ onSelect, onClose, open }: GifPickerProps) {
           hasMore &&
           gifs.length > 0
         ) {
-          // Небольшая задержка перед загрузкой, чтобы не спамить
-          setTimeout(() => {
-            loadGifs(false, lastQueryRef.current);
-          }, 200);
+          void loadGifs(false, lastQueryRef.current, Number(nextPos) || 0);
         }
       },
       {
@@ -277,7 +214,7 @@ export function GifPicker({ onSelect, onClose, open }: GifPickerProps) {
         observerRef.current.disconnect();
       }
     };
-  }, [open, gifs, loading, hasMore, loadGifs]);
+  }, [open, gifs, loading, hasMore, loadGifs, nextPos]);
 
   // ============================================
   // Обработчик выбора GIF
@@ -322,7 +259,12 @@ export function GifPicker({ onSelect, onClose, open }: GifPickerProps) {
       </div>
 
       {error ? (
-        <div className="gif-picker__error">{error}</div>
+        <div className="gif-picker__error">
+          {error}
+          <button type="button" onClick={() => void loadGifs(gifs.length === 0, lastQueryRef.current, gifs.length ? Number(nextPos) || 0 : 0)}>
+            Повторить загрузку
+          </button>
+        </div>
       ) : (
         <div ref={gridRef} className="gif-picker__grid">
           <div ref={widthProbeRef} className="gif-picker__mosaic-width" />
@@ -348,7 +290,7 @@ export function GifPicker({ onSelect, onClose, open }: GifPickerProps) {
                     }}
                     title={gif.title}
                   >
-                    <img
+                    <ChatImage
                       src={gif.preview}
                       alt={gif.title || "GIF"}
                       loading="lazy"

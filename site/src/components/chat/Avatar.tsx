@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   avatarColor,
   avatarDisplaySrc,
   avatarInitials,
   bareAvatarUrl,
 } from "@/lib/avatar";
+import { signedMediaSrc } from "@/lib/files";
 
 type AvatarProps = {
   name: string;
@@ -27,7 +28,11 @@ export function Avatar({
   online,
 }: AvatarProps) {
   const label = name || "?";
-  const photoSrc = bareAvatarUrl(src);
+  const latestPhotoSrc = src ? signedMediaSrc(src) : null;
+  const photoIdentity = bareAvatarUrl(latestPhotoSrc);
+  // Signature refreshes refer to the same photo. Keep the displayed URL until
+  // the photo changes or a failed request needs the latest credentials.
+  const [photoSrc, setPhotoSrc] = useState(latestPhotoSrc);
   const [failed, setFailed] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -36,9 +41,10 @@ export function Avatar({
   failedRef.current = failed;
   const showPhoto = Boolean(photoSrc) && !failed;
 
-  const [prevSrc, setPrevSrc] = useState(photoSrc);
-  if (photoSrc !== prevSrc) {
-    setPrevSrc(photoSrc);
+  const [prevIdentity, setPrevIdentity] = useState(photoIdentity);
+  if (photoIdentity !== prevIdentity || (failed && latestPhotoSrc !== photoSrc)) {
+    setPrevIdentity(photoIdentity);
+    setPhotoSrc(latestPhotoSrc);
     setFailed(false);
     setLoaded(false);
     setAttempt(0);
@@ -54,14 +60,14 @@ export function Avatar({
     };
   }, []);
 
-  function clearRetry() {
+  const clearRetry = useCallback(() => {
     if (retryTimer.current) {
       clearTimeout(retryTimer.current);
       retryTimer.current = null;
     }
-  }
+  }, []);
 
-  function scheduleRetry(nextAttempt: number, delayMs: number) {
+  const scheduleRetry = useCallback((nextAttempt: number, delayMs: number) => {
     clearRetry();
     retryTimer.current = setTimeout(() => {
       retryTimer.current = null;
@@ -69,19 +75,30 @@ export function Avatar({
       setLoaded(false);
       setFailed(false);
     }, delayMs);
-  }
+  }, [clearRetry]);
 
-  function markLoaded() {
+  const markLoaded = useCallback(() => {
     clearRetry();
     setLoaded(true);
     setFailed(false);
-  }
+  }, [clearRetry]);
 
-  function handleError() {
+  const handleError = useCallback(() => {
     if (!photoSrc) {
       setFailed(true);
       return;
     }
+    if (latestPhotoSrc && latestPhotoSrc !== photoSrc) {
+      clearRetry();
+      setPhotoSrc(latestPhotoSrc);
+      setAttempt(0);
+      setLoaded(false);
+      setFailed(false);
+      return;
+    }
+    // Cached-image checks and onError can report the same failure. Do not
+    // restart its backoff when the parent renders (e.g. speaking updates).
+    if (retryTimer.current) return;
     const next = attempt + 1;
     if (next <= FAST_RETRIES) {
       scheduleRetry(next, Math.min(2500, 280 * next));
@@ -95,7 +112,7 @@ export function Avatar({
     }
     setFailed(true);
     setLoaded(false);
-  }
+  }, [photoSrc, latestPhotoSrc, attempt, clearRetry, scheduleRetry]);
 
   useEffect(() => {
     if (!photoSrc) return;
@@ -114,15 +131,15 @@ export function Avatar({
       window.removeEventListener("focus", revive);
       window.removeEventListener("online", revive);
     };
-  }, [photoSrc]);
+  }, [photoSrc, clearRetry]);
 
   /** Cached success/failure may finish before onLoad/onError is attached. */
-  function bindImg(node: HTMLImageElement | null) {
+  const bindImg = useCallback((node: HTMLImageElement | null) => {
     if (!node) return;
     if (!node.complete) return;
     if (node.naturalWidth > 0) markLoaded();
     else handleError();
-  }
+  }, [markLoaded, handleError]);
 
   const imgSrc = photoSrc ? avatarDisplaySrc(photoSrc, attempt) : "";
 
@@ -139,7 +156,6 @@ export function Avatar({
           {!loaded && (
             <span className="avatar__fallback">{avatarInitials(label)}</span>
           )}
-          {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             key={`${photoSrc}::${attempt}`}
             ref={bindImg}

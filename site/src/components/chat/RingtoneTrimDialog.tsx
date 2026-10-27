@@ -17,6 +17,7 @@ type RingtoneTrimDialogProps = {
   file: File | null;
   initialStart?: number;
   initialEnd?: number;
+  maxDuration?: number;
   onCancel: () => void;
   onComplete: (payload: {
     trimmed: Blob;
@@ -24,7 +25,7 @@ type RingtoneTrimDialogProps = {
     title: string;
     startSec: number;
     endSec: number;
-  }) => void;
+  }) => void | Promise<void>;
 };
 
 function formatTime(sec: number) {
@@ -52,6 +53,7 @@ export function RingtoneTrimDialog({
   file,
   initialStart = 0,
   initialEnd = 0,
+  maxDuration = CUSTOM_MAX_SEC,
   onCancel,
   onComplete,
 }: RingtoneTrimDialogProps) {
@@ -183,15 +185,15 @@ export function RingtoneTrimDialog({
         if (cancelled) return;
 
         const safe = decoded.duration;
-        const maxEnd = Math.min(safe || CUSTOM_MAX_SEC, CUSTOM_MAX_SEC);
+        const maxEnd = Math.min(safe || maxDuration, maxDuration);
         const from = Math.max(
           0,
           Math.min(initialStart, Math.max(0, safe - 0.2)),
         );
         const to =
           initialEnd > from
-            ? Math.min(safe || initialEnd, from + CUSTOM_MAX_SEC, initialEnd)
-            : maxEnd;
+            ? Math.min(safe || initialEnd, from + maxDuration, initialEnd)
+            : Math.min(safe, from + maxEnd);
         const startSec = from;
         const endSec = Math.max(from + 0.2, to);
         const region = regions.addRegion({
@@ -201,7 +203,7 @@ export function RingtoneTrimDialog({
           drag: true,
           resize: true,
           minLength: 0.2,
-          maxLength: CUSTOM_MAX_SEC,
+          maxLength: maxDuration,
           color: "rgba(88, 101, 242, 0.32)",
         });
         regionRef.current = region;
@@ -234,7 +236,7 @@ export function RingtoneTrimDialog({
       }
       host.replaceChildren();
     };
-  }, [open, file, src, initialStart, initialEnd]);
+  }, [open, file, src, initialStart, initialEnd, maxDuration]);
 
   useEffect(() => {
     if (!open) return;
@@ -264,17 +266,33 @@ export function RingtoneTrimDialog({
     });
   }
 
+  function setSelection(from: number, to: number) {
+    const region = regionRef.current;
+    if (!region || !duration) return;
+    wsRef.current?.pause();
+    region.setOptions({ start: from, end: to });
+    offsetRef.current = 0;
+    setStart(from);
+    setEnd(to);
+    wsRef.current?.setTime(from);
+    setPlayhead(from);
+  }
+
   async function handleApply() {
     if (!file || busy) return;
     const region = regionRef.current;
     const from = region?.start ?? start;
     const to = region?.end ?? end;
+    if (to <= from || to - from > maxDuration + 0.01) {
+      setError(`Выберите фрагмент не длиннее ${maxDuration} секунд`);
+      return;
+    }
     setBusy(true);
     setError(null);
     wsRef.current?.pause();
     try {
       const trimmed = await trimAudioFile(file, from, to);
-      onComplete({
+      await onComplete({
         trimmed,
         source: file,
         title,
@@ -333,9 +351,45 @@ export function RingtoneTrimDialog({
           Точка прослушивания: {formatTime(playhead)}
         </p>
 
+        <div className="ringtone-trim__range">
+          <label>
+            Начало, сек.
+            <input
+              type="number" min={0} max={Math.max(0, duration - 0.2)} step={0.1}
+              aria-label="Начало фрагмента, секунды"
+              value={Math.round(start * 10) / 10}
+              disabled={busy || !duration}
+              onChange={(event) => {
+                const from = clamp(Number(event.target.value), 0, Math.max(0, duration - 0.2));
+                setSelection(from, Math.min(duration, from + Math.min(maxDuration, end - start)));
+              }}
+            />
+          </label>
+          <label>
+            Конец, сек.
+            <input
+              type="number" min={start + 0.2} max={Math.min(duration, start + maxDuration)} step={0.1}
+              aria-label="Конец фрагмента, секунды"
+              value={Math.round(end * 10) / 10}
+              disabled={busy || !duration}
+              onChange={(event) => setSelection(start, clamp(Number(event.target.value), start + 0.2, Math.min(duration, start + maxDuration)))}
+            />
+          </label>
+          <button
+            type="button" className="ringtone-trim__play"
+            disabled={busy || !duration}
+            onClick={() => {
+              const from = Math.min(start, Math.max(0, duration - maxDuration));
+              setSelection(from, Math.min(duration, from + maxDuration));
+            }}
+          >
+            {maxDuration} сек.
+          </button>
+        </div>
+
         <p className="avatar-crop__hint">
           Тяните синий кусок или его края — белый курсор едет вместе с ним.
-          Клик ставит точку, от неё играет «Слушать». Не длиннее {CUSTOM_MAX_SEC}{" "}
+          Клик ставит точку, от неё играет «Слушать». Не длиннее {maxDuration}{" "}
           сек. Края смягчаются фейдом, чтобы не щёлкало.
         </p>
 

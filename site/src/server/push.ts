@@ -6,6 +6,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import webpush from "web-push";
+import { isAllowedPushEndpoint, validPushKeys, pushAgent } from "./pushSecurity";
 
 type PushSub = {
   endpoint: string;
@@ -74,6 +75,9 @@ export function hasPushSubscription(userId: string) {
 }
 
 export function savePushSubscription(userId: string, sub: PushSub) {
+  if (!isAllowedPushEndpoint(sub.endpoint) || !validPushKeys(sub.keys)) {
+    throw new Error("Invalid push subscription");
+  }
   const data = ensureStore();
   const list = data.byUser[userId] || [];
   const next = list.filter((item) => item.endpoint !== sub.endpoint);
@@ -99,9 +103,20 @@ export type PushPayload = {
   tag?: string;
 };
 
+const sending = new Set<string>();
+
 export async function sendPushToUser(userId: string, payload: PushPayload) {
+  // Coalesce notifications for busy users and bound outbound work globally.
+  if (sending.size >= 8 || sending.has(userId)) return { sent: 0 };
+  sending.add(userId);
+  try { return await deliverPush(userId, payload); }
+  finally { sending.delete(userId); }
+}
+
+async function deliverPush(userId: string, payload: PushPayload) {
   const data = ensureStore();
-  const list = data.byUser[userId] || [];
+  // Revalidate persisted subscriptions too: old stores may contain unsafe URLs.
+  const list = (data.byUser[userId] || []).filter(sub => isAllowedPushEndpoint(sub.endpoint) && validPushKeys(sub.keys)).slice(-5);
   if (!list.length) return { sent: 0 };
 
   const body = JSON.stringify(payload);
@@ -114,6 +129,8 @@ export async function sendPushToUser(userId: string, payload: PushPayload) {
         await webpush.sendNotification(sub, body, {
           TTL: payload.kind === "call" ? 60 : 300,
           urgency: payload.kind === "call" ? "high" : "normal",
+          agent: pushAgent,
+          timeout: 5000,
         });
         keep.push(sub);
         sent += 1;

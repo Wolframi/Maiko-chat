@@ -2,9 +2,11 @@
 
 const MIC_KEY = "pulse-mic-device";
 const SPEAKER_KEY = "pulse-speaker-device";
+const CAMERA_KEY = "pulse-camera-device";
 export const VOICE_SETTINGS_EVENT = "pulse-voice-settings";
 
 export type VoiceSettingsChange = {
+  camera?: boolean;
   mic?: boolean;
   speaker?: boolean;
   noise?: boolean;
@@ -64,6 +66,7 @@ export function subscribeVoiceSettings(
   window.addEventListener(VOICE_SETTINGS_EVENT, onEvent);
   const onStorage = (event: StorageEvent) => {
     if (event.key === "pulse-mic-device") handler({ mic: true });
+    else if (event.key === CAMERA_KEY) handler({ camera: true });
     else if (event.key === "pulse-speaker-device") handler({ speaker: true });
     else if (event.key?.startsWith("pulse-") && /noise|krisp|browser-ns|dtln/.test(event.key)) handler({ noise: true });
   };
@@ -77,6 +80,34 @@ export function getMicDeviceId() {
 
 export function getSpeakerDeviceId() {
   return readPref(SPEAKER_KEY);
+}
+
+export function getCameraDeviceId() {
+  return readPref(CAMERA_KEY);
+}
+
+export function setCameraDeviceId(deviceId: string) {
+  if (deviceId === getCameraDeviceId()) return;
+  writePref(CAMERA_KEY, deviceId);
+  emitVoiceSettings({ camera: true });
+}
+
+export type CameraDeviceOption = { deviceId: string; label: string };
+
+export async function listCameraDevices(requestPermission = false): Promise<CameraDeviceOption[]> {
+  if (!navigator.mediaDevices?.enumerateDevices) return [];
+  let devices = await navigator.mediaDevices.enumerateDevices();
+  if (requestPermission && devices.some(device => device.kind === "videoinput" && !device.label)) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+      stream.getTracks().forEach(track => track.stop());
+      devices = await navigator.mediaDevices.enumerateDevices();
+    } catch {
+      // Keep anonymous device names when camera permission is unavailable.
+    }
+  }
+  return devices.filter(device => device.kind === "videoinput" && device.deviceId)
+    .map((device, index) => ({ deviceId: device.deviceId, label: device.label || `Камера ${index + 1}` }));
 }
 
 export function setMicDeviceId(deviceId: string) {

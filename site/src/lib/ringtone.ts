@@ -1,21 +1,22 @@
 import { getSoundEnabled } from "@/lib/notify";
+import { ringtoneAudioPath } from "./ringtoneConfig";
+import { isProtectedRingtone, loadRingtoneAudio, ringtoneBlob } from "./ringtonePlayback";
 import { applyAudioOutput } from "@/lib/mediaDevices";
 import {
   CUSTOM_RINGTONE_ID,
   CUSTOM_RINGTONE_URL,
   getCustomRingtoneObjectUrl,
+  migrateCustomRingtone,
 } from "@/lib/customRingtone";
+import { configureRingtoneAccount, getRingtoneAccount, requestRingtoneSettings } from "./ringtoneAccount";
+import type { RingtoneSettings, SavedRingtone } from "./ringtoneSettings";
+export type { SavedRingtone } from "./ringtoneSettings";
 
 const RINGTONE_KEY = "pulse-ringtone";
 
-export type SavedRingtone = {
-  id: string;
-  title: string;
-  /** App-relative proxy URL: /api/ringtones/audio?u=… */
-  url: string;
-  /** Start at the most dynamic section (seconds). */
-  startSec?: number;
-};
+let syncPromise: Promise<void> = Promise.resolve();
+let accountListenersReady = false;
+let memoryRingtone: SavedRingtone | null = null;
 
 export type CatalogRingtone = {
   id: string;
@@ -33,14 +34,17 @@ export type RingtoneCatalog = {
   source: string;
 };
 
-/** Build same-origin proxy URL for a remote zvukogram mp3. */
+/** Build a same-origin audio URL; preserve relative URLs from legacy settings. */
 export function ringtoneProxyUrl(remoteOrProxy: string) {
   if (!remoteOrProxy) return "";
-  if (remoteOrProxy.startsWith("/api/ringtones/audio?")) return remoteOrProxy;
+  if (remoteOrProxy.startsWith("/api/ringtones/audio?")) {
+    const remote = new URL(remoteOrProxy, "http://localhost").searchParams.get("u");
+    return remote ? ringtoneAudioPath(remote) : remoteOrProxy;
+  }
   const absolute = remoteOrProxy.startsWith("http")
     ? remoteOrProxy
     : `https://zvukogram.com${remoteOrProxy.startsWith("/") ? "" : "/"}${remoteOrProxy}`;
-  return `/api/ringtones/audio?u=${encodeURIComponent(absolute)}`;
+  return ringtoneAudioPath(absolute);
 }
 
 function playFromStart(audio: HTMLAudioElement, startSec: number) {
@@ -157,17 +161,14 @@ function normalizeStored(raw: unknown): SavedRingtone | null {
 
 export function getSavedRingtone(): SavedRingtone | null {
   if (typeof window === "undefined") return null;
-  try {
-    const raw = localStorage.getItem(RINGTONE_KEY);
-    if (!raw) return null;
-    return normalizeStored(JSON.parse(raw));
-  } catch {
-    return null;
-  }
+  if (!getRingtoneAccount()) return null;
+  return memoryRingtone;
 }
 
-export function setSavedRingtone(value: SavedRingtone | null) {
+function cacheSavedRingtone(value: SavedRingtone | null) {
   if (typeof window === "undefined") return;
+  const changed = JSON.stringify(memoryRingtone) !== JSON.stringify(value);
+  memoryRingtone = value;
   try {
     if (!value) localStorage.removeItem(RINGTONE_KEY);
     else {
@@ -181,26 +182,83 @@ export function setSavedRingtone(value: SavedRingtone | null) {
         }),
       );
     }
+    const userId = getRingtoneAccount()?.userId;
+    if (userId) {
+      localStorage.setItem(`${RINGTONE_KEY}:${userId}`, JSON.stringify(value));
+      localStorage.setItem(`${RINGTONE_KEY}-owner`, userId);
+    }
+  } catch { /* The in-memory choice still works when storage is blocked. */ }
+  if (changed) {
     window.dispatchEvent(
       new CustomEvent("pulse:ringtone-changed", { detail: value }),
     );
     if (value?.url) prefetchRingtone(value.url);
-  } catch {
-    /* ignore */
   }
 }
 
-export async function fetchRingtoneCatalog(page = 1): Promise<RingtoneCatalog> {
+export async function setSavedRingtone(value: SavedRingtone | null) {
+  await syncPromise;
+  await requestRingtoneSettings({ ringtone: value });
+}
+
+export function syncRingtoneAccount(account: { userId: string; token: string } | null) {
+  if (typeof window === "undefined") return;
+  const previous = getRingtoneAccount();
+  configureRingtoneAccount(account);
+  if (!accountListenersReady) {
+    accountListenersReady = true;
+    window.addEventListener("pulse:ringtone-settings", (event) => {
+      const settings = (event as CustomEvent<RingtoneSettings>).detail;
+      if (!settings.initialized && memoryRingtone) return;
+      cacheSavedRingtone(settings.ringtone ? normalizeStored(settings.ringtone) : null);
+    });
+    window.addEventListener("focus", () => { void refreshAccountRingtone(); });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") void refreshAccountRingtone();
+    });
+  }
+  if (!account) { cacheSavedRingtone(null); return; }
+  let saved: SavedRingtone | null = null;
+  try {
+    const scoped = localStorage.getItem(`${RINGTONE_KEY}:${account.userId}`);
+    const owner = localStorage.getItem(`${RINGTONE_KEY}-owner`);
+    const raw = scoped ?? ((!owner || owner === account.userId) ? localStorage.getItem(RINGTONE_KEY) : null);
+    saved = raw ? normalizeStored(JSON.parse(raw)) : null;
+  } catch { /* Use the server preference when local storage is unavailable. */ }
+  if (previous?.userId !== account.userId) cacheSavedRingtone(saved);
+  const current = getRingtoneAccount();
+  syncPromise = (async () => {
+    const settings = await requestRingtoneSettings();
+    if (getRingtoneAccount() !== current || settings.initialized || !saved) return;
+    if (saved.id === CUSTOM_RINGTONE_ID) await migrateCustomRingtone(saved.title);
+    else await requestRingtoneSettings({ ringtone: saved, ifAbsent: true });
+  })().catch(() => { /* Retry on reconnect, focus or the next explicit selection. */ });
+}
+
+export async function refreshAccountRingtone() {
+  if (!getRingtoneAccount()) return;
+  try { await requestRingtoneSettings(); } catch { /* Keep the last saved choice while offline. */ }
+}
+
+export async function fetchRingtoneCatalog(page = 1, query = "", signal?: AbortSignal): Promise<RingtoneCatalog> {
+  if (query.trim().length < 2) return { items: [], page: 1, pages: 1, source: "YouTube" };
   let lastError: Error | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {
+    let retryable = true;
     try {
-      const res = await fetch(`/api/ringtones?page=${page}`, {
+      const params = new URLSearchParams({ page: String(page) });
+      if (query.trim()) params.set("q", query.trim());
+      const res = await fetch(`/api/ringtones?${params}`, {
+        headers: { "x-pulse-token": getRingtoneAccount()?.token || "" },
         credentials: "same-origin",
+        cache: "no-store",
+        signal,
       });
       const body = (await res.json().catch(() => null)) as
         | (RingtoneCatalog & { error?: string })
         | null;
       if (!res.ok || !body || body.ok === false) {
+        retryable = ![401, 403, 429].includes(res.status);
         throw new Error(body?.error || "Не удалось загрузить каталог");
       }
       return {
@@ -209,9 +267,10 @@ export async function fetchRingtoneCatalog(page = 1): Promise<RingtoneCatalog> {
           .filter((item): item is CatalogRingtone => Boolean(item)),
         page: Number(body.page) || page,
         pages: Number(body.pages) || 1,
-        source: body.source || "zvukogram.com",
+        source: body.source || "YouTube",
       };
     } catch (error) {
+      if (signal?.aborted || !retryable) throw error;
       lastError =
         error instanceof Error ? error : new Error("Не удалось загрузить каталог");
       await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
@@ -220,13 +279,18 @@ export async function fetchRingtoneCatalog(page = 1): Promise<RingtoneCatalog> {
   throw lastError || new Error("Не удалось загрузить каталог");
 }
 
+export async function prepareRingtone(url: string) {
+  await ringtoneBlob(ringtoneProxyUrl(url));
+}
+
 export function prefetchRingtone(url: string | null | undefined) {
   if (!url || typeof window === "undefined") return;
   if (url === CUSTOM_RINGTONE_URL || url.startsWith("idb:")) {
-    void getCustomRingtoneObjectUrl();
+    void getCustomRingtoneObjectUrl().catch(() => undefined);
     return;
   }
-  void fetch(url, { credentials: "same-origin", cache: "force-cache" }).catch(
+  if (isProtectedRingtone(url)) { void ringtoneBlob(url).catch(() => undefined); return; }
+  void fetch(url, { credentials: "same-origin", cache: "no-store" }).catch(
     () => undefined,
   );
 }
@@ -292,16 +356,18 @@ export function previewRingtone(
     };
   }
 
-  const audio = new Audio(url);
+  const audio = new Audio();
+  const source = loadRingtoneAudio(audio, url);
   audio.preload = "auto";
   audio.volume = previewVolume;
   activePreviewAudio = audio;
   const fail = () => onError?.("Не удалось воспроизвести");
   audio.addEventListener("error", fail, { once: true });
-  void playWhenReady(audio)
+  void source.ready.then((ready) => ready ? playWhenReady(audio) : undefined)
     .then(() => applyAudioOutput(audio))
     .catch(fail);
   return () => {
+    source.stop();
     if (activePreviewAudio === audio) activePreviewAudio = null;
     audio.removeEventListener("error", fail);
     audio.pause();
@@ -317,18 +383,23 @@ export function previewRingtoneFrom(
 ) {
   if (!url) return previewRingtone(null, onError);
   if (typeof window === "undefined") return () => undefined;
-  const audio = new Audio(url);
+  const audio = new Audio();
+  const source = loadRingtoneAudio(audio, url);
   audio.preload = "auto";
   audio.volume = previewVolume;
   activePreviewAudio = audio;
   void applyAudioOutput(audio);
   const fail = () => onError?.("Не удалось воспроизвести");
   audio.addEventListener("error", fail, { once: true });
-  playFromStart(audio, startSec);
-  void playWhenReady(audio)
+  void source.ready.then((ready) => {
+    if (!ready) return;
+    playFromStart(audio, startSec);
+    return playWhenReady(audio);
+  })
     .then(() => applyAudioOutput(audio))
     .catch(fail);
   return () => {
+    source.stop();
     if (activePreviewAudio === audio) activePreviewAudio = null;
     audio.removeEventListener("error", fail);
     audio.pause();
@@ -387,6 +458,7 @@ export function startIncomingRingtone() {
     let fallbackStop: (() => void) | null = null;
     let detachLoop = () => {};
     let audio: HTMLAudioElement | null = null;
+    let releaseSource = () => {};
     const fallback = () => {
       if (stopped || fallbackStop) return;
       detachLoop();
@@ -398,18 +470,25 @@ export function startIncomingRingtone() {
         fallback();
         return;
       }
-      audio = new Audio(url);
+      audio = new Audio();
+      const source = loadRingtoneAudio(audio, url);
+      releaseSource = source.stop;
       audio.preload = "auto";
       audio.volume = 0.9;
       detachLoop = attachDynamicLoop(audio, saved.startSec || 0);
-      playFromStart(audio, saved.startSec || 0);
       audio.addEventListener("error", fallback, { once: true });
-      void playWhenReady(audio)
+      const player = audio;
+      void source.ready.then((ready) => {
+        if (!ready || stopped) return;
+        playFromStart(player, saved.startSec || 0);
+        return playWhenReady(player);
+      })
         .then(() => applyAudioOutput(audio))
         .catch(fallback);
     }).catch(fallback);
     return () => {
       stopped = true;
+      releaseSource();
       detachLoop();
       if (audio) {
         audio.pause();

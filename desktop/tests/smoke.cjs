@@ -60,7 +60,7 @@ async function main() {
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1000, 700));
     const [contentWidth, contentHeight] = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getContentSize());
     await site.waitForFunction(([width, height]) => window.innerWidth === width && window.innerHeight === height,
-      [contentWidth - 20, contentHeight - 52], { polling: 100 });
+      [contentWidth, contentHeight - 42], { polling: 100 });
     await shell.getByRole('button', { name: 'Развернуть', exact: true }).click();
     assert.equal((await shell.evaluate(() => window.maikoDesktop.state())).maximized, true);
     assert.deepEqual(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getContentBounds()), await app.evaluate(({ BrowserWindow, screen }) => screen.getDisplayMatching(BrowserWindow.getAllWindows()[0].getBounds()).workArea));

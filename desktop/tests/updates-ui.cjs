@@ -17,7 +17,7 @@ async function main() {
     app = await electron.launch({ executablePath: process.env.MAIKO_TEST_EXECUTABLE || require('electron'),
       args: process.env.MAIKO_TEST_EXECUTABLE ? [] : [path.resolve(__dirname, '..')], env, timeout: 120_000 });
     const page = await app.firstWindow();
-    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
+    // Inspect the renderer without opening another native window on the desktop.
     await page.waitForFunction(() => !!window.maikoDesktop, null, { timeout: 60_000 });
     await page.waitForFunction(() => document.body.dataset.phase === 'ready');
     assert.equal(await page.locator('input[type="url"], #settings-screen, #change-url').count(), 0);
@@ -66,16 +66,18 @@ async function main() {
     }, { state, version });
     await page.waitForFunction(() => document.querySelector('#update-label').textContent === 'Обновлено');
     assert.equal(await page.locator('#update-action').isDisabled(), false);
-    await page.getByRole('button', { name: 'Проверить обновления', exact: true }).click();
+    await app.evaluate(() => global.updateTestController.start());
     await page.waitForFunction(() => document.querySelector('#update-dock').dataset.phase === 'checking');
     assert.equal(await page.locator('#update-action').isDisabled(), true);
     assert.equal(await page.locator('#update-label').textContent(), 'Проверка…');
     await app.evaluate(() => global.finishUpdateTestCheck());
-    await page.getByRole('button', { name: 'Обновить до версии 9.9.9 с автоматическим перезапуском', exact: true }).click();
     await page.locator('#update-progress:not([hidden])').waitFor();
-    assert.equal(await page.locator('.update-wheel').evaluate(icon => getComputedStyle(icon).animationName), 'spin');
+    assert.equal(await page.locator('#update-action').isDisabled(), true);
+    assert.match(await page.locator('#update-dock').getAttribute('title'), /в фоне/);
+    assert.equal(await page.locator('#update-action > svg').evaluate(icon => getComputedStyle(icon).animationName), 'spin');
     await app.evaluate(() => global.finishUpdateTestDownload());
     await page.waitForFunction(() => document.querySelector('#update-dock').dataset.phase === 'installing');
+    assert.deepEqual(await app.evaluate(() => global.updateTestInstalls), [], 'Wait for the handoff before quitting');
     assert.equal(await page.locator('#connection-screen').isVisible(), false, 'No redundant site reload before installing');
     assert.equal(await page.locator('#update-label').textContent(), 'Установка…');
     assert.equal(await page.locator('#update-action').isDisabled(), true);
@@ -98,13 +100,13 @@ async function main() {
       await global.updateTestController.action('check');
     });
     assert.deepEqual(await app.evaluate(() => global.updateTestInstalls), [[true, true]]);
-    assert.deepEqual(await app.evaluate(() => global.updateTestActions), ['check', 'download']);
+    assert.deepEqual(await app.evaluate(() => global.updateTestActions), [], 'No second restart click is required');
     for (const retryAction of ['check', 'download', 'apply']) {
       await app.evaluate((_electron, retryAction) => global.sendUpdateTestState({ phase: 'error', retryAction, message: 'Ошибка обновления. Повторите попытку.' }), retryAction);
       await page.waitForFunction(retryAction => document.querySelector('#update-action').dataset.command === retryAction && document.querySelector('#update-label').textContent === 'Повторить', retryAction);
       assert.equal(await page.locator('#update-action').isDisabled(), false);
     }
-    console.log('Update UI passed: real controller, check/download/install, no redundant reload, honest version, silent install and post-install launch, retries and minimum window size. Installer execution is mocked.');
+    console.log('Update UI passed: automatic check/download/install, handoff preparation before quitting, no second restart button, honest version, retries and minimum window size. Installer execution is mocked.');
   } finally {
     if (app) {
       await app.evaluate(() => global.updateTestController?.dispose()).catch(() => {});

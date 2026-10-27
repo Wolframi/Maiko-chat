@@ -27,12 +27,31 @@ function runAuth(folder: string, body: string): void {
   execFileSync(process.execPath, ["--require", loader, "-e", `
     const assert = require('node:assert/strict');
     const fs = require('node:fs');
+    fs.mkdirSync('data', { recursive: true });
+    if (!fs.existsSync('data/registration-invites.json')) fs.writeFileSync('data/registration-invites.json', JSON.stringify({ required: false, adminUserId: null, secret: 'a'.repeat(64) }));
     const auth = require(${JSON.stringify(authFile)});
     const sessions = () => JSON.parse(fs.readFileSync('data/sessions.json', 'utf8'));
     const account = result => { assert.equal(result.ok, true, result.error); return result.account; };
     ${body}
   `], { cwd: folder, encoding: "utf8", windowsHide: true, timeout: 15_000 });
 }
+
+test("invalid registrations and occupied names cannot exhaust the account creation quota", t => {
+  runAuth(fixture(t), `
+    const ip = 'registration-test-ip';
+    const now = Date.now();
+    for (let i = 0; i < 40; i++) assert.equal(auth.registerUser('', '', ip).ok, false);
+    account(auth.registerUser('quota-one', 'Password123!', ip));
+    for (let i = 0; i < 20; i++) assert.match(auth.registerUser('quota-one', 'Password123!', ip).error, /занят/);
+    account(auth.registerUser('quota-two', 'Password123!', ip));
+    account(auth.registerUser('quota-three', 'Password123!', ip));
+    assert.match(auth.registerUser('quota-four', 'Password123!', ip).error, /Лимит/);
+    Date.now = () => now + 61_000;
+    account(auth.registerUser('quota-four', 'Password123!', ip));
+    assert.equal(auth.authCredentialsError({}, 'Password123!'), 'Введите логин и пароль');
+    assert.ok(auth.authCredentialsError('quota-one', 'x'.repeat(129)));
+  `);
+});
 
 test("multiple logins survive restart; logout revokes only its token", t => {
   const folder = fixture(t);
@@ -99,6 +118,7 @@ test("profile edits preserve the requesting token and update every session", t =
       const restored = account(auth.restoreSession(token));
       assert.equal(restored.token, token);
       assert.equal(restored.displayName, 'New name');
+      assert.equal(restored.username, 'profile-user');
       assert.equal(restored.bio, 'New bio');
       assert.equal(restored.avatarUrl, avatarUrl);
     }
@@ -113,6 +133,66 @@ test("profile edits preserve the requesting token and update every session", t =
   runAuth(folder, `
     const token = sessions().find(row => account(auth.restoreSession(row.token)).username === 'profile-user').token;
     assert.equal(account(auth.restoreSession(token)).bio, 'Second edit');
+  `);
+});
+
+test("nickname changes preserve identity and sessions, validate uniqueness and survive restart", t => {
+  const folder = fixture(t);
+  runAuth(folder, `
+    const first = account(auth.registerUser('old-nickname', 'Password123!'));
+    const second = account(auth.loginUser('old-nickname', 'Password123!'));
+    const other = account(auth.registerUser('occupied', 'Password123!'));
+    auth.bindSocketAuth('second', second.token);
+    const updated = account(auth.updateProfile(first.userId, { username: ' @New.Name ' }, first.token));
+    assert.equal(updated.username, 'New.Name');
+    assert.equal(updated.userId, first.userId);
+    assert.equal(updated.token, first.token);
+    assert.equal(updated.displayName, first.displayName);
+    assert.equal(auth.loginUser('old-nickname', 'Password123!').ok, false);
+    assert.equal(account(auth.loginUser('NEW.NAME', 'Password123!')).userId, first.userId);
+    for (const token of [first.token, second.token]) {
+      assert.equal(account(auth.restoreSession(token)).username, 'New.Name');
+    }
+    assert.equal(auth.getSocketAccount('second').username, 'New.Name');
+    assert.equal(auth.listUsers().filter(user => user.id === first.userId).length, 1);
+    const before = fs.readFileSync('data/users.json', 'utf8');
+    for (const username of ['OCCUPIED', '', 'ab', 'a'.repeat(25), 'has space', '@@invalid', 'bad/name', null, 123]) {
+      const rejected = auth.updateProfile(first.userId, { username, bio: 'must not save' }, first.token);
+      assert.equal(rejected.ok, false, String(username));
+      assert.equal(account(auth.restoreSession(first.token)).username, 'New.Name');
+      assert.equal(account(auth.restoreSession(first.token)).bio, '');
+      assert.equal(fs.readFileSync('data/users.json', 'utf8'), before);
+    }
+    assert.equal(auth.updateProfile(first.userId, { username: 'stolen' }, other.token).ok, false);
+    assert.equal(account(auth.updateProfile(first.userId, { username: 'new.name' }, second.token)).username, 'new.name');
+    assert.equal(auth.listUsers().filter(user => user.id === first.userId).length, 1);
+    fs.writeFileSync('rename.json', JSON.stringify({ first, second }));
+  `);
+  runAuth(folder, `
+    const {first, second} = JSON.parse(fs.readFileSync('rename.json', 'utf8'));
+    for (const token of [first.token, second.token]) {
+      assert.equal(account(auth.restoreSession(token)).username, 'new.name');
+    }
+    assert.equal(auth.loginUser('old-nickname', 'Password123!').ok, false);
+    assert.equal(account(auth.loginUser('new.name', 'Password123!')).userId, first.userId);
+    assert.equal(auth.listUsers().filter(user => user.id === first.userId).length, 1);
+    assert.equal(account(auth.registerUser('old-nickname', 'Password123!')).username, 'old-nickname');
+  `);
+});
+
+test("failed nickname persistence restores the previous name and login index", t => {
+  const folder = fixture(t);
+  runAuth(folder, `
+    const first = account(auth.registerUser('before-save', 'Password123!'));
+    const write = fs.writeFileSync;
+    fs.writeFileSync = () => { throw new Error('disk unavailable'); };
+    try {
+      assert.throws(() => auth.updateProfile(first.userId, { username: 'after-save' }, first.token), /disk unavailable/);
+    } finally { fs.writeFileSync = write; }
+    assert.equal(account(auth.restoreSession(first.token)).username, 'before-save');
+    assert.equal(auth.loginUser('after-save', 'Password123!').ok, false);
+    assert.equal(account(auth.loginUser('before-save', 'Password123!')).userId, first.userId);
+    assert.equal(auth.listUsers().filter(user => user.id === first.userId).length, 1);
   `);
 });
 

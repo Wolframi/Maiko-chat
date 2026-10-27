@@ -42,7 +42,8 @@ async function main() {
     } while (Date.now() < deadline);
     assert.equal(state.phase, 'ready');
     const health = await fetch(`http://127.0.0.1:${port}/api/health`).then((response) => response.json());
-    assert.equal(health.service, 'pulse');
+    assert.equal(health.ok, true);
+    assert.equal(health.service, undefined);
     assert.equal(state.mode, 'local');
     await app.close(); app = undefined;
     await assert.rejects(fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(2000) }));

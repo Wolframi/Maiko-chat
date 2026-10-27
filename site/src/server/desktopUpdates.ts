@@ -7,8 +7,8 @@ export function createDesktopUpdateHandler(storage: Storage | null) {
     const pathname = (req.url || "").split("?")[0];
     if (!pathname.startsWith("/desktop-updates-s3/")) return false;
     res.setHeader("Cache-Control", "no-store");
-    const name = pathname.slice("/desktop-updates-s3/".length);
-    if (!/^(latest\.yml|Maiko-Setup-\d+\.\d+\.\d+\.exe(?:\.blockmap)?)$/.test(name)) {
+    let name = pathname.slice("/desktop-updates-s3/".length);
+    if (!/^(latest\.yml|latest\.exe|Maiko-Setup-\d+\.\d+\.\d+\.exe(?:\.blockmap)?)$/.test(name)) {
       res.writeHead(404); res.end(); return true;
     }
     if (req.method !== "GET" && req.method !== "HEAD") {
@@ -21,6 +21,12 @@ export function createDesktopUpdateHandler(storage: Storage | null) {
         res.writeHead(200, { "Content-Type": "text/yaml; charset=utf-8", "Content-Length": body.length });
         res.end(req.method === "HEAD" ? undefined : body);
       } else {
+        if (name === "latest.exe") {
+          const metadata = (await storage.manifest()).toString("utf8");
+          const version = /^version: (\d+\.\d+\.\d+)\s*$/m.exec(metadata)?.[1];
+          if (!version) throw new Error("Invalid desktop release version");
+          name = `Maiko-Setup-${version}.exe`;
+        }
         const { url, size } = await storage.download(name);
         // Only metadata passes through this server. Installer and Range bytes
         // go straight from the private S3 bucket to electron-updater.

@@ -22,6 +22,7 @@ import type {
 } from "@/lib/types";
 import { Avatar } from "@/components/chat/Avatar";
 import { GuildMemberList } from "@/components/chat/GuildMemberList";
+import { GroupCodeJoinForm } from "@/components/chat/GroupInvitePanel";
 import {
   IconClose,
   IconHash,
@@ -30,7 +31,6 @@ import {
   IconPlus,
   IconSearch,
   IconTrash,
-  IconUserPlus,
   IconVolume,
 } from "@/lib/icons";
 import { ConfirmDialog } from "@/components/chat/ConfirmDialog";
@@ -39,6 +39,7 @@ import { bareMediaUrl, signedMediaSrc } from "@/lib/files";
 import { isChatMuted } from "@/lib/mute";
 import { easeOutSoft, panelVariants } from "@/lib/motion";
 import type { RailFocus } from "@/components/chat/ServerRail";
+import { nicknameValue, personSearchScore } from "@/lib/username";
 
 type ChatSidebarProps = {
   chats: ChatInfo[];
@@ -55,9 +56,8 @@ type ChatSidebarProps = {
     topic: string,
     visibility: GroupVisibility,
   ) => Promise<{ ok: boolean; error?: string }>;
-  onInviteToGroup?: (groupId: string, userId: string) => void;
+  onJoinByCode?: (code: string) => Promise<{ ok: boolean; error?: string }>;
   onSearchPeople?: (query: string) => Promise<PeopleUser[]>;
-  onSuggestPeople?: () => Promise<PeopleUser[]>;
   onSearchGroups?: (
     query: string,
   ) => Promise<{ ok: boolean; groups: PublicGroupHit[] }>;
@@ -391,9 +391,8 @@ export function ChatSidebar({
   onOpenChat,
   onOpenDm,
   onCreateGroup,
-  onInviteToGroup,
+  onJoinByCode,
   onSearchPeople,
-  onSuggestPeople,
   onSearchGroups,
   onJoinGroup,
   onToggleMute,
@@ -422,12 +421,9 @@ export function ChatSidebar({
   const [visibility, setVisibility] = useState<GroupVisibility>("public");
   const [query, setQuery] = useState("");
   const [searchHits, setSearchHits] = useState<PeopleUser[]>([]);
-  const [suggestedPeople, setSuggestedPeople] = useState<PeopleUser[]>([]);
   const [groupHits, setGroupHits] = useState<PublicGroupHit[]>([]);
   const [joiningGroupId, setJoiningGroupId] = useState<string | null>(null);
   const [creatingGroup, setCreatingGroup] = useState(false);
-  const [inviteQuery, setInviteQuery] = useState("");
-  const [inviteHits, setInviteHits] = useState<PeopleUser[]>([]);
   const [voiceTitle, setVoiceTitle] = useState("");
   const [creatingVoice, setCreatingVoice] = useState(false);
   const [pendingVoiceDelete, setPendingVoiceDelete] = useState<{
@@ -443,21 +439,7 @@ export function ChatSidebar({
     title: string;
   } | null>(null);
   useEffect(() => {
-    if (focus !== "dms" || !onSuggestPeople) {
-      setSuggestedPeople([]);
-      return;
-    }
-    let cancelled = false;
-    void onSuggestPeople().then((users) => {
-      if (!cancelled) setSuggestedPeople(users);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [focus, onSuggestPeople]);
-
-  useEffect(() => {
-    if (focus !== "dms") {
+    if (focus !== "dms" && focus !== "home") {
       setSearchHits([]);
       setGroupHits([]);
       return;
@@ -465,14 +447,14 @@ export function ChatSidebar({
     const q = query.trim();
     let cancelled = false;
     const timer = window.setTimeout(() => {
-      if (onSearchPeople && q.length >= 1) {
+      if (onSearchPeople && nicknameValue(q).length >= 2) {
         void onSearchPeople(q).then((users) => {
           if (!cancelled) setSearchHits(users);
         });
       } else {
         setSearchHits([]);
       }
-      if (onSearchGroups) {
+      if (onSearchGroups && focus === "dms") {
         void onSearchGroups(q).then((result) => {
           if (cancelled) return;
           // Keep previous hits on rate-limit / error — don't flash "not found".
@@ -485,32 +467,6 @@ export function ChatSidebar({
       window.clearTimeout(timer);
     };
   }, [query, focus, onSearchPeople, onSearchGroups]);
-
-  function activeGuildPending(value: RailFocus) {
-    return value !== "home" && value !== "dms" && value !== "create";
-  }
-
-  useEffect(() => {
-    if (!activeGuildPending(focus) || !onSearchPeople) {
-      setInviteHits([]);
-      return;
-    }
-    const q = inviteQuery.trim();
-    if (q.length < 1) {
-      setInviteHits([]);
-      return;
-    }
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      void onSearchPeople(q).then((users) => {
-        if (!cancelled) setInviteHits(users);
-      });
-    }, 180);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [inviteQuery, focus, onSearchPeople]);
 
   const mutedIds = useMemo(() => {
     const set = new Set<string>();
@@ -528,9 +484,10 @@ export function ChatSidebar({
         matchesQuery(chat.title, query) ||
         matchesQuery(chat.topic || "", query) ||
         matchesQuery(chat.lastMessage?.text || "", query) ||
-        matchesQuery(chat.lastMessage?.author || "", query),
+        matchesQuery(chat.lastMessage?.author || "", query) ||
+        people.some((user) => user.id === chat.peerId && personSearchScore(user, query) < 99),
     );
-  }, [chats, query]);
+  }, [chats, query, people]);
 
   // Home is DM-only; groups live in the server rail / guild sidebar.
   const dms = useMemo(
@@ -540,30 +497,20 @@ export function ChatSidebar({
 
   const others = useMemo(() => {
     const q = query.trim();
-    // While searching — trust server results (full user directory).
-    if (q) {
-      const byId = new Map<string, PeopleUser>();
-      for (const user of searchHits) {
-        if (user.id !== currentUserId) byId.set(user.id, user);
-      }
-      // Keep local matches too (e.g. while the request is in flight).
-      for (const user of people) {
-        if (user.id === currentUserId || byId.has(user.id)) continue;
-        if (
-          matchesQuery(user.displayName || "", q) ||
-          matchesQuery(user.username, q)
-        ) {
-          byId.set(user.id, user);
-        }
-      }
-      return [...byId.values()];
+    if (nicknameValue(q).length < 2) return [];
+    const byId = new Map<string, PeopleUser>();
+    for (const user of searchHits) {
+      if (user.id !== currentUserId && personSearchScore(user, q) < 99) byId.set(user.id, user);
     }
-    // Empty query: suggested directory (online first), fall back to contacts.
-    if (suggestedPeople.length) {
-      return suggestedPeople.filter((user) => user.id !== currentUserId);
+    // Keep local matches too (e.g. while the request is in flight).
+    for (const user of people) {
+      if (user.id === currentUserId || byId.has(user.id)) continue;
+      if (personSearchScore(user, q) < 99) {
+        byId.set(user.id, user);
+      }
     }
-    return people.filter((user) => user.id !== currentUserId);
-  }, [people, currentUserId, query, searchHits, suggestedPeople]);
+    return [...byId.values()].sort((a, b) => personSearchScore(a, q) - personSearchScore(b, q));
+  }, [people, currentUserId, query, searchHits]);
 
   const peopleById = useMemo(() => {
     const map = new Map<string, PeopleUser>();
@@ -575,38 +522,6 @@ export function ChatSidebar({
     if (focus === "home" || focus === "dms" || focus === "create") return null;
     return chats.find((chat) => chat.id === focus && chat.type === "group") || null;
   }, [chats, focus]);
-
-  const inviteCandidates = useMemo(() => {
-    if (!activeGuild) return [];
-    const members = new Set(activeGuild.memberIds || []);
-    const byId = new Map<string, PeopleUser>();
-    for (const user of people) {
-      if (user.id !== currentUserId && !members.has(user.id)) {
-        byId.set(user.id, user);
-      }
-    }
-    for (const user of inviteHits) {
-      if (user.id !== currentUserId && !members.has(user.id)) {
-        byId.set(user.id, user);
-      }
-    }
-    let list = [...byId.values()];
-    const q = inviteQuery.trim();
-    if (q) {
-      list = list.filter(
-        (user) =>
-          matchesQuery(user.displayName || "", q) ||
-          matchesQuery(user.username, q),
-      );
-    }
-    list.sort((a, b) =>
-      (a.displayName || a.username).localeCompare(
-        b.displayName || b.username,
-        "ru",
-      ),
-    );
-    return list.slice(0, 80);
-  }, [activeGuild, people, inviteHits, currentUserId, inviteQuery]);
 
   const guildMembers = useMemo(() => {
     if (!activeGuild) return [];
@@ -729,7 +644,7 @@ export function ChatSidebar({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder={
-              focus === "dms" ? "Имя, логин или группа…" : "Поиск диалогов…"
+              focus === "dms" ? "Имя, @никнейм или группа…" : "Поиск диалогов и @никнеймов…"
             }
             aria-label={
               focus === "dms" ? "Поиск людей и групп" : "Поиск диалогов"
@@ -1041,55 +956,7 @@ export function ChatSidebar({
                 })
               )}
 
-              <div data-guild-anchor="invite">
-              <p className="sidebar__section">Пригласить</p>
-              {onInviteToGroup ? (
-                <>
-                  <label className="sidebar__member-search">
-                    <IconSearch size={14} />
-                    <input
-                      value={inviteQuery}
-                      onChange={(event) => setInviteQuery(event.target.value)}
-                      placeholder="Имя или логин…"
-                      aria-label="Пригласить в группу"
-                      autoComplete="off"
-                    />
-                  </label>
-                  {inviteQuery.trim().length < 1 ? null : inviteCandidates.length === 0 ? (
-                    <p className="sidebar__meta-line">Никого не нашли</p>
-                  ) : (
-                    <div className="sidebar__invite-list">
-                      {inviteCandidates.map((user) => {
-                        const name = user.displayName || user.username;
-                        return (
-                          <button
-                            key={user.id}
-                            type="button"
-                            className="member-pick"
-                            onClick={() => {
-                              onInviteToGroup(activeGuild.id, user.id);
-                              setInviteQuery("");
-                              setInviteHits([]);
-                            }}
-                          >
-                            <span className="person-item__avatar">
-                              <Avatar name={name} src={user.avatarUrl} size="md" />
-                            </span>
-                            <span className="person-item__meta">
-                              <strong>{name}</strong>
-                              <em>@{user.username}</em>
-                            </span>
-                            <span className="member-pick__mark" aria-hidden>
-                              <IconUserPlus size={15} />
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </>
-              ) : null}
-              </div>
+              <div data-guild-anchor="invite" />
               </div>
 
               {showCallMembers ? (
@@ -1170,14 +1037,16 @@ export function ChatSidebar({
             </div>
           )}
 
-          {focus === "dms" && (
+          {(focus === "dms" || (focus === "home" && Boolean(query.trim()))) && (
             <div className="sidebar__list">
-              <p className="sidebar__section">Кому написать</p>
+              <p className="sidebar__section">Люди</p>
               {others.length === 0 ? (
                 <p className="sidebar__empty">
                   {query.trim()
-                    ? "Никого не найдено"
-                    : "Пока некого предложить — попробуйте поиск по имени."}
+                    ? nicknameValue(query).length < 2
+                      ? "Введите хотя бы 2 символа никнейма."
+                      : "Никого не найдено"
+                    : "Введите @никнейм, чтобы найти человека."}
                 </p>
               ) : (
                 others.map((user) => (
@@ -1206,6 +1075,7 @@ export function ChatSidebar({
                 ))
               )}
 
+              {focus === "dms" && <>
               <p className="sidebar__section">Открытые группы</p>
               {groupHits.length === 0 ? (
                 <p className="sidebar__empty">
@@ -1230,7 +1100,7 @@ export function ChatSidebar({
                         size="md"
                       />
                       <span className="discover-group__meta">
-                        <strong>{group.title}</strong>
+                        <strong title={group.title}>{group.title}</strong>
                         <em>
                           {group.members} уч.
                           {group.topic ? ` · ${group.topic}` : ""}
@@ -1248,7 +1118,10 @@ export function ChatSidebar({
                     ) : (
                       <button
                         type="button"
-                        className="discover-group__action"
+                        className="discover-group__action discover-group__action--join"
+                        aria-label="Присоединиться"
+                        title={`Присоединиться к группе «${group.title}»`}
+                        aria-busy={joiningGroupId === group.id}
                         disabled={!onJoinGroup || joiningGroupId === group.id}
                         onClick={() => {
                           if (!onJoinGroup) return;
@@ -1273,12 +1146,18 @@ export function ChatSidebar({
                             .finally(() => setJoiningGroupId(null));
                         }}
                       >
-                        {joiningGroupId === group.id ? "…" : "Присоединиться"}
+                        {joiningGroupId === group.id ? (
+                          <span aria-hidden="true">…</span>
+                        ) : (
+                          <IconPlus size={20} />
+                        )}
                       </button>
                     )}
                   </div>
                 ))
               )}
+              </>}
+              {focus === "dms" && onJoinByCode && <GroupCodeJoinForm onJoin={onJoinByCode} />}
             </div>
           )}
 
@@ -1326,14 +1205,14 @@ export function ChatSidebar({
                   />
                   <span>
                     <strong>Закрытая</strong>
-                    <em>Только по приглашению в ЛС</em>
+                    <em>Вступление по коду</em>
                   </span>
                 </label>
               </fieldset>
               <p className="sidebar__hint">
                 {visibility === "public"
-                  ? "Группа появится в поиске у всех. Закрытые — только по приглашению."
-                  : "Закрытую группу не видно в поиске — приглашайте людей через ЛС."}
+                  ? "Группа появится в поиске у всех. Закрытые — только по коду."
+                  : "Закрытую группу не видно в поиске — поделитесь кодом приглашения."}
               </p>
               <button type="submit" disabled={!title.trim() || creatingGroup}>
                 {creatingGroup ? "Создание…" : "Создать группу"}

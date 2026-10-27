@@ -44,3 +44,38 @@ test("missing S3 configuration fails explicitly without serving local artifacts"
     assert.equal(response.status, 503);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
+
+test("Windows download resolves the current published installer on every request", async () => {
+  let metadata = "version: 1.1.17\n";
+  const requests: string[] = [];
+  const handler = createDesktopUpdateHandler({
+    manifest: async () => Buffer.from(metadata),
+    download: async (name) => {
+      requests.push(name);
+      return { url: `https://s3.example.test/${name}`, size: 100 };
+    },
+  });
+  const server = createServer((req, res) => handler(req, res));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/desktop-updates-s3/latest.exe`;
+  try {
+    const first = await fetch(url, { redirect: "manual" });
+    assert.equal(first.status, 302);
+    assert.equal(first.headers.get("location"), "https://s3.example.test/Maiko-Setup-1.1.17.exe");
+    assert.equal(first.headers.get("cache-control"), "no-store");
+
+    metadata = "version: 1.1.18\n";
+    const next = await fetch(url, { redirect: "manual" });
+    assert.equal(next.headers.get("location"), "https://s3.example.test/Maiko-Setup-1.1.18.exe");
+    const head = await fetch(url, { method: "HEAD" });
+    assert.equal(head.status, 200);
+    assert.equal(head.headers.get("content-length"), "100");
+    assert.equal(await head.text(), "");
+    assert.equal((await fetch(url, { method: "POST" })).status, 405);
+
+    for (metadata of ["", "version: ../../private\n", "version: 1.1.18-beta\n"]) {
+      assert.equal((await fetch(url)).status, 503);
+    }
+    assert.deepEqual(requests, ["Maiko-Setup-1.1.17.exe", "Maiko-Setup-1.1.18.exe", "Maiko-Setup-1.1.18.exe"]);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+});

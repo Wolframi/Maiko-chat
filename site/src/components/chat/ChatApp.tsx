@@ -12,29 +12,22 @@ import {
 } from "react";
 import { AnimatePresence, motion, MotionConfig } from "motion/react";
 import { defaultTransition, easeOutSoft, softSpring } from "@/lib/motion";
-import { useChat } from "@/hooks/useChat";
-import { useCall } from "@/hooks/useCall";
-import { useVoiceChannel } from "@/hooks/useVoiceChannel";
+import { ChatRuntimeProvider, ChatRuntimeReady, useChatRuntime, useChatShell, useCallShell, useVoiceShell } from "./ChatRuntime";
+import { ThreadMessages, ThreadComposer, ConnectedSidebar, ConnectedServerRail, ConnectedChatInfoPanel } from "./ConnectedChatViews";
+import { ConnectedCallOverlay, ConnectedVoiceOverlay, ConnectedVoiceDock, DirectCallChip, GroupCallChip } from "./ConnectedCallViews";
+import { useHistorySearch } from "@/hooks/useHistorySearch";
 import { configureCallAudioCapture } from "@/lib/webrtcMedia";
 import { JoinGate } from "@/components/chat/JoinGate";
-import { Composer } from "@/components/chat/Composer";
-import { ChatSidebar } from "@/components/chat/ChatSidebar";
-import { ServerRail, type RailFocus } from "@/components/chat/ServerRail";
+import { GroupInviteButton } from "@/components/chat/GroupInvitePanel";
+import { type RailFocus } from "@/components/chat/ServerRail";
 import { GuildMemberList } from "@/components/chat/GuildMemberList";
-import { CallOverlay } from "@/components/chat/CallOverlay";
-import { VoiceOverlay } from "@/components/chat/VoiceOverlay";
-import { VoiceDock } from "@/components/chat/VoiceDock";
-import { HeaderCallChip } from "@/components/chat/HeaderCallChip";
 import { ProfilePanel } from "@/components/chat/ProfilePanel";
-import { ChatInfoPanel } from "@/components/chat/ChatInfoPanel";
-import { MessageList } from "@/components/chat/MessageList";
 import { AudioPlaybackBar } from "@/components/chat/AudioPlaybackBar";
 import dynamic from "next/dynamic";
 import { HologramMaiko } from "@/components/chat/HologramMaiko";
+import type { MaikoIntro } from "@/lib/maikoIntro";
 import { Avatar } from "@/components/chat/Avatar";
 import {
-  collectRoomAudioTracks,
-  setRoomAudioTracks,
   stopAudioPlayback,
 } from "@/lib/audioPlayback";
 
@@ -66,7 +59,6 @@ import {
   IconMore,
   IconPhone,
   IconSearch,
-  IconUsers,
 } from "@/lib/icons";
 import { ConfirmDialog } from "@/components/chat/ConfirmDialog";
 import type { ChatMessage, RoomMediaItem } from "@/lib/types";
@@ -88,25 +80,32 @@ type ReplyDraft = {
   text: string;
 };
 
-export function ChatApp() {
+export function ChatApp({ intro }: { intro?: MaikoIntro }) {
+  return <ChatRuntimeProvider><ChatRuntimeReady><ChatWorkspace intro={intro} /></ChatRuntimeReady></ChatRuntimeProvider>;
+}
+
+function ChatWorkspace({ intro }: { intro?: MaikoIntro }) {
+  const runtime = useChatRuntime();
   const {
     socket,
     connected,
     authReady,
     account,
     session,
-    messages,
     historyLoading,
+    loadOlderMessages,
+    loadNewerMessages,
+    loadLatestMessages,
+    loadMessageWindow,
     online,
     chats,
     people,
     currentChat,
-    othersTyping,
     unreadTotal,
     authError,
     sidebarError,
-    composerError,
     profileError,
+    registrationRequired,
     register,
     login,
     logout,
@@ -116,7 +115,8 @@ export function ChatApp() {
     openDm,
     createGroup,
     joinPublicGroup,
-    inviteToGroup,
+    getGroupInviteCode,
+    joinGroupByCode,
     respondGroupInvite,
     createVoiceChannel,
     deleteVoiceChannel,
@@ -127,7 +127,6 @@ export function ChatApp() {
     updateGroupVisibility,
     fetchRoomMedia,
     searchPeople,
-    suggestPeople,
     searchPublicGroups,
     leave,
     sendMessage,
@@ -137,14 +136,13 @@ export function ChatApp() {
     editMessage,
     forwardMessage,
     markChatVisibleRead,
-    peerReadAt,
     chatMembers,
+    deleteDm,
     deleteGroup,
     leaveGroup,
     sendFiles,
     sendRemoteFile,
     cancelUpload,
-    logCall,
     markAllRead,
     reactToMessage,
     transcribeVoice,
@@ -162,55 +160,13 @@ export function ChatApp() {
     installStickerPack,
     uninstallStickerPack,
     sendSticker,
-  } = useChat();
+  } = useChatShell();
 
   const {
-    incoming,
-    active,
-    localStream,
-    remoteStream,
-    muted,
-    deafened,
-    cameraOff,
-    sharingScreen,
-    mediaBusy,
-    remoteSharingScreen,
-    remoteCameraOff,
-    minimized,
-    status,
-    durationLabel,
-    networkQuality,
-    localSpeaking,
-    remoteSpeaking,
-    remoteAudioRef,
-    noiseFilterEnabled,
-    noiseFilterKind,
-    startCall,
-    acceptCall,
-    rejectCall,
-    endCall,
-    toggleMute,
-    toggleDeafen,
-    toggleNoiseFilter,
-    toggleCamera,
-    flipCamera,
-    canFlipCamera,
-    toggleScreenShare,
-    setMinimized,
-  } = useCall({
-    socket,
-    selfId: account?.userId,
-    token: account?.token,
-    onLog: logCall,
-  });
-
-  const voice = useVoiceChannel({
-    socket,
-    selfId: account?.userId,
-    selfName: account?.displayName || account?.username,
-    token: account?.token,
-    callBusy: Boolean(active || incoming),
-  });
+    incoming, active, cameraOff, sharingScreen, remoteSharingScreen, remoteCameraOff,
+    minimized, startCall, rejectCall, endCall, setMinimized,
+  } = useCallShell();
+  const voice = useVoiceShell();
   const leaveVoice = voice.leave;
   const joinVoice = voice.join;
   const voiceActive = voice.active;
@@ -291,10 +247,13 @@ export function ChatApp() {
   const [flashOnline, setFlashOnline] = useState(false);
   const [roomSearchOpen, setRoomSearchOpen] = useState(false);
   const [roomSearch, setRoomSearch] = useState("");
-  const [matchIndex, setMatchIndex] = useState(0);
+  const [messageJump, setMessageJump] = useState<{ id: string; nonce: number } | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState(false);
   const [confirmLeaveGroup, setConfirmLeaveGroup] = useState(false);
+  const [deleteDmTarget, setDeleteDmTarget] = useState<{ id: string; title: string } | null>(null);
+  const [deleteDmScope, setDeleteDmScope] = useState<"self" | "both">("self");
+  const [chatActionBusy, setChatActionBusy] = useState(false);
   const [unreadAtOpen, setUnreadAtOpen] = useState(0);
   const [chatMuted, setChatMuted] = useState(false);
   const [mutedVersion, setMutedVersion] = useState(0);
@@ -312,7 +271,6 @@ export function ChatApp() {
     setSidebarOpen(false);
     setRoomSearch("");
     setRoomSearchOpen(false);
-    setMatchIndex(0);
     setMenuOpen(false);
     setChatInfoOpen(false);
 
@@ -335,8 +293,9 @@ export function ChatApp() {
 
   const handleOpenChat = useCallback(
     (chatId: string) => {
-      const chat = chats.find((item) => item.id === chatId);
-      const parent = chats.find((item) =>
+      const currentChats = runtime.list.getSnapshot()?.chats ?? [];
+      const chat = currentChats.find((item) => item.id === chatId);
+      const parent = currentChats.find((item) =>
         item.textChannels?.some((channel) => channel.id === chatId),
       );
       const textChannel = parent?.textChannels?.find((channel) => channel.id === chatId);
@@ -361,7 +320,7 @@ export function ChatApp() {
       }
       openChat(chatId);
     },
-    [chats, openChat],
+    [openChat, runtime],
   );
   const handleOpenStickerPack = useCallback((packId: string, stickerId: string) => {
     setStickerViewer({ packId, stickerId });
@@ -525,7 +484,7 @@ export function ChatApp() {
 
   const handleOpenDm = useCallback(
     (userId: string) => {
-      const existing = chats.find(
+      const existing = runtime.list.getSnapshot()?.chats.find(
         (chat) => chat.type === "dm" && chat.peerId === userId,
       );
       const person =
@@ -543,7 +502,7 @@ export function ChatApp() {
       setMembersOpen(false);
       openDm(userId);
     },
-    [chats, chatMembers, openDm, people],
+    [runtime, chatMembers, openDm, people],
   );
 
   const [pendingGuildPanel, setPendingGuildPanel] = useState<string | null>(
@@ -784,6 +743,7 @@ export function ChatApp() {
 
   const handleSaveProfile = useCallback(
     async (patch: {
+      username?: string;
       displayName: string;
       bio: string;
       avatarUrl?: string | null;
@@ -802,11 +762,6 @@ export function ChatApp() {
     setSidebarPanel("dms");
     setSidebarOpen(true);
   }, []);
-
-  const groups = useMemo(
-    () => chats.filter((chat) => chat.type === "group"),
-    [chats],
-  );
 
   const selectHome = useCallback(() => {
     setSidebarPanel("home");
@@ -925,8 +880,7 @@ export function ChatApp() {
       currentChat.type === "group" &&
       currentChat.id !== "lobby" &&
       currentChat.id !== "random" &&
-      currentChat.memberIds?.includes(account.userId) &&
-      currentChat.createdBy !== account.userId,
+      currentChat.memberIds?.includes(account.userId),
   );
 
   const canModerateMessages = Boolean(
@@ -967,26 +921,14 @@ export function ChatApp() {
       (currentChat?.peerId === active.peerId ? currentChat.avatarUrl : null) ||
       null
     : null;
-  const callChipSubtitle = active
-    ? `${
-        status === "На линии"
-          ? durationLabel
-          : !status || /^Соединение/.test(status)
-            ? "Подключение…"
-            : status
-      }${sharingScreen || remoteSharingScreen ? " · экран" : ""}`
-    : "";
-  const voiceChipSubtitle = voice.connectionLabel
-    ? voice.connectionLabel
-    : `${
-        voice.peers.length === 0
-          ? "только вы"
-          : `${voice.peers.length + 1} в канале`
-      }${
-        voice.sharingScreen || voice.peers.some((peer) => peer.sharingScreen)
-          ? " · экран"
-          : ""
-      }`;
+  const handleExpandCall = useCallback(() => {
+    if (active?.chatId) handleOpenChat(active.chatId);
+    setMinimized(false);
+  }, [active?.chatId, handleOpenChat, setMinimized]);
+  const handleExpandVoice = useCallback(() => {
+    if (voiceActive?.groupId) handleOpenChat(voiceActive.groupId);
+    setVoiceMinimized(false);
+  }, [voiceActive?.groupId, handleOpenChat, setVoiceMinimized]);
 
   const groupTextChannels = useMemo(() => {
     if (currentChat?.type !== "group") return [];
@@ -1213,7 +1155,7 @@ export function ChatApp() {
       const user = byId.get(id);
       return user ? [user] : [];
     });
-  }, [chatMembers, currentChat, people]);
+  }, [chatMembers, currentChat?.type, currentChat?.memberIds, people]);
 
   const handleOpenChatInfo = useCallback(() => {
     if (!showChatInfo) return;
@@ -1221,13 +1163,6 @@ export function ChatApp() {
     setMembersOpen(false);
     setChatInfoOpen(true);
   }, [showChatInfo]);
-
-  const handleOpenMembers = useCallback(() => {
-    if (!showMemberRail) return;
-    setMenuOpen(false);
-    setChatInfoOpen(false);
-    setMembersOpen(true);
-  }, [showMemberRail]);
 
   useEffect(() => {
     setMembersOpen(false);
@@ -1304,45 +1239,28 @@ export function ChatApp() {
     toast("Скопировано");
   }, []);
 
-  const searchMatches = useMemo(() => {
-    const q = roomSearch.trim().toLowerCase();
-    if (!q) return [] as string[];
-    return messages
-      .filter((message) => {
-        if (message.kind === "system" || message.kind === "call") return false;
-        return (
-          message.text.toLowerCase().includes(q) ||
-          message.author.toLowerCase().includes(q) ||
-          Boolean(message.file?.name.toLowerCase().includes(q))
-        );
-      })
-      .map((message) => message.id);
-  }, [messages, roomSearch]);
-
-  useEffect(() => {
-    setMatchIndex(0);
-  }, [roomSearch, session?.room]);
-
-  const activeMatchId = searchMatches[matchIndex] || null;
+  const historySearch = useHistorySearch(socket, connected, session?.room, roomSearch);
+  const activeMatchId = historySearch.activeId;
 
   const jumpToMessage = useCallback(
-    (messageId: string) => {
-      const el = document.getElementById(`msg-${messageId}`);
-      if (!el) {
+    async (messageId: string) => {
+      if (!await loadMessageWindow(messageId)) {
         toast("Сообщение недоступно в истории");
         return;
       }
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-      el.classList.add("is-flash");
-      window.setTimeout(() => el.classList.remove("is-flash"), 1200);
+      setMessageJump({ id: messageId, nonce: Date.now() });
     },
-    [toast],
+    [loadMessageWindow],
   );
 
   useEffect(() => {
-    if (!session?.room) return;
-    setRoomAudioTracks(session.room, collectRoomAudioTracks(messages));
-  }, [messages, session?.room]);
+    if (!activeMatchId) return;
+    const controller = new AbortController();
+    void loadMessageWindow(activeMatchId, controller.signal).then(ok => {
+      if (!controller.signal.aborted && !ok) toast("Сообщение недоступно в истории");
+    });
+    return () => { controller.abort(); };
+  }, [activeMatchId, loadMessageWindow]);
 
   const focusPlayingTrack = useCallback(
     (roomId: string, messageId: string) => {
@@ -1360,11 +1278,9 @@ export function ChatApp() {
     const pending = pendingAudioJumpRef.current;
     if (!pending || historyLoading) return;
     if (session?.room !== pending.roomId) return;
-    const el = document.getElementById(`msg-${pending.messageId}`);
-    if (!el) return;
     pendingAudioJumpRef.current = null;
-    jumpToMessage(pending.messageId);
-  }, [historyLoading, jumpToMessage, messages, session?.room]);
+    void jumpToMessage(pending.messageId);
+  }, [historyLoading, jumpToMessage, session?.room]);
 
   const handleDiscard = useCallback(
     (messageId: string) => {
@@ -1416,6 +1332,32 @@ export function ChatApp() {
     [editMessage, editingMessage, sendMessage, session?.room],
   );
 
+  const handleInviteRespond = useCallback((messageId: string, accept: boolean) => {
+    if (!session?.room) return;
+    void respondGroupInvite(
+      session.room,
+      messageId,
+      accept,
+    ).then((result) => {
+      if (!result.ok) {
+        toast.error(
+          result.error || "Не удалось ответить на приглашение",
+        );
+        return;
+      }
+      if (accept && result.groupId) {
+        toast.success("Вы вступили в группу");
+        handleOpenChat(result.groupId);
+      } else if (!accept) {
+        toast("Приглашение отклонено");
+      }
+    });
+  }, [session?.room, respondGroupInvite, handleOpenChat]);
+
+  const handleClearReply = useCallback(() => setReplyDraft(null), [setReplyDraft]);
+  const handleCancelEdit = useCallback(() => setEditingMessage(null), []);
+  const handleAttachmentsCleared = useCallback(() => toast("Вложения сброшены при смене чата"), []);
+
   const markReadThrottled = useRef(0);
   const handleMarkRead = useCallback(() => {
     const now = Date.now();
@@ -1436,15 +1378,39 @@ export function ChatApp() {
   }, [canDeleteGroup, currentChat, deleteGroup, toast]);
 
   const handleLeaveGroup = useCallback(async () => {
-    if (!currentChat?.id || !canLeaveGroup) return;
-    const ok = await leaveGroup(currentChat.id);
-    setConfirmLeaveGroup(false);
-    if (ok) {
-      setChatInfoOpen(false);
-      setMenuOpen(false);
-      toast("Вы вышли из группы");
-    }
-  }, [canLeaveGroup, currentChat, leaveGroup, toast]);
+    if (!currentChat?.id || !canLeaveGroup || chatActionBusy) return;
+    setChatActionBusy(true);
+    try {
+      const ok = await leaveGroup(currentChat.id);
+      if (ok) {
+        setConfirmLeaveGroup(false);
+        setChatInfoOpen(false);
+        setMenuOpen(false);
+        toast("Вы вышли из группы");
+      }
+    } finally { setChatActionBusy(false); }
+  }, [canLeaveGroup, currentChat, leaveGroup, chatActionBusy]);
+
+  const openDeleteDm = useCallback(() => {
+    if (currentChat?.type !== "dm") return;
+    setDeleteDmTarget({ id: currentChat.id, title: currentChat.title });
+    setDeleteDmScope("self");
+    setChatInfoOpen(false);
+    setMenuOpen(false);
+  }, [currentChat]);
+
+  const handleDeleteDm = useCallback(async () => {
+    if (!deleteDmTarget || chatActionBusy) return;
+    setChatActionBusy(true);
+    try {
+      if (await deleteDm(deleteDmTarget.id, deleteDmScope)) {
+        setDeleteDmTarget(null);
+        setEditingMessage(null);
+        setReplyDraft(null);
+        toast("Чат удалён");
+      }
+    } finally { setChatActionBusy(false); }
+  }, [deleteDmTarget, deleteDmScope, chatActionBusy, deleteDm, setReplyDraft]);
 
   const selfName = account?.displayName || account?.username || "";
   // Only a short positive flash when the link is healthy again — no "offline" copy.
@@ -1458,7 +1424,12 @@ export function ChatApp() {
   const [introVisible, setIntroVisible] = useState(true);
   const [siteReloaded, setSiteReloaded] = useState(false);
   useEffect(() => {
-    if (!introVisible) getDesktopMediaRuntime()?.reportSiteUpdate("ready");
+    if (introVisible) return;
+    const desktop = getDesktopMediaRuntime();
+    if (!desktop) return;
+    // Let the ready UI commit before Electron replaces its local animation.
+    const timer = window.setTimeout(() => desktop.reportSiteUpdate("ready"), 50);
+    return () => window.clearTimeout(timer);
   }, [introVisible]);
   const [authWash, setAuthWash] = useState(true);
   // Avoid hydration mismatch: reducedMotion="user" reads matchMedia on first client paint.
@@ -1472,6 +1443,11 @@ export function ChatApp() {
   // Start the intro clock after the particles load, including on slow connections.
   useEffect(() => {
     if (!authReady) return;
+    if (getDesktopMediaRuntime()) {
+      // Electron keeps the one local animation visible until this UI is ready.
+      setIntroVisible(false);
+      return;
+    }
 
     const reduced =
       typeof window !== "undefined" &&
@@ -1513,104 +1489,24 @@ export function ChatApp() {
           duration: 2200,
         }}
       />
-      <CallOverlay
-        incoming={incoming}
-        active={active}
-        localStream={localStream}
-        remoteStream={remoteStream}
-        muted={muted}
-        deafened={deafened}
-        cameraOff={cameraOff}
-        sharingScreen={sharingScreen}
-        mediaBusy={mediaBusy}
-        remoteSharingScreen={remoteSharingScreen}
-        remoteCameraOff={remoteCameraOff}
-        peerAvatarUrl={
-          active
-            ? people.find((user) => user.id === active.peerId)?.avatarUrl ||
-              (currentChat?.peerId === active.peerId
-                ? currentChat.avatarUrl
-                : null) ||
-              null
-            : null
-        }
+      <ConnectedCallOverlay
+        peerAvatarUrl={callChipAvatar}
         selfAvatarUrl={account?.avatarUrl || null}
-        incomingAvatarUrl={
-          incoming
-            ? people.find((user) => user.id === incoming.fromUserId)
-                ?.avatarUrl || null
-            : null
-        }
-        minimized={minimized}
-        status={status}
-        durationLabel={durationLabel}
-        networkQuality={networkQuality}
-        localSpeaking={localSpeaking}
-        remoteSpeaking={remoteSpeaking}
-        noiseFilterEnabled={noiseFilterEnabled}
-        noiseFilterKind={noiseFilterKind}
-        remoteAudioRef={remoteAudioRef}
+        incomingAvatarUrl={incoming ? people.find(user => user.id === incoming.fromUserId)?.avatarUrl || null : null}
         currentChatId={session?.room ?? null}
-        onAccept={() => acceptCall()}
-        onReject={() => rejectCall()}
-        onEnd={endCall}
-        onToggleMute={toggleMute}
-        onToggleDeafen={toggleDeafen}
-        onToggleNoiseFilter={toggleNoiseFilter}
-        onToggleCamera={toggleCamera}
-        onFlipCamera={flipCamera}
-        canFlipCamera={canFlipCamera}
-        onToggleScreenShare={toggleScreenShare}
-        onToggleMinimized={() => setMinimized((value) => !value)}
-        onExpandCall={() => {
-          if (active?.chatId) handleOpenChat(active.chatId);
-          setMinimized(false);
-        }}
+        onExpandCall={handleExpandCall}
       />
-
-      <VoiceOverlay
-        active={voice.active}
-        peers={voice.peers}
-        selfName={voice.selfName}
+      <ConnectedVoiceOverlay
         selfAvatarUrl={account?.avatarUrl || null}
-        localStream={voice.localStream}
-        remoteStreams={voice.remoteStreams}
-        muted={voice.muted}
-        deafened={voice.deafened}
-        cameraOff={voice.cameraOff}
-        sharingScreen={voice.sharingScreen}
-        mediaBusy={voice.mediaBusy}
-        minimized={voice.minimized}
-        currentGroupId={
-          voiceGroupOpen && voice.active
-            ? voice.active.groupId
-            : (session?.room ?? null)
-        }
-        selfSpeaking={voice.selfSpeaking}
-        noiseFilterEnabled={voice.noiseFilterEnabled}
-        noiseFilterKind={voice.noiseFilterKind}
-        connectionLabel={voice.connectionLabel}
-        connectionQuality={voice.connectionQuality}
-        onLeave={voice.leave}
-        onToggleMute={voice.toggleMute}
-        onToggleDeafen={voice.toggleDeafen}
-        onToggleNoiseFilter={voice.toggleNoiseFilter}
-        onToggleCamera={voice.toggleCamera}
-        onFlipCamera={voice.flipCamera}
-        canFlipCamera={voice.canFlipCamera}
-        onToggleScreenShare={voice.toggleScreenShare}
-        onToggleMinimized={() => voice.setMinimized((value) => !value)}
-        onExpand={() => {
-          if (voice.active?.groupId) handleOpenChat(voice.active.groupId);
-          voice.setMinimized(false);
-        }}
+        currentGroupId={voiceGroupOpen && voice.active ? voice.active.groupId : (session?.room ?? null)}
+        onExpand={handleExpandVoice}
       />
 
       <MediaLightbox
         item={lightbox}
         onClose={() => setLightbox(null)}
       />
-      
+
       <StickerPackViewer
         open={Boolean(stickerViewer)}
         packId={stickerViewer?.packId ?? null}
@@ -1622,9 +1518,8 @@ export function ChatApp() {
         onClose={() => setStickerViewer(null)}
       />
 
-      <ChatInfoPanel
+      <ConnectedChatInfoPanel
         open={chatInfoOpen && showChatInfo}
-        chat={currentChat}
         canEditAvatar={canEditGroupAvatar}
         canEditProfile={canEditGroupProfile}
         canDeleteGroup={canDeleteGroup}
@@ -1644,6 +1539,7 @@ export function ChatApp() {
             : undefined
         }
         onFetchMedia={handleFetchRoomMedia}
+        onDeleteDm={openDeleteDm}
         onOpenMedia={handleOpenRoomMedia}
         onDeleteGroup={() => {
           setChatInfoOpen(false);
@@ -1657,6 +1553,7 @@ export function ChatApp() {
 
       {account && (
         <ProfilePanel
+          socket={socket}
           open={profileOpen}
           account={account}
           connected={connected}
@@ -1680,9 +1577,9 @@ export function ChatApp() {
             initial={{ opacity: 0, scale: 0.98 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 1.015 }}
-            transition={{ duration: 0.42, ease: easeOut }}
+            transition={{ duration: getDesktopMediaRuntime() ? 0 : 0.42, ease: easeOut }}
           >
-            <HologramMaiko onReady={handleIntroReady} />
+            {!getDesktopMediaRuntime() && <HologramMaiko intro={intro} onReady={handleIntroReady} />}
             {siteReloaded && !getDesktopMediaRuntime() && <p className="boot__update" role="status">
               Сайт обновлён{peekMediaResume() ? " · возвращаемся в звонок…" : " · загружаем Майко…"}
             </p>}
@@ -1697,6 +1594,7 @@ export function ChatApp() {
             transition={{ duration: 0.45, ease: easeOut }}
           >
             <JoinGate
+              registrationRequired={registrationRequired}
               connected={connected}
               error={authError}
               onRegister={register}
@@ -1729,19 +1627,15 @@ export function ChatApp() {
               className={`workspace__sidebar ${sidebarOpen ? "is-open" : ""}`}
               ref={sidebarRef}
             >
-              <ServerRail
+              <ConnectedServerRail
                 focus={sidebarPanel}
-                groups={groups}
-                unreadHome={unreadTotal}
                 onSelectHome={selectHome}
                 onSelectDms={selectDms}
                 onSelectGroup={selectGroup}
                 onCreate={selectCreate}
               />
               <div className="workspace__sidebar-pane">
-              <ChatSidebar
-                chats={chats}
-                people={people}
+              <ConnectedSidebar
                 currentUserId={account.userId}
                 currentUserName={selfName}
                 currentChatId={session?.room}
@@ -1750,17 +1644,15 @@ export function ChatApp() {
                 onOpenChat={handleOpenChat}
                 onOpenDm={handleOpenDm}
                 onCreateGroup={handleCreateGroup}
-                onInviteToGroup={(groupId, userId) => {
-                  void inviteToGroup(groupId, userId).then((result) => {
-                    if (!result.ok) {
-                      toast.error(result.error || "Не удалось пригласить");
-                      return;
-                    }
-                    toast.success("Приглашение отправлено в ЛС");
-                  });
+                onJoinByCode={async (code) => {
+                  const result = await joinGroupByCode(code);
+                  if (result.ok && result.groupId) {
+                    toast.success("Вы присоединились к группе");
+                    setPendingGuildPanel(result.groupId);
+                  }
+                  return result;
                 }}
                 onSearchPeople={searchPeople}
-                onSuggestPeople={suggestPeople}
                 onSearchGroups={searchPublicGroups}
                 onJoinGroup={async (groupId) => {
                   const result = await joinPublicGroup(groupId);
@@ -1852,20 +1744,7 @@ export function ChatApp() {
                 ) : undefined}
               />
               {voice.active && (
-                <VoiceDock
-                  title={voice.active.title}
-                  connectionLabel={voice.connectionLabel}
-        connectionQuality={voice.connectionQuality}
-                  muted={voice.muted}
-                  deafened={voice.deafened}
-                  onToggleMute={voice.toggleMute}
-                  onToggleDeafen={voice.toggleDeafen}
-                  onLeave={voice.leave}
-                  onExpand={() => {
-                    if (voice.active?.groupId) handleOpenChat(voice.active.groupId);
-                    voice.setMinimized(false);
-                  }}
-                />
+                <ConnectedVoiceDock onExpand={handleExpandVoice} />
               )}
               </div>
             </div>
@@ -2023,53 +1902,15 @@ export function ChatApp() {
 
                 <div className="room__call-chip">
                   {directCallChip && active ? (
-                    <HeaderCallChip
-                      title={active.peerName}
-                      subtitle={callChipSubtitle}
-                      avatarUrl={callChipAvatar}
-                      mark="call"
-                      speaking={localSpeaking || remoteSpeaking}
-                      muted={muted}
-                      onOpen={() => {
-                        if (active.chatId) handleOpenChat(active.chatId);
-                        setMinimized(false);
-                      }}
-                      onToggleMute={toggleMute}
-                      onEnd={endCall}
-                    />
+                    <DirectCallChip avatarUrl={callChipAvatar} onOpen={handleExpandCall} />
                   ) : voiceCallChip && voice.active ? (
-                    <HeaderCallChip
-                      title={voice.active.title}
-                      subtitle={voiceChipSubtitle}
-                      mark="voice"
-                      speaking={
-                        voice.selfSpeaking ||
-                        voice.peers.some((peer) => peer.speaking)
-                      }
-                      muted={voice.muted}
-                      onOpen={() => {
-                        if (voice.active?.groupId) {
-                          handleOpenChat(voice.active.groupId);
-                        }
-                        voice.setMinimized(false);
-                      }}
-                      onToggleMute={voice.toggleMute}
-                      onEnd={voice.leave}
-                    />
+                    <GroupCallChip onOpen={handleExpandVoice} />
                   ) : null}
                 </div>
 
                 <div className="room__meta">
-                  {showMemberRail && (
-                    <button
-                      type="button"
-                      className={`icon-btn room__members-btn ${membersOpen ? "is-on" : ""}`}
-                      aria-label="Участники"
-                      title="Участники"
-                      onClick={handleOpenMembers}
-                    >
-                      <IconUsers />
-                    </button>
+                  {currentChat?.type === "group" && (
+                    <GroupInviteButton key={currentChat.id} groupId={currentChat.id} onGetCode={getGroupInviteCode} />
                   )}
                   {session && (
                     <button
@@ -2151,19 +1992,6 @@ export function ChatApp() {
                             onClick={() => setMenuOpen(false)}
                           />
                           <div className="room__more-menu" role="menu">
-                            {showMemberRail && (
-                              <button
-                                type="button"
-                                role="menuitem"
-                                onClick={handleOpenMembers}
-                              >
-                                <IconUsers size={16} />
-                                Участники
-                                {railMembers.length > 0
-                                  ? ` · ${railMembers.length}`
-                                  : ""}
-                              </button>
-                            )}
                             {showChatInfo && (
                               <button
                                 type="button"
@@ -2172,6 +2000,12 @@ export function ChatApp() {
                               >
                                 <IconImage size={16} />
                                 Медиа и файлы
+                              </button>
+                            )}
+                            {currentChat?.type === "dm" && (
+                              <button type="button" role="menuitem" className="is-danger" onClick={openDeleteDm}>
+                                <IconTrash size={16} />
+                                Удалить чат
                               </button>
                             )}
                             {canLeaveGroup && (
@@ -2290,13 +2124,11 @@ export function ChatApp() {
           } ${
             voice.active &&
             (voice.sharingScreen ||
-              voice.peers.some((peer) => peer.sharingScreen))
+              voice.hasRemoteScreen)
               ? "is-screen"
               : voice.active &&
                   (!voice.cameraOff ||
-                    voice.peers.some(
-                      (peer) => !peer.cameraOff && !peer.sharingScreen,
-                    ))
+                    voice.hasRemoteCamera)
                 ? "is-camera"
                 : ""
           }`}
@@ -2432,57 +2264,36 @@ export function ChatApp() {
                       <IconSearch size={15} />
                       <input
                         value={roomSearch}
+                        maxLength={200}
                         onChange={(event) => setRoomSearch(event.target.value)}
                         onKeyDown={(event) => {
                           if (event.key !== "Enter") return;
                           event.preventDefault();
-                          if (!searchMatches.length) return;
-                          setMatchIndex((index) => {
-                            if (event.shiftKey) {
-                              return (
-                                (index - 1 + searchMatches.length) %
-                                searchMatches.length
-                              );
-                            }
-                            return (index + 1) % searchMatches.length;
-                          });
+                          void historySearch.move(event.shiftKey ? -1 : 1);
                         }}
                         placeholder="Поиск · Enter далее"
                         autoFocus
                       />
-                      <span className="room__search-count">
-                        {roomSearch.trim()
-                          ? `${searchMatches.length ? matchIndex + 1 : 0}/${searchMatches.length}`
+                      <span className="room__search-count" role="status" title={historySearch.error ?? undefined}>
+                        {historySearch.error ? "Ошибка поиска" : historySearch.loading ? "Поиск…" : roomSearch.trim()
+                          ? `${historySearch.ids.length ? historySearch.index + 1 : 0}/${historySearch.ids.length}${historySearch.hasMore ? "+" : ""}`
                           : ""}
                       </span>
                       <button
                         type="button"
                         className="icon-btn"
                         aria-label="Предыдущее совпадение"
-                        disabled={!searchMatches.length}
-                        onClick={() =>
-                          setMatchIndex((index) =>
-                            searchMatches.length
-                              ? (index - 1 + searchMatches.length) %
-                                searchMatches.length
-                              : 0,
-                          )
-                        }
+                        disabled={historySearch.loading || !historySearch.ids.length}
+                        onClick={() => void historySearch.move(-1)}
                       >
                         <IconChevronUp size={16} />
                       </button>
                       <button
                         type="button"
                         className="icon-btn"
-                        aria-label="Следующее совпадение"
-                        disabled={!searchMatches.length}
-                        onClick={() =>
-                          setMatchIndex((index) =>
-                            searchMatches.length
-                              ? (index + 1) % searchMatches.length
-                              : 0,
-                          )
-                        }
+                        aria-label={historySearch.error ? "Повторить поиск" : "Следующее совпадение"}
+                        disabled={historySearch.loading || (!historySearch.ids.length && !historySearch.error)}
+                        onClick={() => void historySearch.move(1)}
                       >
                         <IconChevronDown size={16} />
                       </button>
@@ -2531,17 +2342,15 @@ export function ChatApp() {
                     animate={{ opacity: 1 }}
                     transition={{ duration: 0.22, ease: easeOut }}
                   >
-                    <MessageList
+                    <ThreadMessages
                       chatId={session.room}
-                      messages={messages}
-                      people={people}
-                      account={account}
-                      othersTyping={othersTyping}
                       searchQuery={roomSearch}
                       activeMatchId={activeMatchId}
-                      loading={historyLoading}
+                      onLoadNewer={loadNewerMessages}
+                      onLoadLatest={loadLatestMessages}
+                      onLoadOlder={loadOlderMessages}
+                      jumpRequest={messageJump}
                       unreadAtOpen={unreadAtOpen}
-                      peerReadAt={peerReadAt}
                       showOwnAvatar={
                         !(
                           (fullCallOpen && compactCallLayout) ||
@@ -2566,42 +2375,20 @@ export function ChatApp() {
                       onDelete={handleDeleteMessage}
                       onEdit={handleEditMessage}
                       onForward={setForwardMessageTarget}
-                      onInviteRespond={(messageId, accept) => {
-                        if (!session?.room) return;
-                        void respondGroupInvite(
-                          session.room,
-                          messageId,
-                          accept,
-                        ).then((result) => {
-                          if (!result.ok) {
-                            toast.error(
-                              result.error || "Не удалось ответить на приглашение",
-                            );
-                            return;
-                          }
-                          if (accept && result.groupId) {
-                            toast.success("Вы вступили в группу");
-                            handleOpenChat(result.groupId);
-                          } else if (!accept) {
-                            toast("Приглашение отклонено");
-                          }
-                        });
-                      }}
+                      onInviteRespond={handleInviteRespond}
                       onMarkRead={handleMarkRead}
                       canModerate={canModerateMessages}
                     />
                   </motion.div>
 
-                  <Composer
+                  <ThreadComposer
                     onSend={handleComposerSend}
                     onSendFiles={handleSendFiles}
                     onSendRemoteFile={handleSendRemoteFile}
                     onTyping={setTyping}
-                    disabled={historyLoading && !messages.length}
-                    error={composerError}
                     onClearError={clearComposerError}
                     replyTo={replyTo}
-                    onClearReply={() => setReplyDraft(null)}
+                    onClearReply={handleClearReply}
                     focusToken={session.room}
                     userId={account.userId}
                     token={account.token}
@@ -2619,11 +2406,8 @@ export function ChatApp() {
                     onPickerOpenChange={setCallPickerOpen}
                     mentionMembers={railMembers}
                     editingText={editingMessage?.text || null}
-                    onCancelEdit={() => setEditingMessage(null)}
-                    onAttachmentsCleared={() =>
-                      toast("Вложения сброшены при смене чата")
-                    
-                    }
+                    onCancelEdit={handleCancelEdit}
+                    onAttachmentsCleared={handleAttachmentsCleared}
                   />
 
                   {forwardMessageTarget && (
@@ -2769,19 +2553,48 @@ export function ChatApp() {
       </AnimatePresence>
 
       <ConfirmDialog
+        open={Boolean(deleteDmTarget)}
+        title="Удалить чат?"
+        body={deleteDmTarget ? `Переписка с «${deleteDmTarget.title}» будет удалена.` : undefined}
+        busy={chatActionBusy}
+        onCancel={() => setDeleteDmTarget(null)}
+        onConfirm={() => { void handleDeleteDm(); }}
+      >
+        <fieldset className="confirm-dialog__options" disabled={chatActionBusy}>
+          <legend className="sr-only">У кого удалить переписку</legend>
+          <label>
+            <input type="radio" name="delete-dm-scope" checked={deleteDmScope === "self"} onChange={() => setDeleteDmScope("self")} />
+            Только у меня
+          </label>
+          <label>
+            <input type="radio" name="delete-dm-scope" checked={deleteDmScope === "both"} onChange={() => setDeleteDmScope("both")} />
+            У меня и собеседника
+          </label>
+        </fieldset>
+        {sidebarError && <p className="confirm-dialog__error" role="alert">{sidebarError}</p>}
+      </ConfirmDialog>
+
+      <ConfirmDialog
         open={confirmLeaveGroup}
         title="Выйти из группы?"
         body={
           currentChat
-            ? `Вы перестанете видеть «${currentChat.title}» в списке чатов.`
+            ? currentChat.createdBy === account?.userId
+              ? currentChat.members > 1
+                ? `Вы выйдете из «${currentChat.title}». Права владельца перейдут другому участнику.`
+                : `Вы последний участник. Группа «${currentChat.title}» будет удалена.`
+              : `Вы перестанете видеть «${currentChat.title}» в списке чатов.`
             : undefined
         }
         confirmLabel="Выйти"
+        busy={chatActionBusy}
         onCancel={() => setConfirmLeaveGroup(false)}
         onConfirm={() => {
           void handleLeaveGroup();
         }}
-      />
+      >
+        {sidebarError && <p className="confirm-dialog__error" role="alert">{sidebarError}</p>}
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={confirmDeleteGroup}

@@ -5,14 +5,16 @@
   "scripts": {
     "dev": "node scripts/run-tsx.mjs SEED_DEMO=1 watch --exclude uploads --exclude data --exclude .next --exclude **/uploads/** --exclude **/data/** --exclude **/.next/** server.ts",
     "build": "node scripts/build-site.mjs",
+    "verify:protection": "node scripts/verify-code-protection.mjs",
     "start": "node scripts/run-tsx.mjs NODE_ENV=production server.ts",
     "lint": "eslint",
     "media:migrate": "tsx scripts/migrate-media-s3.ts",
     "test:e2e": "playwright test",
     "audio:prepare": "node scripts/prepare-dtln.mjs",
-    "predev": "npm run audio:prepare",
-    "prebuild": "npm run audio:prepare",
-    "prestart": "npm run audio:prepare",
+    "models:prepare": "node scripts/prepare-maiko-models.mjs",
+    "predev": "npm run audio:prepare && npm run models:prepare",
+    "prebuild": "npm run audio:prepare && npm run models:prepare",
+    "prestart": "npm run audio:prepare && npm run models:prepare",
     "test": "tsx --test tests/*.test.ts",
     "messages:migrate": "tsx scripts/migrate-messages-mongodb.ts"
   },
@@ -42,6 +44,7 @@
     "react-dom": "19.2.4",
     "react-easy-crop": "^6.2.3",
     "react-textarea-autosize": "^8.5.9",
+    "react-virtuoso": "^4.18.19",
     "react-voice-recorder-kit": "^1.1.4",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",
@@ -50,7 +53,8 @@
     "vaul": "^1.1.2",
     "wavesurfer.js": "^7.12.11",
     "web-push": "^3.6.7",
-    "yet-another-react-lightbox": "^3.32.2"
+    "yet-another-react-lightbox": "^3.32.2",
+    "youtubei.js": "^18.2.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
@@ -63,6 +67,7 @@
     "esbuild": "0.28.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.12",
+    "javascript-obfuscator": "5.9.0",
     "playwright": "^1.62.1",
     "tailwindcss": "^4",
     "tsx": "^4.23.1",

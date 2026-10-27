@@ -24,7 +24,7 @@ export function avatarInitials(name: string) {
   return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
 }
 
-/** Strip exp/sig so a stale signature never blocks a photo. */
+/** Stable identity for comparing avatars; never use this URL to fetch a photo. */
 export function bareAvatarUrl(src?: string | null) {
   if (!src) return null;
   const bare = String(src).split("?")[0].split("#")[0];

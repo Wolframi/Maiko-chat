@@ -1,6 +1,6 @@
 {
   "name": "maiko-desktop",
-  "version": "1.1.16",
+  "version": "1.1.27",
   "private": true,
   "description": "Майко — приложение для Windows",
   "author": "Maiko",
@@ -15,6 +15,9 @@
     "pack": "electron-builder --win --x64 --dir",
     "predist": "npm run assets -- --remote",
     "dist": "electron-builder --win --x64",
+    "protect": "node protect-code.cjs",
+    "verify:protection": "node verify-protection.cjs",
+    "test:protection": "node tests/protection.cjs",
     "test": "node --test tests/*.test.cjs",
     "test:smoke": "node tests/smoke.cjs",
     "test:window-assets": "node tests/window-assets.cjs",
@@ -26,22 +29,35 @@
     "test:compact-members": "node tests/compact-members.cjs",
     "test:local": "node tests/local-start.cjs",
     "test:screen-audio": "node prepare-native.cjs && node tests/screen-audio.cjs",
+    "test:capture-cancel": "node tests/capture-cancel.cjs",
+    "test:daw-audio": "node prepare-native.cjs && cargo build --manifest-path daw-bridge/Cargo.toml --example test-host --locked --release --target-dir .daw-bridge-build && node tests/daw-audio.cjs",
     "test:persistent-media": "node tests/persistent-media.cjs",
     "verify:release": "node verify-release.cjs",
     "test:updates-ui": "node tests/updates-ui.cjs",
+    "test:startup": "node tests/startup.cjs",
+    "test:update-handoff": "node tests/update-handoff.cjs",
+    "test:site-updates": "node tests/site-updates.cjs",
     "test:downloads": "node tests/downloads.cjs"
   },
   "devDependencies": {
+    "@babel/core": "7.29.7",
+    "@babel/plugin-transform-arrow-functions": "7.29.7",
     "electron": "44.7.0",
     "electron-builder": "26.15.3",
     "esbuild": "0.28.1",
+    "javascript-obfuscator": "5.9.0",
     "js-yaml": "4.1.1",
+    "parse5": "7.3.0",
     "playwright": "1.62.1",
+    "postcss": "8.5.31",
+    "postcss-selector-parser": "7.1.7",
     "sharp": "0.34.5"
   },
   "build": {
     "appId": "io.maiko.desktop",
     "productName": "Maiko",
+    "beforePack": "./protect-code.cjs",
+    "afterPack": "./verify-protection.cjs",
     "afterAllArtifactBuild": "./refresh-built-icons.cjs",
     "extraFiles": [
       {
@@ -51,16 +67,23 @@
     ],
     "asar": true,
     "asarUnpack": [
-      "native/*.exe"
+      "native/*.exe",
+      "native/Maiko DAW Bridge.vst3/**/*"
     ],
     "directories": {
       "output": "release"
     },
     "files": [
-      "*.cjs",
-      "native/**/*",
+      {
+        "from": ".protected",
+        "to": ".",
+        "filter": [
+          "**/*"
+        ]
+      },
+      "native/*.exe",
+      "native/*.vst3/**/*",
       "config.json",
-      "ui/**/*",
       "assets/**/*",
       "bundled-assets/**/*",
       "package.json"
@@ -93,6 +116,7 @@
     ]
   },
   "dependencies": {
+    "bytenode": "2.0.0",
     "electron-updater": "6.8.10",
     "socket.io-client": "4.8.3"
   },

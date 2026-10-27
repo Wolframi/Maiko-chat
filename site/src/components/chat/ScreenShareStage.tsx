@@ -3,13 +3,15 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
 } from "react";
 import { IconVolume, IconVolumeOff } from "@/lib/icons";
 import { MediaVideo } from "@/components/chat/MediaVideo";
+import { ScreenAudioVisualizer } from "@/components/chat/ScreenAudioVisualizer";
+import { useCallTileInteraction } from "@/hooks/useCallTileInteraction";
+import { useCallTileLayout } from "@/hooks/useCallTileLayout";
 import {
   getScreenAudioVolume,
   setScreenAudioVolume,
@@ -20,13 +22,14 @@ export type ScreenSource = {
   id: string;
   label: string;
   stream: MediaStream;
+  audioStream?: MediaStream | null;
   kind?: "screen" | "camera";
   ownerId?: string;
   /** Своя демонстрация — её звук локально не играет, ручка не нужна. */
   local?: boolean;
 };
 
-function ScreenInlineVolume({
+export function ScreenInlineVolume({
   owner,
   label,
 }: {
@@ -79,47 +82,21 @@ function ScreenInlineVolume({
 
 function ScreenPane({
   source,
-  selected = false,
-  selectable = false,
-  onSelect,
+  onSwap,
 }: {
   source: ScreenSource;
-  selected?: boolean;
-  selectable?: boolean;
-  onSelect?: () => void;
+  onSwap?: (fromId: string, toId: string) => void;
 }) {
-  const paneRef = useRef<HTMLDivElement>(null);
-
-  const toggleFullscreen = () => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => undefined);
-    } else {
-      paneRef.current?.requestFullscreen().catch(() => undefined);
-    }
-  };
+  const interaction = useCallTileInteraction({ id: source.id, onSwap });
 
   return (
     <div
-      ref={paneRef}
-      className={`call__screen-pane ${selected ? "is-selected" : ""} ${
-        selectable ? "is-selectable" : ""
-      }`}
-      role={selectable ? "button" : undefined}
-      tabIndex={selectable ? 0 : undefined}
-      aria-label={selectable ? `Выбрать ${source.label}` : undefined}
-      aria-pressed={selectable ? selected : undefined}
-      onClick={selectable ? onSelect : undefined}
-      onKeyDown={
-        selectable
-          ? (event) => {
-              if (event.key !== "Enter" && event.key !== " ") return;
-              event.preventDefault();
-              onSelect?.();
-            }
-          : undefined
-      }
-      onDoubleClick={toggleFullscreen}
-      title="Двойное нажатие — на весь экран"
+      className="call__screen-pane is-interactive"
+      role="button"
+      tabIndex={0}
+      aria-label={`Открыть ${source.label}`}
+      title={onSwap ? "Нажатие — на весь экран; перетаскивание или Alt + стрелка — поменять местами" : "Нажатие — на весь экран"}
+      {...interaction}
     >
       <div className="call__screen-media">
         <MediaVideo
@@ -128,10 +105,10 @@ function ScreenPane({
             source.kind === "camera" ? "is-camera" : "is-screen"
           }`}
         />
-        {selectable && selected ? (
-          <em className="call__stage-badge"><span>Основной</span></em>
-        ) : null}
       </div>
+      {source.kind !== "camera" ? (
+        <ScreenAudioVisualizer stream={source.audioStream ?? source.stream} />
+      ) : null}
       {source.kind !== "camera" && !source.local ? (
         <footer
           className="call__screen-controls"
@@ -276,35 +253,20 @@ export function ScreenShareKeepalive({ sources }: { sources: ScreenSource[] }) {
 export function ScreenShareStage({
   sources,
   onCurrentChange,
+  onSwap,
 }: {
   sources: ScreenSource[];
   /** Какая демонстрация сейчас на экране — для ручки громкости в панели. */
   onCurrentChange?: (id: string | null) => void;
+  /** Shared layout when camera tiles can also be moved into the stage. */
+  onSwap?: (fromId: string, toId: string) => void;
 }) {
   const liveSources = sources.filter(sourceHasLiveVideo);
   const count = liveSources.length;
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const current =
-    liveSources.find((source) => source.id === selectedId) ?? liveSources[0];
+  const { ordered, swap } = useCallTileLayout(liveSources);
+  const orderedSources = onSwap ? liveSources : ordered;
+  const current = orderedSources[0];
   const currentId = current?.id ?? null;
-
-  const orderedSources = useMemo(() => {
-    if (!current || liveSources[0]?.id === current.id) return liveSources;
-    return [
-      current,
-      ...liveSources.filter((source) => source.id !== current.id),
-    ];
-  }, [current, liveSources]);
-
-  useEffect(() => {
-    if (!count) {
-      setSelectedId(null);
-      return;
-    }
-    if (!selectedId || !liveSources.some((source) => source.id === selectedId)) {
-      setSelectedId(liveSources[0].id);
-    }
-  }, [count, liveSources, selectedId]);
 
   useEffect(() => {
     onCurrentChange?.(currentId);
@@ -323,16 +285,14 @@ export function ScreenShareStage({
       }`}
       data-screen-count={count}
       aria-label={
-        count === 1 ? "Основное видео звонка" : `${count} видео на основной сцене`
+        count === 1 ? "Видео звонка" : `${count} видео звонка`
       }
     >
       {orderedSources.map((source) => (
         <ScreenPane
           key={source.id}
           source={source}
-          selected={source.id === current.id}
-          selectable={multi}
-          onSelect={() => setSelectedId(source.id)}
+          onSwap={onSwap ?? (multi ? swap : undefined)}
         />
       ))}
     </div>

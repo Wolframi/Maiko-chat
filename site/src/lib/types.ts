@@ -3,7 +3,7 @@ export type FileAttachment = {
   name: string;
   size: number;
   mime: string;
-  /** Pixel size — used for Telegram-style album mosaic. */
+  /** Pixel size — reserves photo/video previews and determines album layout. */
   width?: number;
   height?: number;
 };
@@ -145,6 +145,18 @@ export type ChatInfo = {
   voiceChannels?: VoiceChannelInfo[];
   /** Extra text chats. #general is the group id and is not listed here. */
   textChannels?: TextChannelInfo[];
+};
+
+export type GroupInviteCode = {
+  code: string;
+  expiresAt: number;
+  serverTime: number;
+};
+
+export type GroupInviteCodeResult = {
+  ok: boolean;
+  invite?: GroupInviteCode;
+  error?: string;
 };
 
 export type RoomMediaCategory = "media" | "file" | "audio";

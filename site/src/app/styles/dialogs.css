@@ -268,6 +268,31 @@
   cursor: not-allowed;
 }
 
+.ringtone-trim__range {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px;
+}
+
+.ringtone-trim__range label {
+  display: grid;
+  flex: 1 1 100px;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.ringtone-trim__range input {
+  min-width: 0;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
 .confirm-dialog {
   position: fixed;
   inset: 0;
@@ -318,6 +343,27 @@
   gap: 8px;
   margin-top: 6px;
 }
+
+.confirm-dialog__options {
+  border: 0;
+  padding: 4px 0;
+  margin: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.confirm-dialog__options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.confirm-dialog__options input { accent-color: var(--accent); }
+.confirm-dialog__error { color: var(--danger); margin: 0; font-size: 0.84rem; }
+.confirm-dialog__actions button:disabled { opacity: 0.55; cursor: wait; }
 
 .confirm-dialog__cancel,
 .confirm-dialog__confirm {

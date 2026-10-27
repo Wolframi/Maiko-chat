@@ -197,7 +197,7 @@
 
 .discover-group {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
   padding: 6px 8px;
@@ -233,9 +233,8 @@
 
 .discover-group__meta strong {
   font-size: 0.9rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .discover-group__meta em {
@@ -260,6 +259,16 @@
 
 .discover-group__action:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: var(--accent-soft);
+}
+
+.discover-group__action.discover-group__action--join {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  color: var(--accent);
   background: var(--accent-soft);
 }
 

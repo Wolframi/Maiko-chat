@@ -24,12 +24,27 @@ test("screen audio alone is not routed to voice; explicit roles override order a
 test("Opus tuning uses roles even when the only audio section is screen audio", () => {
   const sdp = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:screen\r\na=rtpmap:111 opus/48000/2\r\n";
   const screen = patchOpusSdp(sdp, new Set(["screen"]));
-  assert.match(screen, /maxaveragebitrate=128000/);
+  assert.match(screen, /maxaveragebitrate=192000/);
   assert.match(screen, /(?:;| )stereo=1/);
   assert.match(screen, /usedtx=0/);
   const voice = patchOpusSdp(sdp, new Set());
-  assert.match(voice, /maxaveragebitrate=64000/);
+  assert.match(voice, /maxaveragebitrate=96000/);
   assert.match(voice, /usedtx=1/);
+});
+
+test("Opus stereo negotiation keeps sprop-stereo and stereo distinct and is idempotent", () => {
+  for (const eol of ["\r\n", "\n"]) {
+    const sdp = ["v=0", "m=audio 9 UDP/TLS/RTP/SAVPF 111", "a=mid:screen",
+      "a=rtpmap:111 opus/48000/2", "a=fmtp:111 sprop-stereo=0; stereo=0; useinbandfec=0", ""].join(eol);
+    const patched = patchOpusSdp(sdp, new Set(["screen"]));
+    const fmtp = /^a=fmtp:111 ([^\r\n]+)/m.exec(patched)![1].split(";");
+    assert.ok(fmtp.includes("stereo=1"));
+    assert.ok(fmtp.includes("sprop-stereo=1"));
+    assert.ok(fmtp.includes("useinbandfec=1"));
+    assert.ok(fmtp.includes("usedtx=0"));
+    assert.equal(patchOpusSdp(patched, new Set(["screen"])), patched);
+    assert.equal(patched.split(eol).length, sdp.split(eol).length);
+  }
 });
 
 test("window audio remains live with a warning when isolation is unsupported; call tabs still exclude echo", async () => {

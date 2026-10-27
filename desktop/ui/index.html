@@ -6,6 +6,8 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Майко</title>
   <link rel="stylesheet" href="shell.css">
+  <script src="status-text.js" defer></script>
+  <script src="startup-model.js" defer></script>
   <script src="shell.js" defer></script>
 </head>
 <body>
@@ -37,14 +39,12 @@
         <button data-action="close" class="close-button" title="Закрыть" aria-label="Закрыть"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
       </div>
     </header>
-    <main class="connection-screen" id="connection-screen">
+    <canvas class="startup-model" id="startup-model" role="img" aria-label="Загружаем Майко"></canvas>
+    <main class="connection-screen" id="connection-screen" hidden>
       <section class="connection-card" aria-live="polite">
-        <img class="app-icon" src="../assets/icon.png" width="72" height="72" alt="Майко">
-        <p class="eyebrow">ВАШИ ЛЮДИ. ВАШ МАЙКО.</p>
-        <h1 id="heading">Почти на месте</h1>
-        <p class="description" id="message">Запускаем приложение…</p>
-        <div class="loader" id="loader" aria-label="Загрузка"></div>
-        <div class="error-actions" id="error-actions" hidden>
+        <h1 id="heading">Не удалось подключиться</h1>
+        <p class="description" id="message"></p>
+        <div class="error-actions" id="error-actions">
           <button class="primary" data-action="reload">Повторить</button>
           <button class="text-button" data-action="logs">Открыть журнал</button>
         </div>

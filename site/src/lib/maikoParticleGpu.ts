@@ -1,4 +1,4 @@
-import {MaikoParticleMotion,MAIKO_PARTICLE_LIMIT,MAIKO_PARTICLE_CORE_LIMIT,MAIKO_PARTICLE_ROAM_THRESHOLD,MAIKO_PARTICLE_AGITATION,MAIKO_PARTICLE_SPRING,MAIKO_PARTICLE_DRAG,MAIKO_PARTICLE_SPEED,MAIKO_PARTICLE_REPULSION} from "./maikoParticleMotion";
+import {createMaikoParticleGraph,type MaikoParticleGraph,MAIKO_PARTICLE_LIMIT,MAIKO_PARTICLE_CORE_LIMIT,MAIKO_PARTICLE_ROAM_THRESHOLD,MAIKO_PARTICLE_AGITATION,MAIKO_PARTICLE_SPRING,MAIKO_PARTICLE_DRAG,MAIKO_PARTICLE_SPEED,MAIKO_PARTICLE_REPULSION} from "./maikoParticleMotion";
 
 const vertexSource=`#version 300 es
 void main() {
@@ -53,9 +53,9 @@ void main() {
 }`;
 
 /** Ping-pong float textures keep every point's spring/collision state on the GPU. */
-export function createMaikoParticleGpu(gl:WebGL2RenderingContext,data:Float32Array,count:number) {
+export function createMaikoParticleGpu(gl:WebGL2RenderingContext,data:Float32Array,count:number,prepared?:MaikoParticleGraph) {
   if(!gl.getExtension("EXT_color_buffer_float")) throw new Error("Float particle simulation unavailable");
-  const width=512,height=Math.ceil(count/width),graph=new MaikoParticleMotion(data,count,0);
+  const width=512,height=Math.ceil(count/width),graph=prepared??createMaikoParticleGraph(data,count);
   const shaders:WebGLShader[]=[],textures:WebGLTexture[]=[],frames:WebGLFramebuffer[]=[];
   const program=gl.createProgram(),vao=gl.createVertexArray();
   if(!program||!vao) throw new Error("Unable to allocate particle simulation");

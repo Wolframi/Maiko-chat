@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Fragment,
   useEffect,
   useMemo,
   useRef,
@@ -11,8 +12,6 @@ import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "motion/react";
 import type { VoiceChannelUser } from "@/lib/types";
 import {
-  IconCamera,
-  IconCameraOff,
   IconSwitchCamera,
   IconHeadphones,
   IconMic,
@@ -23,11 +22,14 @@ import {
   IconNoise,
 } from "@/lib/icons";
 import { ConnectionSignal, type SignalQuality } from "@/components/chat/ConnectionSignal";
+import { CameraControl } from "@/components/chat/CameraControl";
 import { Avatar } from "@/components/chat/Avatar";
 import { MediaVideo } from "@/components/chat/MediaVideo";
+import { ScreenAudioVisualizer } from "@/components/chat/ScreenAudioVisualizer";
 import {
   ScreenShareKeepalive,
   ScreenShareStage,
+  ScreenInlineVolume,
   type ScreenSource,
 } from "@/components/chat/ScreenShareStage";
 import {
@@ -39,6 +41,8 @@ import {
 } from "@/lib/webrtcMedia";
 import { noiseFilterLabel, type NoiseFilterKind } from "@/lib/noiseFilter";
 import { softSpring, sheetSpring } from "@/lib/motion";
+import { useCallTileInteraction } from "@/hooks/useCallTileInteraction";
+import { useCallTileLayout } from "@/hooks/useCallTileLayout";
 
 type VoiceOverlayProps = {
   active: {
@@ -64,11 +68,14 @@ type VoiceOverlayProps = {
   noiseFilterKind?: NoiseFilterKind;
   connectionLabel?: string | null;
   connectionQuality?: SignalQuality;
+  rttMs?: number | null;
   onLeave: () => void;
   onToggleMute: () => void;
   onToggleDeafen: () => void;
   onToggleNoiseFilter?: () => void;
   onToggleCamera: () => void;
+  onSelectCamera?: (deviceId: string) => void;
+  cameraDeviceId?: string;
   onFlipCamera?: () => void;
   canFlipCamera?: boolean;
   onToggleScreenShare: () => void;
@@ -112,6 +119,7 @@ function collectScreenSources(
       id: "self",
       label: "Ваш экран",
       stream: localScreenStream,
+      audioStream: localStream,
       kind: "screen",
       ownerId: "self",
       local: true,
@@ -131,6 +139,7 @@ function collectScreenSources(
       id: peer.userId,
       label: `Экран · ${peer.name}`,
       stream: screen,
+      audioStream: stream,
       kind: "screen",
       ownerId: peer.userId,
     });
@@ -183,8 +192,8 @@ type TileProps = {
   speaking?: boolean;
   muted?: boolean;
   self?: boolean;
-  onActivate?: () => void;
-  actionLabel?: string;
+  source?: ScreenSource;
+  onSwap?: (fromId: string, toId: string) => void;
 };
 
 function VoiceTile({
@@ -196,30 +205,27 @@ function VoiceTile({
   speaking = false,
   muted: tileMuted = false,
   self = false,
-  onActivate,
-  actionLabel,
+  source,
+  onSwap,
 }: TileProps) {
+  const interaction = useCallTileInteraction({
+    id: source?.id ?? name,
+    onSwap: source ? onSwap : undefined,
+    open: showVideo,
+  });
   return (
     <div
       className={`call__tile ${speaking ? "is-speaking" : ""} ${
         showVideo ? "has-video" : ""
+      } ${source?.kind === "screen" ? "has-screen" : ""
       } ${self ? "call__tile--self" : ""} ${
-        onActivate ? "is-interactive" : ""
+        showVideo ? "is-interactive" : ""
       }`}
-      role={onActivate ? "button" : undefined}
-      tabIndex={onActivate ? 0 : undefined}
-      aria-label={onActivate ? actionLabel : undefined}
-      title={onActivate ? actionLabel : undefined}
-      onClick={onActivate}
-      onKeyDown={
-        onActivate
-          ? (event) => {
-              if (event.key !== "Enter" && event.key !== " ") return;
-              event.preventDefault();
-              onActivate();
-            }
-          : undefined
-      }
+      role={showVideo ? "button" : undefined}
+      tabIndex={showVideo ? 0 : undefined}
+      aria-label={showVideo ? `Открыть ${name}` : undefined}
+      title={showVideo ? (onSwap ? "Нажатие — на весь экран; перетаскивание или Alt + стрелка — поменять местами" : "Нажатие — на весь экран") : undefined}
+      {...interaction}
     >
       <MediaVideo
         stream={stream}
@@ -244,7 +250,19 @@ function VoiceTile({
         )}
         {tileMuted ? <IconMicOff size={14} className="call__tile-icon" /> : null}
       </em>
-      {onActivate ? <span className="call__tile-swap" aria-hidden>↔</span> : null}
+      {source?.kind === "screen" ? (
+        <ScreenAudioVisualizer stream={source.audioStream ?? source.stream} />
+      ) : null}
+      {source?.kind === "screen" && !source.local ? (
+        <footer
+          className="call__screen-controls"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          <ScreenInlineVolume owner={source.ownerId ?? source.id} label={source.label} />
+        </footer>
+      ) : null}
     </div>
   );
 }
@@ -254,15 +272,11 @@ function PeerCameraTile({
   stream,
   subtitle,
   hideMuted = false,
-  onActivate,
-  actionLabel,
 }: {
   peer: VoiceChannelUser;
   stream: MediaStream | null | undefined;
   subtitle?: string;
   hideMuted?: boolean;
-  onActivate?: () => void;
-  actionLabel?: string;
 }) {
   const cameraStream = useStablePickedStream(stream, "camera");
   const showVideo = peerShowsCamera(peer, stream);
@@ -275,8 +289,6 @@ function PeerCameraTile({
       showVideo={showVideo}
       speaking={peer.speaking}
       muted={hideMuted ? false : peer.muted}
-      onActivate={onActivate}
-      actionLabel={actionLabel}
     />
   );
 }
@@ -298,11 +310,14 @@ function VoiceStagePanel({
   noiseFilterKind = "browser",
   connectionLabel = null,
   connectionQuality = "unknown",
+  rttMs = null,
   onLeave,
   onToggleMute,
   onToggleDeafen,
   onToggleNoiseFilter,
   onToggleCamera,
+  onSelectCamera,
+  cameraDeviceId,
   onFlipCamera,
   canFlipCamera = false,
   onToggleScreenShare,
@@ -353,47 +368,31 @@ function VoiceStagePanel({
     }
     return sources;
   }, [localCamera, localCameraStream, peers, remoteStreams, selfName]);
-  const screenByOwner = useMemo(
-    () =>
-      new Map(
-        screenSources.map((source) => [source.ownerId ?? source.id, source]),
-      ),
-    [screenSources],
+  const mediaSources = [...screenSources, ...cameraSources.values()];
+  const { ordered: arrangedSources, swap: swapMediaTiles } = useCallTileLayout(mediaSources);
+  const stageSources = arrangedSources.slice(0, screenCount);
+  const railSources = new Map(
+    [...cameraSources.keys()].map((ownerId, index) => [
+      ownerId, arrangedSources[screenCount + index],
+    ]),
   );
-  const [promotedCameraIds, setPromotedCameraIds] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const stageSources = useMemo(() => {
-    const sources = screenSources.map((screen) => {
-      const ownerId = screen.ownerId ?? screen.id;
-      return promotedCameraIds.has(ownerId)
-        ? cameraSources.get(ownerId) ?? screen
-        : screen;
-    });
-    for (const ownerId of promotedCameraIds) {
-      if (screenByOwner.has(ownerId)) continue;
-      const camera = cameraSources.get(ownerId);
-      if (camera) sources.push(camera);
-    }
-    return sources;
-  }, [cameraSources, promotedCameraIds, screenByOwner, screenSources]);
   const screenMode = screenCount > 0;
-  useEffect(() => {
-    setPromotedCameraIds((current) => {
-      const valid = new Set(
-        [...current].filter((ownerId) => cameraSources.has(ownerId)),
-      );
-      return valid.size === current.size ? current : valid;
-    });
-  }, [cameraSources]);
 
-  const toggleCameraOnStage = (ownerId: string) => {
-    setPromotedCameraIds((current) => {
-      const next = new Set(current);
-      if (next.has(ownerId)) next.delete(ownerId);
-      else next.add(ownerId);
-      return next;
-    });
+  const renderMediaTile = (source: ScreenSource) => {
+    const owner = peers.find((peer) => peer.userId === source.ownerId);
+    const isCamera = source.kind === "camera";
+    return (
+      <VoiceTile
+        name={isCamera ? (source.local ? selfName : owner?.name ?? source.label) : source.label}
+        stream={source.stream}
+        source={source}
+        showVideo
+        speaking={isCamera && (source.local ? selfSpeaking : owner?.speaking)}
+        muted={isCamera && (source.local ? muted : owner?.muted)}
+        self={source.local}
+        onSwap={swapMediaTiles}
+      />
+    );
   };
 
   useEffect(() => {
@@ -438,7 +437,7 @@ function VoiceStagePanel({
           screenMode ? "is-screen" : "is-tiles"
         }`}
       >
-        <div className="call__qos"><ConnectionSignal quality={connectionQuality} pending={connectionLabel} /></div>
+        <div className="call__qos"><ConnectionSignal quality={connectionQuality} rttMs={rttMs} pending={connectionLabel} /></div>
         {connectionLabel ? (
           <p className="call__link" role="status">
             {connectionLabel}
@@ -447,7 +446,7 @@ function VoiceStagePanel({
         {screenMode ? (
           <div className="call__stage-body">
             <section className="call__main-area">
-              <ScreenShareStage sources={stageSources} />
+              <ScreenShareStage sources={stageSources} onSwap={swapMediaTiles} />
             </section>
 
             <aside
@@ -456,82 +455,28 @@ function VoiceStagePanel({
             >
               {peers.map((peer) => {
                 const ownerId = peer.userId;
-                const promoted = promotedCameraIds.has(ownerId);
-                const screen = screenByOwner.get(ownerId);
-                const hasCamera = cameraSources.has(ownerId);
-
-                if (promoted && screen) {
-                  return (
-                    <VoiceTile
-                      key={ownerId}
-                      name={`Экран · ${peer.name}`}
-                      stream={screen.stream}
-                      showVideo
-                      onActivate={() => toggleCameraOnStage(ownerId)}
-                      actionLabel={`Вернуть демонстрацию ${peer.name} на основную сцену`}
-                    />
-                  );
-                }
-
-                if (promoted) {
-                  return (
-                    <VoiceTile
-                      key={ownerId}
-                      name={peer.name}
-                      avatarUrl={peer.avatarUrl}
-                      stream={null}
-                      showVideo={false}
-                      speaking={peer.speaking}
-                      muted={peer.muted}
-                      onActivate={() => toggleCameraOnStage(ownerId)}
-                      actionLabel={`Вернуть камеру ${peer.name} в плитку участника`}
-                    />
-                  );
-                }
+                const source = railSources.get(ownerId);
+                if (source) return <Fragment key={ownerId}>{renderMediaTile(source)}</Fragment>;
 
                 return (
                   <PeerCameraTile
                     key={ownerId}
                     peer={peer}
                     stream={remoteStreams[ownerId]}
-                    onActivate={
-                      hasCamera ? () => toggleCameraOnStage(ownerId) : undefined
-                    }
-                    actionLabel={
-                      screen
-                        ? `Поменять местами камеру и демонстрацию ${peer.name}`
-                        : `Перенести камеру ${peer.name} на основную сцену`
-                    }
                   />
                 );
               })}
-              {promotedCameraIds.has("self") && screenByOwner.has("self") ? (
-                <VoiceTile
-                  name="Ваш экран"
-                  stream={screenByOwner.get("self")?.stream ?? null}
-                  showVideo
-                  onActivate={() => toggleCameraOnStage("self")}
-                  actionLabel="Вернуть вашу демонстрацию на основную сцену"
-                />
+              {railSources.has("self") ? (
+                renderMediaTile(railSources.get("self")!)
               ) : (
                 <VoiceTile
                   name={selfName}
                   avatarUrl={selfAvatarUrl ?? undefined}
                   stream={localCameraStream}
-                  showVideo={localCamera && !promotedCameraIds.has("self")}
+                  showVideo={localCamera}
                   speaking={selfSpeaking}
                   muted={muted}
                   self
-                  onActivate={
-                    localCamera ? () => toggleCameraOnStage("self") : undefined
-                  }
-                  actionLabel={
-                    promotedCameraIds.has("self")
-                      ? "Вернуть вашу камеру в плитку участника"
-                      : screenByOwner.has("self")
-                        ? "Поменять местами вашу камеру и демонстрацию"
-                        : "Перенести вашу камеру на основную сцену"
-                  }
                 />
               )}
             </aside>
@@ -627,16 +572,14 @@ function VoiceStagePanel({
               <IconNoise size={20} />
             </button>
           ) : null}
-          <button
-            type="button"
-            className={`call__btn call__btn--circle ${cameraOff ? "is-off" : ""}`}
-            onClick={onToggleCamera}
-            disabled={mediaBusy}
-            aria-label={cameraOff ? "Включить камеру" : "Выключить камеру"}
-            title={cameraOff ? "Камера выкл." : "Камера"}
-          >
-            {cameraOff ? <IconCameraOff size={20} /> : <IconCamera size={20} />}
-          </button>
+          <CameraControl
+            cameraOff={cameraOff}
+            mediaBusy={mediaBusy}
+            cameraDeviceId={cameraDeviceId}
+            localStream={localStream}
+            onToggleCamera={onToggleCamera}
+            onSelectCamera={onSelectCamera}
+          />
           {canFlipCamera && !cameraOff && onFlipCamera ? (
             <button
               type="button"
@@ -719,11 +662,14 @@ export function VoiceOverlay({
   noiseFilterKind = "browser",
   connectionLabel = null,
   connectionQuality = "unknown",
+  rttMs = null,
   onLeave,
   onToggleMute,
   onToggleDeafen,
   onToggleNoiseFilter,
   onToggleCamera,
+  onSelectCamera,
+  cameraDeviceId,
   onFlipCamera,
   canFlipCamera = false,
   onToggleScreenShare,
@@ -799,11 +745,14 @@ export function VoiceOverlay({
               noiseFilterKind={noiseFilterKind}
               connectionLabel={connectionLabel}
               connectionQuality={connectionQuality}
+              rttMs={rttMs}
               onLeave={onLeave}
               onToggleMute={onToggleMute}
               onToggleDeafen={onToggleDeafen}
               onToggleNoiseFilter={onToggleNoiseFilter}
               onToggleCamera={onToggleCamera}
+              onSelectCamera={onSelectCamera}
+              cameraDeviceId={cameraDeviceId}
               onFlipCamera={onFlipCamera}
               canFlipCamera={canFlipCamera}
               onToggleScreenShare={onToggleScreenShare}

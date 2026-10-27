@@ -25,7 +25,6 @@ test('a window from a disconnected monitor returns to a visible screen', () => {
   assert.equal(findProjectRoot(__dirname), path.resolve(__dirname, '../../site'));
 });
 
-test('site layout reserves the toolbar and keeps equal normal-window gutters', () => {
-  assert.deepEqual(siteBounds(1000, 700, false), { x: 10, y: 42, width: 980, height: 648 });
-  assert.deepEqual(siteBounds(1000, 700, true), { x: 0, y: 42, width: 1000, height: 658 });
+test('site layout reserves only the toolbar and fills the client area', () => {
+  assert.deepEqual(siteBounds(1000, 700), { x: 0, y: 42, width: 1000, height: 658 });
 });

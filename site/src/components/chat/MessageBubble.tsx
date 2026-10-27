@@ -7,7 +7,6 @@ import {
   useState,
   type CSSProperties,
   type ReactNode,
-  type SyntheticEvent,
   type TouchEvent as ReactTouchEvent,
 } from "react";
 import { motion } from "motion/react";
@@ -25,13 +24,11 @@ import {
   IconFileKind,
   fileIconKind,
   IconPlay,
-  IconImage,
   IconClose,
 } from "@/lib/icons";
 import { ConfirmDialog } from "@/components/chat/ConfirmDialog";
 import {
   formatBytes,
-  fitGifDisplaySize,
   isAudioAttachment,
   isGifAttachment,
   isImageAttachment,
@@ -43,7 +40,6 @@ import {
   mediaSrc,
   signedMediaSrc,
   thumbSrc,
-  withoutThumbParam,
   downloadHref,
   downloadFile,
   displayFileName,
@@ -51,12 +47,16 @@ import {
   parseMediaSize,
 } from "@/lib/files";
 import { albumBounds, layoutMediaGroup } from "@/lib/albumLayout";
+import { mediaFrameStyle } from "@/lib/mediaLayout";
 import { audioTrackId, type AudioTrack } from "@/lib/audioPlayback";
 import { renderMessageText } from "@/lib/text";
 import { soloEmojiSizePx, splitTextAndEmoji } from "@/lib/emojiText";
 import { formatMessageTime } from "@/lib/dates";
 import { VoiceBubble } from "@/components/chat/VoiceBubble";
 import { VoiceTranscript } from "@/components/chat/VoiceTranscript";
+import { ChatImage as PhotoImage } from "@/components/chat/ChatImage";
+import { AnimatedSticker } from "@/components/chat/AnimatedSticker";
+import { VideoPreview } from "@/components/chat/VideoPreview";
 import { VideoThumb } from "@/components/chat/VideoThumb";
 import { MessageMenu } from "@/components/chat/MessageMenu";
 
@@ -267,50 +267,14 @@ function AlbumMosaic({
   uploads?: number[];
   onCancelUpload?: () => void;
 }) {
-  const [probed, setProbed] = useState<Record<string, { width: number; height: number }>>(
-    {},
+  const sizes = files.map((file) =>
+    parseMediaSize(file) ?? { width: 1280, height: 960 },
   );
-  const gridRef = useRef<HTMLDivElement>(null);
-  const [near, setNear] = useState(false);
-
-  useEffect(() => {
-    const node = gridRef.current;
-    if (!node || near) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (!entry?.isIntersecting) return;
-        setNear(true);
-        observer.disconnect();
-      },
-      { rootMargin: "600px" },
-    );
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [near]);
-
-  const sizes = files.map((file, index) => {
-    const stored = parseMediaSize(file);
-    if (stored) return stored;
-    return probed[`${file.url}:${index}`] || { width: 1280, height: 960 };
-  });
   const cells = layoutMediaGroup(sizes);
   const box = albumBounds(cells);
 
-  function rememberSize(key: string, width: number, height: number) {
-    const next = parseMediaSize({ width, height });
-    if (!next) return;
-    setProbed((prev) => {
-      const cur = prev[key];
-      if (cur && cur.width === next.width && cur.height === next.height) {
-        return prev;
-      }
-      return { ...prev, [key]: next };
-    });
-  }
-
   return (
     <div
-      ref={gridRef}
       className="bubble__album-grid"
       style={{
         width: "100%",
@@ -325,7 +289,6 @@ function AlbumMosaic({
         const openSrc = signedMediaSrc(file.url) || bareMediaUrl(file.url);
         const video = isVideoAttachment(file);
         const key = `${file.url}:${index}`;
-        const known = Boolean(parseMediaSize(file));
         return (
           <button
             key={key}
@@ -344,24 +307,7 @@ function AlbumMosaic({
           >
             {video ? (
               <>
-                <video
-                  src={near ? src : undefined}
-                  muted
-                  playsInline
-                  preload={near ? "metadata" : "none"}
-                  controls={false}
-                  onLoadedMetadata={(event) => {
-                    if (known) return;
-                    rememberSize(
-                      key,
-                      event.currentTarget.videoWidth,
-                      event.currentTarget.videoHeight,
-                    );
-                  }}
-                  onPlay={(event) => {
-                    event.currentTarget.pause();
-                  }}
-                />
+                <VideoPreview src={src} />
                 <span className="bubble__video-play" aria-hidden>
                   <IconPlay size={18} />
                 </span>
@@ -369,14 +315,6 @@ function AlbumMosaic({
             ) : (
               <PhotoImage
                 src={thumbSrc(file.url, 430)}
-                onLoad={(event) => {
-                  if (known) return;
-                  rememberSize(
-                    key,
-                    event.currentTarget.naturalWidth,
-                    event.currentTarget.naturalHeight,
-                  );
-                }}
               />
             )}
           </button>
@@ -421,49 +359,18 @@ function GifMedia({
   openSrc: string;
   onOpenImage?: (src: string, name: string, kind?: "image" | "video") => void;
 }) {
-  const stored = parseMediaSize(file);
-  const [probed, setProbed] = useState<{ width: number; height: number } | null>(
-    stored || null,
-  );
-  const box = probed
-    ? fitGifDisplaySize(probed.width, probed.height)
-    : undefined;
-
   return (
     <button
       type="button"
-      className="bubble__image-btn bubble__image-btn--gif"
-      style={
-        box
-          ? {
-              width: box.width,
-              maxWidth: "100%",
-              height: "auto",
-              aspectRatio: `${box.width} / ${box.height}`,
-            }
-          : undefined
-      }
+      className="bubble__image-btn bubble__image-btn--gif bubble__media-frame"
+      style={mediaFrameStyle(file, true)}
       onClick={() => onOpenImage?.(openSrc, file.name, "image")}
       aria-label="Открыть GIF"
     >
-      {/* eslint-disable-next-line @next/next/no-img-element */}
+      { }
       <PhotoImage
         src={src}
         className="bubble__image bubble__image--gif"
-        onLoad={(event) => {
-          const next = parseMediaSize({
-            width: event.currentTarget.naturalWidth,
-            height: event.currentTarget.naturalHeight,
-          });
-          if (!next) return;
-          setProbed((prev) => {
-            if (!prev) return next;
-            if (next.width * next.height <= prev.width * prev.height) {
-              return prev;
-            }
-            return next;
-          });
-        }}
       />
     </button>
   );
@@ -521,79 +428,6 @@ function MediaUploadOverlay({
     <div className="bubble__upload-overlay">
       <UploadRing progress={progress} onCancel={onCancel} variant="media" />
     </div>
-  );
-}
-
-/** Image with one cache-busted retry and a clickable broken placeholder. */
-function PhotoImage({
-  src,
-  alt = "",
-  className,
-  loading = "lazy",
-  onLoad,
-}: {
-  src: string;
-  alt?: string;
-  className?: string;
-  loading?: "lazy" | "eager";
-  onLoad?: (event: SyntheticEvent<HTMLImageElement>) => void;
-}) {
-  const [attempt, setAttempt] = useState(0);
-  const [broken, setBroken] = useState(false);
-  const [source, setSource] = useState(src);
-
-  useEffect(() => {
-    setSource(src);
-    setAttempt(0);
-    setBroken(false);
-  }, [src]);
-
-  if (broken) {
-    return (
-      <button
-        type="button"
-        className="bubble__media-retry"
-        aria-label="Повторить загрузку"
-        onClick={(event) => {
-          // Don't let the outer bubble button open the lightbox.
-          event.stopPropagation();
-          setBroken(false);
-          setAttempt((value) => value + 1);
-        }}
-      >
-        <IconImage size={22} />
-        <span>Не удалось загрузить</span>
-      </button>
-    );
-  }
-
-  const url =
-    attempt > 0
-      ? `${source}${source.includes("?") ? "&" : "?"}r=${attempt}`
-      : source;
-
-  return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      src={url}
-      alt={alt}
-      className={className}
-      loading={loading}
-      decoding="async"
-      fetchPriority="auto"
-      referrerPolicy="no-referrer"
-      onLoad={onLoad}
-      onError={() => {
-        const original = withoutThumbParam(source);
-        if (original !== source) {
-          setSource(original);
-          setAttempt(0);
-          return;
-        }
-        if (attempt < 1) setAttempt((value) => value + 1);
-        else setBroken(true);
-      }}
-    />
   );
 }
 
@@ -689,6 +523,7 @@ function FileBodyInner({
     return (
       <div
         className={`bubble__media bubble__media--image${gif ? " bubble__media--gif" : ""}`}
+        style={{ width: mediaFrameStyle(file, gif).width }}
       >
         {gif ? (
           <GifMedia
@@ -700,11 +535,12 @@ function FileBodyInner({
         ) : (
           <button
             type="button"
-            className="bubble__image-btn"
+            className="bubble__image-btn bubble__media-frame"
+            style={mediaFrameStyle(file)}
             onClick={() => onOpenImage?.(openSrc, file.name, "image")}
             aria-label="Открыть фото"
           >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
+            { }
             <PhotoImage src={thumbSrc(file.url, 430)} className="bubble__image" />
           </button>
         )}
@@ -723,9 +559,14 @@ function FileBodyInner({
   if (isVideo) {
     const openSrc = signedMediaSrc(file.url) || bareMediaUrl(file.url);
     return (
-      <div className="bubble__media bubble__media--video">
+      <div
+        className="bubble__media bubble__media--video"
+        style={{ width: mediaFrameStyle(file).width }}
+      >
         <VideoThumb
           url={file.url}
+          width={file.width}
+          height={file.height}
           onOpen={() => onOpenImage?.(openSrc, file.name, "video")}
         />
         {mediaUpload}
@@ -1144,7 +985,7 @@ function MessageBubbleInner({
           aria-label="Открыть пак стикеров"
         >
           {sticker.animated ? (
-            <video
+            <AnimatedSticker
               src={sticker.url}
               autoPlay
               loop
@@ -1162,9 +1003,9 @@ function MessageBubbleInner({
               }}
             />
           ) : (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={sticker.url}
+
+            <PhotoImage
+              src={thumbSrc(sticker.url)}
               alt="Стикер"
               draggable={false}
               loading="lazy"

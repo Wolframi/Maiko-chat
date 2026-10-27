@@ -1,13 +1,12 @@
-const INSET = 10;
 const TITLEBAR = 42;
 const RADIUS = 0;
 // Fit half/quarter Snap zones, including smaller displays and scaled desktops.
 const MIN_WIDTH = 500;
 const MIN_HEIGHT = 360;
 
-function siteBounds(width, height, expanded) {
-  const inset = expanded ? 0 : INSET;
-  return { x: inset, y: TITLEBAR, width: Math.max(1, width - inset * 2), height: Math.max(1, height - TITLEBAR - inset) };
+function siteBounds(width, height) {
+  // Windows owns resizing outside the client area; no inner gutter is needed.
+  return { x: 0, y: TITLEBAR, width: Math.max(1, width), height: Math.max(1, height - TITLEBAR) };
 }
 
 function makeWindowRectangular(window) {

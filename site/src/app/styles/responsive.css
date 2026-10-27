@@ -4,7 +4,8 @@
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    transition-duration: 0s !important;
+    transition-delay: 0s !important;
     scroll-behavior: auto !important;
   }
 
@@ -262,6 +263,15 @@
   .server-rail__orb {
     width: 36px;
     height: 36px;
+  }
+
+  .server-rail__orb--download span {
+    font-size: 8px;
+  }
+
+  .server-rail__orb--download svg {
+    width: 18px;
+    height: 18px;
   }
 
   .server-rail__active-pill {
@@ -615,7 +625,7 @@
 
   .bubble-row--plaque .bubble.bubble--media {
     padding: 0;
-    width: 100%;
+    width: fit-content;
     max-width: min(100%, 430px);
     min-width: 0;
   }
@@ -762,6 +772,11 @@
   .bubble__image,
   .bubble__video {
     max-height: min(48dvh, 360px);
+  }
+
+  .bubble__media,
+  .bubble__media-frame {
+    --bubble-media-max-height: 360px;
   }
 
   .room__call-actions {

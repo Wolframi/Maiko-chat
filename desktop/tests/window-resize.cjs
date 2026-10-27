@@ -57,7 +57,7 @@ async function main() {
       globalThis.resizeTrace = [];
       const setBounds = view.setBounds.bind(view);
       view.setBounds = bounds => {
-        globalThis.resizeTrace.push({ bounds, client: win.getContentSize(), expanded: win.isMaximized() || win.isFullScreen() });
+        globalThis.resizeTrace.push({ bounds, client: win.getContentSize() });
         setBounds(bounds);
       };
       return { handle: win.getNativeWindowHandle().readBigUInt64LE().toString(), pid: String(process.pid) };
@@ -77,7 +77,7 @@ async function main() {
       // Vertical growth/shrink from both edges and attempts beyond minHeight.
       for (const [x, y, dx, dy] of [['c', 's', 0, 180], ['c', 's', 0, -360], ['c', 'n', 0, -180], ['c', 'n', 0, 360], ['e', 's', 160, 120]]) {
         await app.evaluate(({ BrowserWindow }) => { const win = BrowserWindow.getAllWindows()[0]; win.setBounds({ x: 100, y: 100, width: 1000, height: 700 }); win.focus(); });
-        await ui.waitForFunction(() => innerWidth === 980 && innerHeight === 648);
+        await ui.waitForFunction(() => innerWidth === 1000 && innerHeight === 658);
         await ui.evaluate(() => { window.resizeFrames = []; });
         await run(helper, [identity.handle, identity.pid, x, y, String(dx), String(dy)], { windowsHide: true });
         const frames = await ui.evaluate(() => window.resizeFrames);
@@ -92,9 +92,8 @@ async function main() {
     }
     const trace = await app.evaluate(() => globalThis.resizeTrace);
     assert.ok(trace.length > 0);
-    for (const { bounds, client: [width, height], expanded } of trace) {
-      const inset = expanded ? 0 : 10;
-      assert.deepEqual(bounds, { x: inset, y: 42, width: width - inset * 2, height: height - 42 - inset }, 'Child viewport always matches the committed client size');
+    for (const { bounds, client: [width, height] } of trace) {
+      assert.deepEqual(bounds, { x: 0, y: 42, width, height: height - 42 }, 'Child viewport fills the committed client area below the toolbar');
     }
     console.log(`Live resize regression passed: ${trace.length} committed viewport sizes; vertical growth/shrink, minimum height, corner drag, persistent iframe and opaque canvases.`);
   } finally {

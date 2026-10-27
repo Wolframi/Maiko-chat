@@ -18,3 +18,8 @@ html, body, iframe[data-maiko-desktop-ui] {
 .reconnect-banner.is-ok {
   display: none !important;
 }
+
+/* The Windows application is already installed. */
+.server-rail__orb--download {
+  display: none !important;
+}

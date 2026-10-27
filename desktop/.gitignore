@@ -5,4 +5,12 @@
 /bundled-assets.pending/
 *.log
 /native/*.exe
+/native/*.vst3/
+/native/*.zip
+/.daw-bridge-build/
+/daw-bridge/target/
 /ui/site-layout.css
+/ui/startup-model.js
+/.protected/
+/.protected-work/
+/.protection-report.json

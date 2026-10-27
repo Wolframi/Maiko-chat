@@ -10,7 +10,7 @@ const clientSnapshot = () => true;
 const serverSnapshot = () => false;
 const TAU = Math.PI * 2;
 
-export function HologramMaikoFallback({ onReady }: { onReady?: (durationMs?: number) => void }) {
+export function HologramMaikoFallback({ onReady, startFormed = false }: { onReady?: (durationMs?: number) => void; startFormed?: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mounted = useSyncExternalStore(subscribe, clientSnapshot, serverSnapshot);
   const isPresent = useIsPresent();
@@ -31,7 +31,7 @@ export function HologramMaikoFallback({ onReady }: { onReady?: (durationMs?: num
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
     let atoms: MaikoMolecules | null = null;
     let width = 1, height = 1, dpr = 1, scale = 1;
-    let raf = 0, last = 0, elapsed = 0, accumulator = 0;
+    let raf = 0, last = 0, elapsed = startFormed ? 3 : 0, accumulator = 0;
     let exitAt: number | null = null;
     let pointer: { x: number; y: number } | null = null;
     let screen = new Float32Array(0);
@@ -193,7 +193,7 @@ export function HologramMaikoFallback({ onReady }: { onReady?: (durationMs?: num
       document.removeEventListener("visibilitychange", resume);
       media.removeEventListener("change", resume);
     };
-  }, [mounted]);
+  }, [mounted,startFormed]);
 
   if (!mounted) return null;
   return createPortal(

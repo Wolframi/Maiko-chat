@@ -14,10 +14,17 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { parse } from "node:url";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import next from "next";
 import { loadEnvConfig } from "@next/env";
 import { MessageStore } from "./src/server/messageStore";
+import { MessageTasks } from "./src/server/messageTasks";
+import { hideHistoryFor, messageVisibleTo } from "./src/server/dmHistory";
+import { summarizeMessages } from "./src/server/messageSummary";
+import { selectHistoryPage, isThreadMessage } from "./src/server/historyPage";
+import { selectHistoryWindow, selectNewerHistory, searchHistory } from "./src/server/historyNavigation";
+import { personSearchScore } from "./src/lib/username";
+import { canManageRegistration, memberRegistrationInvite, registrationPolicy, setRegistrationPolicy } from "./src/server/registrationInvites";
 import { Server, type Socket } from "socket.io";
 import {
   AccessToken,
@@ -30,6 +37,8 @@ import {
   getUserById,
   listUsers,
   loginUser,
+  authCredentialsError,
+  normalizeUsername,
   logoutToken,
   registerUser,
   restoreSession,
@@ -56,9 +65,12 @@ import {
   getChat,
   groupVisibility,
   joinPublicGroup,
+  getGroupInviteCode,
+  joinGroupByCode,
   listChatsForUser,
   listMemberProfiles,
   openDm,
+  hideDm,
   peerIdForViewer,
   searchPublicGroups,
   updateGroupAvatar,
@@ -101,6 +113,12 @@ import { tryServeDesktopUpdate } from "./src/server/desktopUpdates";
 import { configureDesktopUpdateNotifications } from "./src/server/desktopUpdateNotifications";
 import { s3Enabled, s3Origin } from "./src/server/objectStorage";
 import { rateLimit } from "./src/server/rateLimit";
+import { clientAddress } from "./src/server/requestSecurity";
+import { issueTurnCredentials } from "./src/server/turnCredentials";
+import { MessageAdmission } from "./src/server/messageAdmission";
+import { monitorSocketBackpressure, isSocketBackedUp } from "./src/server/socketBackpressure";
+import { isAllowedPushEndpoint, validPushKeys } from "./src/server/pushSecurity";
+import { getGifs } from "./src/server/gif";
 import { buildIceServers } from "./src/lib/iceServers";
 import {
   getVapidPublicKey,
@@ -139,24 +157,6 @@ const dev = process.env.NODE_ENV !== "production";
 const hostname = listenHostname();
 const port = Number(process.env.PORT) || 3000;
 
-function loadTurnSecrets() {
-  try {
-    const dir = process.cwd();
-    const user = readFileSync(path.join(dir, ".turn-user"), "utf8")
-      .replace(/\r/g, "")
-      .trim();
-    const pass = readFileSync(path.join(dir, ".turn-pass"), "utf8")
-      .replace(/\r/g, "")
-      .trim();
-    if (user && pass) return { user, pass };
-  } catch {
-    /* optional */
-  }
-  return {
-    user: (process.env.TURN_USER || "").trim(),
-    pass: (process.env.TURN_PASS || "").trim(),
-  };
-}
 
 function readOptionalSecret(filename: string, envName: string) {
   try {
@@ -360,6 +360,8 @@ type MessageReaction = {
 };
 
 type ChatMessage = {
+  /** Server-only visibility: deleting a DM for oneself keeps the peer's copy. */
+  hiddenFor?: string[];
   id: string;
   room: string;
   author: string;
@@ -534,6 +536,7 @@ const MESSAGES_FILE = path.join(DATA_DIR, "messages.json");
 const messageStore = process.env.MONGODB_URI
   ? new MessageStore<ChatMessage>(process.env.MONGODB_URI, process.env.MONGODB_DATABASE)
   : undefined;
+const messageTasks = new MessageTasks();
 const READS_FILE = path.join(DATA_DIR, "reads.json");
 const PINS_FILE = path.join(DATA_DIR, "pins.json");
 const LIVE_MEDIA_FILE = path.join(DATA_DIR, "live-media.json");
@@ -597,32 +600,21 @@ function createPersister(write: () => void): Persister {
   return schedule;
 }
 
+function storedMessage(message: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    ...(message.sticker?.url ? { sticker: { ...message.sticker, url: bareUploadUrl(message.sticker.url) } } : {}),
+    ...(message.file?.url ? { file: { ...message.file, url: bareUploadUrl(message.file.url) } } : {}),
+    ...(message.files?.length ? { files: message.files.map(file => ({ ...file, url: bareUploadUrl(file.url) })) } : {}),
+  };
+}
+
 function writeMessagesSnapshot() {
   const payload: Record<string, ChatMessage[]> = {};
   for (const [chatId, list] of chatMessages) {
-    payload[chatId] = list.map((message) => {
-      let next: ChatMessage = message;
-      if (message.sticker?.url) {
-        next = {
-          ...next,
-          sticker: {
-            ...message.sticker,
-            url: bareUploadUrl(message.sticker.url),
-          },
-        };
-      }
-      if (next.files?.length) {
-        next = { ...next, files: next.files.map((file) => ({ ...file, url: bareUploadUrl(file.url) })) };
-      }
-      if (!next.file?.url) return next;
-      return {
-        ...next,
-        file: { ...next.file, url: bareUploadUrl(next.file.url) },
-      };
-    });
+    payload[chatId] = list.map(storedMessage);
   }
-  if (messageStore) messageStore.save(new Map(Object.entries(payload)));
-  else atomicWriteJson(MESSAGES_FILE, payload);
+  atomicWriteJson(MESSAGES_FILE, payload);
 }
 
 function writeReadsSnapshot() {
@@ -664,15 +656,23 @@ function writeLiveMediaSnapshot() {
   atomicWriteJson(LIVE_MEDIA_FILE, { at: Date.now(), calls, voice });
 }
 
-const persistMessages: Persister = messageStore
-  ? Object.assign(() => writeMessagesSnapshot(), { idle: () => messageStore.idle() })
-  : createPersister(writeMessagesSnapshot);
+const persistJsonMessages = createPersister(writeMessagesSnapshot);
+const persistMessages = Object.assign((changed: readonly ChatMessage[]) => {
+  if (messageStore) {
+    for (const message of changed) messageStore.update(storedMessage(message));
+  } else persistJsonMessages();
+}, { idle: () => messageStore ? messageStore.idle() : persistJsonMessages.idle() });
+
+function persistNewMessage(message: ChatMessage) {
+  if (messageStore) messageStore.append(storedMessage(message));
+  else persistJsonMessages();
+}
 const persistReads = createPersister(writeReadsSnapshot);
 const persistPins = createPersister(writePinsSnapshot);
 const persistLiveMedia = createPersister(writeLiveMediaSnapshot);
 
 function flushAllPersists() {
-  writeMessagesSnapshot();
+  if (!messageStore) writeMessagesSnapshot();
   writeReadsSnapshot();
   writePinsSnapshot();
   writeLiveMediaSnapshot();
@@ -887,6 +887,10 @@ setInterval(() => {
 // Hourly: delete uploads no message/user references (orphans from failed sends,
 // replaced avatars). Files younger than 7 days are never touched.
 setInterval(() => {
+  void messageTasks.exclusive(sweepMessageUploads).catch(error => console.error("[uploads:sweep]", error.name));
+}, 60 * 60_000).unref();
+
+async function sweepMessageUploads() {
   const referenced = new Set<string>();
   const addRef = (url: string | undefined | null) => {
     if (!url) return;
@@ -897,14 +901,15 @@ setInterval(() => {
       /* ignore */
     }
   };
-  for (const list of chatMessages.values()) {
-    for (const message of list) {
+  for await (const message of scanMessages()) {
       for (const file of messageAttachments(message)) addRef(file.url);
       addRef(message.sticker?.url);
-    }
   }
   for (const user of listUsers()) {
     addRef((user as { avatarUrl?: string }).avatarUrl);
+    const custom = getUserById(user.id)?.ringtoneSettings?.custom;
+    addRef(custom?.url);
+    addRef(custom?.source?.url);
   }
   const result = sweepOrphanUploads((name) => referenced.has(name));
   if (result.removed > 0) {
@@ -912,7 +917,7 @@ setInterval(() => {
       `[uploads] sweep removed ${result.removed} orphans (${Math.round(result.freedBytes / 1024 / 1024)} MB)`,
     );
   }
-}, 60 * 60_000).unref();
+}
 
 function allowCallLog(userId: string, chatId: string) {
   callLogAllow.set(`${userId}:${chatId}`, Date.now() + 90_000);
@@ -928,10 +933,10 @@ function canCallLog(userId: string, chatId: string) {
   return true;
 }
 
-function resolveClientMessageId(
+async function resolveClientMessageId(
   userId: string,
   clientIdRaw: string,
-  findExisting: (id: string) => ChatMessage | undefined,
+  findExisting: (id: string) => Promise<ChatMessage | undefined>,
 ) {
   const clientId = String(clientIdRaw || "").slice(0, 80);
   const now = Date.now();
@@ -941,7 +946,7 @@ function resolveClientMessageId(
   const key = `${userId}:${clientId}`;
   const hit = clientMsgIds.get(key);
   if (hit && hit.expires > now) {
-    const existing = findExisting(hit.id);
+    const existing = await findExisting(hit.id);
     if (existing) return { id: hit.id, existing };
   }
   const id = randomUUID();
@@ -1020,31 +1025,33 @@ function peerReadAtFor(chatId: string, viewerId: string) {
   return latest || null;
 }
 
-function emitHistory(socket: Socket, chatId: string, viewerId: string) {
+async function emitHistory(socket: Socket, chatId: string, viewerId: string) {
+  if (socket.handshake.auth?.historyPages === 1) {
+    const page = await historyPage(chatId, viewerId);
+    socket.emit("history", { ...page, chatId, messages: await publicMessages(page.messages, viewerId), peerReadAt: peerReadAtFor(chatId, viewerId) });
+    return;
+  }
   socket.emit("history", {
     chatId,
-    messages: historyForClient(chatId),
+    messages: await historyForClient(chatId, viewerId),
     peerReadAt: peerReadAtFor(chatId, viewerId),
   });
 }
 
-function unreadCountFor(chatId: string, viewerId: string) {
+async function messageSummary(chatId: string, viewerId: string) {
   const since = lastReadByUser.get(viewerId)?.get(chatId) ?? 0;
-  return messagesFor(chatId).filter(
-    (message) =>
-      message.kind !== "system" &&
-      message.createdAt > since &&
-      message.authorId !== viewerId,
-  ).length;
+  return messageStore ? messageStore.summary(chatId, viewerId, since) : summarizeMessages(messagesFor(chatId), viewerId, since);
 }
 
-function resolveReply(
+async function resolveReply(
   chatId: string,
   replyToId?: string,
-): ReplyPreview | undefined {
+  viewerId?: string,
+): Promise<ReplyPreview | undefined> {
   if (!replyToId) return undefined;
-  const source = messagesFor(chatId).find((item) => item.id === replyToId);
+  const source = await findMessage(chatId, replyToId, viewerId);
   if (!source || source.kind === "system") return undefined;
+  if (viewerId && !messageVisibleTo(source, viewerId)) return undefined;
   const text =
     source.kind === "file"
       ? `Файл: ${source.file?.name || source.text}`
@@ -1145,22 +1152,53 @@ function getCallForUsers(a: string, b: string) {
 }
 
 function messagesFor(chatId: string) {
+  if (messageStore) throw new Error("MongoDB messages must be queried directly");
   if (!chatMessages.has(chatId)) chatMessages.set(chatId, []);
   return chatMessages.get(chatId)!;
 }
 
-function clearChatMessages(chatId: string) {
-  chatMessages.set(chatId, []);
-  persistMessages();
+async function findMessage(chatId: string, id: string, viewerId?: string) {
+  if (messageStore) return messageStore.get(chatId, id, viewerId);
+  return messagesFor(chatId).find(message => message.id === id && (!viewerId || messageVisibleTo(message, viewerId)));
 }
 
-function removeMessage(chatId: string, messageId: string) {
-  const list = messagesFor(chatId);
-  const index = list.findIndex((item) => item.id === messageId);
-  if (index < 0) return null;
-  const [removed] = list.splice(index, 1);
-  persistMessages();
-  return removed;
+async function findClientMessage(chatId: string, authorId: string, clientId: string, viewerId?: string) {
+  if (messageStore) return messageStore.findClient(chatId, authorId, clientId, viewerId);
+  return messagesFor(chatId).find(message => message.authorId === authorId && message.clientId === clientId && (!viewerId || messageVisibleTo(message, viewerId)));
+}
+
+async function historyPage(chatId: string, viewerId: string, before?: string) {
+  return messageStore ? messageStore.page(chatId, viewerId, before) : selectHistoryPage(messagesFor(chatId), viewerId, before);
+}
+
+async function* scanMessages(chatId?: string, viewerId?: string, newestFirst = false, query: Record<string, unknown> = {}) {
+  if (messageStore) {
+    yield* messageStore.scan({ ...query, ...(chatId ? { room: chatId } : {}), ...(viewerId ? { "message.hiddenFor": { $ne: viewerId } } : {}) }, newestFirst);
+  } else {
+    const lists = chatId ? [messagesFor(chatId)] : chatMessages.values();
+    for (const list of lists) {
+      for (let index = newestFirst ? list.length - 1 : 0; newestFirst ? index >= 0 : index < list.length; index += newestFirst ? -1 : 1) {
+        const message = list[index];
+        if (!viewerId || messageVisibleTo(message, viewerId)) yield message;
+      }
+    }
+  }
+}
+
+async function emitRoomMessage(io: Server, event: "message" | "message:update", message: ChatMessage) {
+  for (const socketId of io.sockets.adapter.rooms.get(message.room) || []) {
+    const account = getSocketAccount(socketId);
+    if (!account || !messageVisibleTo(message, account.userId)) continue;
+    const client = io.sockets.sockets.get(socketId);
+    if (client && isSocketBackedUp(client)) { client.disconnect(true); continue; }
+    io.to(socketId).emit(event, await publicMessage(message, account.userId));
+  }
+}
+
+function clearChatMessages(chatId: string) {
+  if (!messageStore) chatMessages.set(chatId, []);
+  if (messageStore) messageStore.clear(chatId);
+  else persistJsonMessages();
 }
 
 /** Soft-delete: keep a system tombstone so replies / history stay coherent. */
@@ -1173,69 +1211,57 @@ function makeDeletedTombstone(message: ChatMessage): ChatMessage {
     text: fileGone ? "Файл удалён из сообщения" : "Сообщение удалено",
     createdAt: message.createdAt,
     kind: "system",
+    hiddenFor: message.hiddenFor,
   };
 }
 
-function redactMessage(chatId: string, messageId: string) {
-  const list = messagesFor(chatId);
-  const index = list.findIndex((item) => item.id === messageId);
-  if (index < 0) return null;
-  const original = list[index];
+async function redactMessage(chatId: string, messageId: string) {
+  const original = await findMessage(chatId, messageId);
+  if (!original) return null;
   if (original.kind === "system") return null;
 
   const tombstone = makeDeletedTombstone(original);
-  list[index] = tombstone;
+  if (!messageStore) {
+    const list = messagesFor(chatId);
+    list[list.findIndex(item => item.id === messageId)] = tombstone;
+  }
+  persistMessages([tombstone]);
+  if (messageStore) messageStore.redactReplies(chatId, messageId, tombstone.text);
 
   const replyUpdates: ChatMessage[] = [];
-  for (let i = 0; i < list.length; i += 1) {
-    const item = list[i];
+  for await (const item of scanMessages(chatId, undefined, false, { "message.replyTo.id": messageId })) {
     if (item.replyTo?.id !== messageId) continue;
-    list[i] = {
-      ...item,
-      replyTo: {
-        ...item.replyTo,
-        text: tombstone.text,
-      },
-    };
-    replyUpdates.push(list[i]);
+    item.replyTo = { ...item.replyTo, text: tombstone.text };
+    if (!messageStore) persistMessages([item]);
+    replyUpdates.push(item);
   }
 
-  persistMessages();
   return { tombstone, replyUpdates, original };
 }
 
 /** Mark pending invites to a deleted group as expired across all DMs. */
-function expireInvitesForGroup(
+async function expireInvitesForGroup(
   io: Server,
   groupId: string,
   groupTitle: string,
 ) {
-  for (const [chatId, list] of chatMessages.entries()) {
-    let touched = false;
-    for (let i = 0; i < list.length; i += 1) {
-      const item = list[i];
+  const text = `Группа «${groupTitle}» удалена`;
+  if (messageStore) messageStore.expireInvites(groupId, text);
+  for await (const item of scanMessages(undefined, undefined, false, { "message.invite.groupId": groupId, "message.invite.status": "expired" })) {
       if (
         item.kind !== "invite" ||
         !item.invite ||
         item.invite.groupId !== groupId ||
-        item.invite.status !== "pending"
+        item.invite.status !== (messageStore ? "expired" : "pending")
       ) {
         continue;
       }
-      list[i] = {
-        ...item,
-        text: `Группа «${groupTitle}» удалена`,
-        invite: {
-          ...item.invite,
-          status: "expired",
-        },
-      };
-      touched = true;
-      io.to(chatId).emit("message:update", publicMessage(list[i]));
-      const chat = getChat(chatId);
-      if (chat) notifyChatMembers(io, chat);
-    }
-    if (touched) persistMessages();
+      item.text = text;
+      item.invite = { ...item.invite, status: "expired" };
+      if (!messageStore) persistMessages([item]);
+      await emitRoomMessage(io, "message:update", item);
+      const chat = getChat(item.room);
+      if (chat) await notifyChatMembers(io, chat);
   }
 }
 
@@ -1263,12 +1289,14 @@ function kickUserFromGroup(io: Server, userId: string, chatId: string) {
       }
     }
 
-    if (presence.room === chatId) {
-      memberSocket.leave(chatId);
+    if (presence.room === chatId || presence.room?.startsWith(`${chatId}::text_`)) {
+      const roomId = presence.room;
+      memberSocket.leave(roomId);
       presence.room = null;
       usersBySocket.set(socketId, presence);
-      memberSocket.emit("chat:left", { chatId });
+      if (roomId !== chatId) memberSocket.emit("chat:left", { chatId: roomId });
     }
+    memberSocket.emit("chat:left", { chatId });
   }
 
   // A temporarily disconnected socket may still own voice presence during
@@ -1331,8 +1359,13 @@ function publicAccount(account: AuthAccount): AuthAccount {
   };
 }
 
-function publicMessage(message: ChatMessage): ChatMessage {
-  let next = message;
+async function publicMessage(message: ChatMessage, viewerId?: string, replySource?: ChatMessage | null): Promise<ChatMessage> {
+  let next: ChatMessage = { ...message };
+  delete next.hiddenFor;
+  if (viewerId && next.replyTo) {
+    const source = replySource === undefined ? await findMessage(message.room, next.replyTo.id) : replySource;
+    if (source && !messageVisibleTo(source, viewerId)) next = { ...next, replyTo: undefined };
+  }
   if (message.sticker?.url) {
     next = {
       ...next,
@@ -1355,16 +1388,29 @@ function publicMessage(message: ChatMessage): ChatMessage {
   };
 }
 
-/** Hide join/leave spam from the thread (presence still updates separately). */
-function isPresenceNotice(message: ChatMessage) {
-  if (message.kind !== "system") return false;
-  return / (в чате|вышел)$/.test(String(message.text || "").trim());
+async function publicMessages(messages: readonly ChatMessage[], viewerId: string) {
+  if (!messageStore) return Promise.all(messages.map(message => publicMessage(message, viewerId)));
+  const rooms = new Map<string, Set<string>>();
+  for (const message of messages) {
+    if (!message.replyTo) continue;
+    const ids = rooms.get(message.room) ?? new Set<string>();
+    ids.add(message.replyTo.id);
+    rooms.set(message.room, ids);
+  }
+  const sources = new Map<string, ChatMessage>();
+  await Promise.all([...rooms].map(async ([room, ids]) => {
+    for (const source of await messageStore.getMany(room, [...ids])) sources.set(JSON.stringify([room, source.id]), source);
+  }));
+  return Promise.all(messages.map(message => publicMessage(message, viewerId,
+    message.replyTo ? sources.get(JSON.stringify([message.room, message.replyTo.id])) ?? null : null)));
 }
 
-function historyForClient(chatId: string) {
-  return messagesFor(chatId)
-    .filter((message) => !isPresenceNotice(message))
-    .map(publicMessage);
+async function historyForClient(chatId: string, viewerId: string) {
+  const messages: ChatMessage[] = [];
+  for await (const message of scanMessages(chatId, viewerId)) {
+    if (isThreadMessage(message)) messages.push(await publicMessage(message, viewerId));
+  }
+  return messages;
 }
 
 function peopleForViewer(viewerId: string) {
@@ -1390,19 +1436,8 @@ function peopleForViewer(viewerId: string) {
 }
 
 function searchPeople(viewerId: string, queryRaw: string) {
-  const query = queryRaw.trim().toLowerCase();
-  if (query.length < 1) return [];
-  const online = onlineUserIds();
-
   function score(user: { username: string; displayName: string }) {
-    const username = user.username.toLowerCase();
-    const display = user.displayName.toLowerCase();
-    if (username === query || display === query) return 0;
-    if (username.startsWith(query)) return 1;
-    if (display.startsWith(query)) return 2;
-    if (username.includes(query)) return 3;
-    if (display.includes(query)) return 4;
-    return 99;
+    return personSearchScore(user, queryRaw);
   }
 
   return listUsers()
@@ -1415,7 +1450,7 @@ function searchPeople(viewerId: string, queryRaw: string) {
       if (diff !== 0) return diff;
       return a.displayName.localeCompare(b.displayName, "ru");
     })
-    .slice(0, 100)
+    .slice(0, 20)
     .map((user) => ({
       id: user.id,
       username: user.username,
@@ -1423,22 +1458,22 @@ function searchPeople(viewerId: string, queryRaw: string) {
       avatarUrl: user.avatarUrl
         ? signAvatarUrl(bareUploadUrl(user.avatarUrl))
         : undefined,
-      bio: "",
-      online: online.has(user.id),
     }));
 }
 
-function suggestPeople(viewerId: string) {
+function suggestPeople(viewerId: string, query = "") {
+  if (query.trim()) return searchPeople(viewerId, query);
+  const contacts = contactIdsFor(viewerId);
   const online = onlineUserIds();
   return listUsers()
-    .filter((user) => user.id !== viewerId)
+    .filter((user) => user.id !== viewerId && contacts.has(user.id))
     .sort((a, b) => {
       const aOnline = online.has(a.id);
       const bOnline = online.has(b.id);
       if (aOnline !== bOnline) return aOnline ? -1 : 1;
       return a.displayName.localeCompare(b.displayName, "ru");
     })
-    .slice(0, 24)
+    .slice(0, 12)
     .map((user) => ({
       id: user.id,
       username: user.username,
@@ -1446,8 +1481,6 @@ function suggestPeople(viewerId: string) {
       avatarUrl: user.avatarUrl
         ? signAvatarUrl(bareUploadUrl(user.avatarUrl))
         : undefined,
-      bio: "",
-      online: online.has(user.id),
     }));
 }
 
@@ -1464,9 +1497,8 @@ function labelOf(account: AuthAccount) {
   return account.displayName || account.username;
 }
 
-function chatInfo(chat: ChatMeta, viewerId: string) {
-  const messages = messagesFor(chat.id);
-  const last = [...messages].reverse().find((item) => item.kind !== "system");
+async function chatInfo(chat: ChatMeta, viewerId: string) {
+  const { count, unreadCount, last } = await messageSummary(chat.id, viewerId);
   const preview = last ? chatListPreview(last) : null;
 
   const group =
@@ -1478,9 +1510,9 @@ function chatInfo(chat: ChatMeta, viewerId: string) {
     title: dmTitleForViewer(chat, viewerId),
     topic: chat.topic,
     online: presenceNames(chat.id).length,
-    messages: messages.filter((item) => item.kind !== "system").length,
+    messages: count,
     members: chat.type === "channel" ? onlineUserIds().size : chat.memberIds.length,
-    unreadCount: unreadCountFor(chat.id, viewerId),
+    unreadCount,
     pinned: isPinned(viewerId, chat.id),
     peerId: peerIdForViewer(chat, viewerId),
     avatarUrl: chat.avatarUrl
@@ -1513,11 +1545,11 @@ function chatInfo(chat: ChatMeta, viewerId: string) {
         : undefined,
     textChannels:
       group.type === "group"
-        ? (group.textChannels || []).map((channel) => ({
+        ? await Promise.all((group.textChannels || []).map(async (channel) => ({
             id: channel.id,
             title: channel.title,
-            unreadCount: unreadCountFor(channel.id, viewerId),
-          }))
+            unreadCount: (await messageSummary(channel.id, viewerId)).unreadCount,
+          })))
         : undefined,
   };
 }
@@ -1626,17 +1658,23 @@ function classifyRoomFile(file: NonNullable<ChatMessage["file"]>): {
   return { category: "file", kind: "file" };
 }
 
-function collectRoomMedia(
+async function collectRoomMedia(
   chatId: string,
   filter: "media" | "file" | "all",
-): RoomMediaItem[] {
+  viewerId: string,
+  offset: number,
+  limit: number,
+) {
   const items: RoomMediaItem[] = [];
-  for (const message of messagesFor(chatId)) {
+  let total = 0;
+  for await (const message of scanMessages(chatId, viewerId, true, { "message.kind": "file" })) {
     if (message.kind !== "file") continue;
-    for (const file of messageAttachments(message)) {
+    for (const file of messageAttachments(message).reverse()) {
       const classified = classifyRoomFile(file);
       if (filter === "media" && classified.category !== "media") continue;
       if (filter === "file" && classified.category === "media") continue;
+      const index = total++;
+      if (index < offset || items.length >= limit) continue;
       items.push({
         messageId: message.id,
         createdAt: message.createdAt,
@@ -1650,8 +1688,7 @@ function collectRoomMedia(
       });
     }
   }
-  items.reverse();
-  return items;
+  return { items, total, hasMore: offset + items.length < total };
 }
 
 function socketsForUser(userId: string) {
@@ -1662,14 +1699,15 @@ function socketsForUser(userId: string) {
 
 function emitToUser(io: Server, userId: string, event: string, payload: unknown) {
   for (const socketId of socketsForUser(userId)) {
+    const client = io.sockets.sockets.get(socketId);
+    if (client && isSocketBackedUp(client)) { client.disconnect(true); continue; }
     io.to(socketId).emit(event, payload);
   }
 }
 
-function pushMessage(io: Server, chat: ChatMeta, message: ChatMessage) {
+async function pushMessage(io: Server, chat: ChatMeta, message: ChatMessage) {
   const roomId = messageRoomFor(chat, message.room);
   message.room = roomId;
-  const list = messagesFor(roomId);
   const attachments = messageAttachments(message).map((file) => ({
     ...file,
     url: bareUploadUrl(file.url),
@@ -1681,8 +1719,8 @@ function pushMessage(io: Server, chat: ChatMeta, message: ChatMessage) {
       files: attachments.length > 1 ? attachments : undefined,
     };
   }
-  list.push(message);
-  persistMessages();
+  if (!messageStore) messagesFor(roomId).push(message);
+  persistNewMessage(message);
 
   // Only the author is auto-marked read; viewers emit chats:read themselves
   // so background tabs keep unread badges.
@@ -1690,9 +1728,8 @@ function pushMessage(io: Server, chat: ChatMeta, message: ChatMessage) {
     markChatRead(message.authorId, roomId);
   }
 
-  const outbound = publicMessage(message);
-  io.to(roomId).emit("message", outbound);
-  notifyChatMembers(io, chat);
+  await emitRoomMessage(io, "message", message);
+  await notifyChatMembers(io, chat);
 
   // Lightweight ping for members currently in another room (sound / desktop notify).
   if (
@@ -1752,7 +1789,7 @@ function voiceAttachmentOf(message: ChatMessage) {
   return messageAttachments(message).find((file) => isVoiceNote(file)) || null;
 }
 
-function startVoiceTranscription(
+async function startVoiceTranscription(
   io: Server,
   chat: ChatMeta,
   message: ChatMessage,
@@ -1769,46 +1806,42 @@ function startVoiceTranscription(
   }
   if (!hasTranscriptionKey()) {
     message.transcriptionStatus = "error";
-    persistMessages();
-    io.to(chat.id).emit("message:update", publicMessage(message));
+    persistMessages([message]);
+    await emitRoomMessage(io, "message:update", message);
     return;
   }
 
   message.transcriptionStatus = "pending";
-  persistMessages();
-  io.to(chat.id).emit("message:update", publicMessage(message));
+  persistMessages([message]);
+  await emitRoomMessage(io, "message:update", message);
 
+  const finish = (text?: string) => messageTasks.run(["room:" + chat.id], async () => {
+    const current = await findMessage(chat.id, message.id);
+    if (!current || current.kind !== "file" || voiceAttachmentOf(current)?.url !== voice.url) return;
+    if (text !== undefined) current.transcription = text;
+    current.transcriptionStatus = text === undefined ? "error" : "ready";
+    persistMessages([current]);
+    await emitRoomMessage(io, "message:update", current);
+  });
   void queueTranscription(message.id, () =>
     withUploadFile(voice.url, (diskPath) => transcribeAudioFile(diskPath, voice.name, voice.mime)),
   )
-    .then((text) => {
-      const current = messagesFor(chat.id).find((item) => item.id === message.id);
-      if (!current) return;
-      current.transcription = text;
-      current.transcriptionStatus = "ready";
-      persistMessages();
-      io.to(chat.id).emit("message:update", publicMessage(current));
-    })
-    .catch((error) => {
+    .then(text => finish(text))
+    .catch((error: Error) => {
       console.warn("[transcribe]", message.id, error);
-      const current = messagesFor(chat.id).find((item) => item.id === message.id);
-      if (!current) return;
-      current.transcriptionStatus = "error";
-      persistMessages();
-      io.to(chat.id).emit("message:update", publicMessage(current));
+      return finish();
+    }).catch((error: Error) => {
+      console.error("[transcribe:persist]", error.name);
     });
 }
 
-function chatsForUser(userId: string) {
-  return listChatsForUser(userId)
-    .filter(
-      (chat) =>
-        chat.type !== "dm" ||
-        !chat.visibleTo ||
-        chat.visibleTo.includes(userId) ||
-        messagesFor(chat.id).some((item) => item.kind !== "system"),
-    )
-    .map((chat) => chatInfo(chat, userId))
+async function chatsForUser(userId: string) {
+  const chats = listChatsForUser(userId);
+  const infos = await Promise.all(chats.map(async chat => {
+    const info = await chatInfo(chat, userId);
+    return chat.type !== "dm" || !chat.visibleTo || chat.visibleTo.includes(userId) || info.messages > 0 ? info : null;
+  }));
+  return infos.filter(info => info !== null)
     .sort((a, b) => {
       if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
       const aTime = a.lastMessage?.createdAt ?? a.createdAt;
@@ -1817,8 +1850,15 @@ function chatsForUser(userId: string) {
     });
 }
 
-function emitChats(socket: Socket, userId: string) {
-  socket.emit("chats", chatsForUser(userId));
+async function emitChats(socket: Socket, userId: string) {
+  socket.emit("chats", await chatsForUser(userId));
+}
+
+async function chatUpdateFor(chat: ChatMeta, userId: string) {
+  if (getChat(chat.id) !== chat || !canAccessChat(chat, userId)) return { chatId: chat.id, chat: null };
+  const info = await chatInfo(chat, userId);
+  const visible = chat.type !== "dm" || !chat.visibleTo || chat.visibleTo.includes(userId) || info.messages > 0;
+  return { chatId: chat.id, chat: visible ? info : null };
 }
 
 function broadcastPeople(io: Server) {
@@ -1828,20 +1868,31 @@ function broadcastPeople(io: Server) {
   }
 }
 
-function notifyChatMembers(io: Server, chat: ChatMeta) {
-  if (chat.type === "channel") {
-    for (const [socketId, presence] of usersBySocket.entries()) {
-      if (!presence.userId) continue;
-      const socket = io.sockets.sockets.get(socketId);
-      if (socket) emitChats(socket, presence.userId);
-    }
-    return;
-  }
-
+async function notifyChatMembers(io: Server, chat: ChatMeta) {
+  // Reuse only within this notification: each user's windows share a view,
+  // while later notifications always reflect edits, reads and hidden history.
+  const lists = new Map<string, Awaited<ReturnType<typeof chatsForUser>>>();
+  const updates = new Map<string, Awaited<ReturnType<typeof chatUpdateFor>>>();
+  const memberIds = new Set(chat.memberIds);
   for (const [socketId, presence] of usersBySocket.entries()) {
-    if (!chat.memberIds.includes(presence.userId)) continue;
+    if (!presence.userId || (chat.type !== "channel" && !memberIds.has(presence.userId))) continue;
     const socket = io.sockets.sockets.get(socketId);
-    if (socket) emitChats(socket, presence.userId);
+    if (!socket) continue;
+    if (socket.handshake.auth?.chatPatches === 1 && chat.type !== "channel") {
+      let update = updates.get(presence.userId);
+      if (!update) {
+        update = await chatUpdateFor(chat, presence.userId);
+        updates.set(presence.userId, update);
+      }
+      socket.emit("chat:update", update);
+      continue;
+    }
+    let list = lists.get(presence.userId);
+    if (!list) {
+      list = await chatsForUser(presence.userId);
+      lists.set(presence.userId, list);
+    }
+    socket.emit("chats", list);
   }
 }
 
@@ -1854,9 +1905,8 @@ function pushSystem(room: string, text: string) {
     createdAt: Date.now(),
     kind: "system",
   };
-  const list = messagesFor(room);
-  list.push(message);
-  persistMessages();
+  if (!messageStore) messagesFor(room).push(message);
+  persistNewMessage(message);
   return message;
 }
 
@@ -1872,10 +1922,10 @@ function leaveCurrentRoom(io: Server, socket: Socket, _quiet = false) {
   });
   previous.room = null;
   usersBySocket.set(socket.id, previous);
-  if (chat) notifyChatMembers(io, chat);
+  if (chat) void notifyChatMembers(io, chat).catch(error => console.error("[chats:update]", error.name));
 }
 
-function joinChat(
+async function joinChat(
   io: Server,
   socket: Socket,
   account: AuthAccount,
@@ -1897,14 +1947,14 @@ function joinChat(
       userId: account.userId,
       readAt,
     });
-    emitHistory(socket, roomId, account.userId);
+    await emitHistory(socket, roomId, account.userId);
     return {
       ok: true as const,
       session: { name: labelOf(account), room: roomId },
     };
   }
 
-  leaveCurrentRoom(io, socket, chat.type === "dm");
+  await leaveCurrentRoom(io, socket, chat.type === "dm");
 
   socket.join(roomId);
   usersBySocket.set(socket.id, {
@@ -1921,12 +1971,12 @@ function joinChat(
     userId: account.userId,
     readAt,
   });
-  emitHistory(socket, roomId, account.userId);
+  await emitHistory(socket, roomId, account.userId);
   io.to(roomId).emit("presence", {
     chatId: roomId,
     names: presenceNames(roomId),
   });
-  notifyChatMembers(io, chat);
+  await notifyChatMembers(io, chat);
   broadcastPeople(io);
 
   return {
@@ -1948,7 +1998,7 @@ function ringingCallForUser(userId: string) {
   return call;
 }
 
-function afterAuth(io: Server, socket: Socket, account: AuthAccount) {
+async function afterAuth(io: Server, socket: Socket, account: AuthAccount) {
   cancelCallDisconnectTimer(account.userId);
   const voiceGrace = voiceDisconnectTimers.get(account.userId);
   if (voiceGrace) {
@@ -1961,7 +2011,7 @@ function afterAuth(io: Server, socket: Socket, account: AuthAccount) {
     name: labelOf(account),
     room: existing?.room ?? null,
   });
-  emitChats(socket, account.userId);
+  await emitChats(socket, account.userId);
   broadcastPeople(io);
 
   // Re-deliver ringing call after phone woke / tab reconnected.
@@ -2030,9 +2080,8 @@ function refreshPresenceName(io: Server, account: AuthAccount) {
 app.prepare().then(async () => {
   if (messageStore) {
     await messageStore.connect();
-    const loaded = await messageStore.load();
-    for (const [room, messages] of loaded) chatMessages.set(room, messages);
-    console.log(`[messages] MongoDB ready: ${loaded.size} rooms`);
+    const rooms = await messageStore.initialize();
+    console.log(`[messages] MongoDB ready: ${rooms} rooms, history loaded on demand`);
   }
   const httpServer = createServer({ maxHeaderSize: 64 * 1024 }, (req, res) => {
     const desktopUi = /^\/\?(?:[^#]*&)?_desktop_ui=1(?:&|$)/.test(req.url || "");
@@ -2044,11 +2093,13 @@ app.prepare().then(async () => {
       "Permissions-Policy",
       "camera=(self), microphone=(self), display-capture=(self), geolocation=()",
     );
+    const nonce = randomBytes(18).toString("base64");
     res.setHeader(
       "Content-Security-Policy",
       [
         "default-src 'self'",
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+        `script-src 'self' 'nonce-${nonce}' 'wasm-unsafe-eval'${dev ? " 'unsafe-eval'" : ""}`,
+        "object-src 'none'",
         "style-src 'self' 'unsafe-inline'",
         "img-src 'self' blob: data: https://*.giphy.com https://media.giphy.com https://i.giphy.com",
         "media-src 'self' blob: https://*.giphy.com https://media.giphy.com",
@@ -2059,6 +2110,9 @@ app.prepare().then(async () => {
         "form-action 'self'",
       ].join("; "),
     );
+    // Next.js extracts this nonce when dynamically rendering its inline scripts.
+    req.headers["content-security-policy"] = String(res.getHeader("Content-Security-Policy"));
+    req.headers["x-nonce"] = nonce;
     if (!dev) {
       res.setHeader(
         "Strict-Transport-Security",
@@ -2067,6 +2121,25 @@ app.prepare().then(async () => {
     }
 
     const url = req.url || "";
+    let pathname: string;
+    try { pathname = new URL(url, "http://localhost").pathname; }
+    catch { res.writeHead(400); res.end(); return; }
+    if (pathname === "/api/gif") {
+      const session = restoreSession(String(req.headers["x-pulse-token"] || ""));
+      res.setHeader("Cache-Control", "private, no-store");
+      if (req.method !== "GET") { res.writeHead(405); res.end(); return; }
+      if (!session.ok) { res.writeHead(401); res.end(); return; }
+      if (!rateLimit(`gif:${session.account.userId}`, 30, 60_000)
+        || !rateLimit(`gif-ip:${clientAddress(req)}`, 60, 60_000)) {
+        res.writeHead(429, { "Retry-After": "60" }); res.end(); return;
+      }
+      void getGifs(url).then(async response => {
+        const body = await response.text();
+        res.writeHead(response.status, Object.fromEntries(response.headers));
+        res.end(body);
+      }).catch(() => { if (!res.writableEnded) { res.statusCode = 503; res.end(); } });
+      return;
+    }
     if (tryServeDesktopUpdate(req, res)) return;
     if (
       !url.startsWith("/_next/") &&
@@ -2111,7 +2184,8 @@ app.prepare().then(async () => {
       const health = async () => {
         const ok = messageStore ? await messageStore.healthy() : true;
         res.statusCode = ok ? 200 : 503;
-        res.end(JSON.stringify({ ok, service: "pulse", bootId: APP_BOOT_ID, buildId: APP_BUILD_ID, desktopMediaHost: 1, mediaStorage: s3Enabled ? "s3" : "local", messageStorage: messageStore ? "mongodb" : "json" }));
+        const session = restoreSession(String(req.headers["x-pulse-token"] || ""));
+        res.end(JSON.stringify(session.ok ? { ok, buildId: APP_BUILD_ID, desktopMediaHost: 1 } : { ok, desktopMediaHost: 1 }));
       };
       void health();
       return;
@@ -2240,7 +2314,15 @@ app.prepare().then(async () => {
         res.end(JSON.stringify({ ok: false, error: "Unauthorized" }));
         return;
       }
-      const turn = loadTurnSecrets();
+      if (!rateLimit(`ice:${session.account.userId}`, 20, 60_000)) {
+        res.writeHead(429, { "Retry-After": "60" }); res.end(); return;
+      }
+      const secret = readOptionalSecret(".turn-auth-secret", "TURN_AUTH_SECRET");
+      if (secret.length < 32) {
+        res.writeHead(503, { "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ ok: false, error: "TURN credentials are not configured" })); return;
+      }
+      const turn = issueTurnCredentials(secret, session.account.userId, token);
       const host =
         (process.env.TURN_HOST || "").trim() ||
         (() => {
@@ -2252,14 +2334,15 @@ app.prepare().then(async () => {
         })();
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "private, max-age=300");
+      res.setHeader("Cache-Control", "private, no-store");
       res.end(
         JSON.stringify({
           ok: true,
+          expiresAt: turn.expiresAt,
           iceServers: buildIceServers({
             turnHost: host,
-            turnUser: turn.user,
-            turnPass: turn.pass,
+            turnUser: turn.username,
+            turnPass: turn.credential,
           }),
         }),
       );
@@ -2286,9 +2369,18 @@ app.prepare().then(async () => {
         res.end(JSON.stringify({ ok: false, error: "Unauthorized" }));
         return;
       }
+      if (!rateLimit(`push-subscribe:${session.account.userId}`, 10, 60_000)) {
+        res.writeHead(429, { "Retry-After": "60" }); res.end(); return;
+      }
       const chunks: Buffer[] = [];
-      req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      let bodySize = 0;
+      req.on("data", (chunk) => {
+        bodySize += Buffer.byteLength(chunk);
+        if (bodySize <= 8192) chunks.push(Buffer.from(chunk));
+        else if (!res.writableEnded) { res.writeHead(413, { Connection: "close" }); res.end(); }
+      });
       req.on("end", () => {
+        if (res.writableEnded) return;
         try {
           const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
             subscription?: {
@@ -2299,7 +2391,7 @@ app.prepare().then(async () => {
             unsubscribe?: boolean;
           };
           const endpoint = String(body.subscription?.endpoint || "");
-          if (!endpoint) {
+          if (!isAllowedPushEndpoint(endpoint)) {
             res.statusCode = 400;
             res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify({ ok: false, error: "Bad subscription" }));
@@ -2314,7 +2406,7 @@ app.prepare().then(async () => {
           }
           const p256dh = String(body.subscription?.keys?.p256dh || "");
           const auth = String(body.subscription?.keys?.auth || "");
-          if (!p256dh || !auth) {
+          if (!validPushKeys({ p256dh, auth })) {
             res.statusCode = 400;
             res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify({ ok: false, error: "Bad keys" }));
@@ -2337,7 +2429,7 @@ app.prepare().then(async () => {
       return;
     }
     if (url.startsWith("/api/ringtones")) {
-      void handleRingtones(req, res);
+      void handleRingtones(req, res, (userId) => emitToUser(io, userId, "ringtone:changed", {}));
       return;
     }
     if (url.startsWith("/api/upload")) {
@@ -2352,7 +2444,7 @@ app.prepare().then(async () => {
 
   const io = new Server(httpServer, {
     path: "/api/socket",
-    maxHttpBufferSize: 1e6,
+    maxHttpBufferSize: 64 * 1024,
     pingInterval: 15_000,
     pingTimeout: 45_000,
     connectTimeout: 20_000,
@@ -2393,18 +2485,27 @@ app.prepare().then(async () => {
   const disposeDesktopNotifications = configureDesktopUpdateNotifications(io);
   httpServer.once("close", disposeDesktopNotifications);
 
-  function clientKey(socket: Socket) {
-    // Prefer the real TCP peer. Only trust X-Forwarded-For behind a known proxy.
-    if (process.env.TRUST_PROXY === "1") {
-      const forwarded = String(
-        socket.handshake.headers["x-forwarded-for"] || "",
-      )
-        .split(",")[0]
-        .trim();
-      if (forwarded) return forwarded;
+  function clientKey(socket: Socket) { return clientAddress(socket.request); }
+
+  const admission = new MessageAdmission();
+  setInterval(() => {
+    const sample = admission.sample();
+    if (sample.accepted || sample.rejected || sample.pending) {
+      console.log("[messages:load]", JSON.stringify({ ...sample, msgPerSecond: sample.accepted / 60 }));
     }
-    return socket.handshake.address || socket.id;
-  }
+    // Disconnect slow consumers so reliable Socket.IO buffers cannot grow forever.
+    for (const client of io.sockets.sockets.values()) {
+      if (isSocketBackedUp(client)) client.disconnect(true);
+    }
+  }, 1000 * 60).unref();
+  io.use((socket, nextSocket) => {
+    const ip = clientKey(socket);
+    if (io.engine.clientsCount > 500 || !rateLimit(`socket-connect:${ip}`, 30, 60_000)
+      || [...io.sockets.sockets.values()].filter(other => clientKey(other) === ip).length >= 12) {
+      nextSocket(new Error("Too many connections")); return;
+    }
+    nextSocket();
+  });
 
   function revokeSocketSession(revokedToken: string) {
     for (const socketId of socketIdsForToken(revokedToken)) {
@@ -2432,6 +2533,105 @@ app.prepare().then(async () => {
 
   io.on("connection", (socket) => {
     ioServer = io;
+    monitorSocketBackpressure(socket);
+    function on<Args extends unknown[]>(event: string, handler: (...args: Args) => unknown) {
+      socket.on(event, (...args: Args) => {
+        const action = async () => { await handler(...args); };
+        const payload = args[0] as { chatId?: string; fromChatId?: string; toChatId?: string } | undefined;
+        const roomKeys = [payload?.chatId, payload?.fromChatId, payload?.toChatId, usersBySocket.get(socket.id)?.room]
+          .filter((key): key is string => typeof key === "string" && Boolean(key)).map(key => "room:" + key);
+        const touchesMessages = /^(message|history:|chats:|dm:|auth:|invite:|room:media|call:log|join$|leave$|disconnect$)/.test(event);
+        const task = /^(group:|text:)/.test(event)
+          ? messageTasks.exclusive(action)
+          : touchesMessages ? messageTasks.run(["socket:" + socket.id, ...roomKeys], action) : action();
+        void task.catch((error: Error) => {
+          console.error("[socket:" + event + "]", error.name);
+          const ack = args[args.length - 1];
+          if (typeof ack === "function") ack({ ok: false, error: "?? ??????? ????????? ??????. ????????? ???????." });
+        });
+      });
+    }
+
+    on("history:search", async (payload: { chatId?: string; query?: string; after?: string }, ack) => {
+      if (typeof ack !== "function") return;
+      const account = getSocketAccount(socket.id);
+      const chatId = String(payload?.chatId || "").slice(0, 200);
+      const chat = getChat(chatId);
+      if (!account || !chat || !canAccessChat(chat, account.userId)) { ack({ ok: false, error: "Нет доступа" }); return; }
+      if (!rateLimit(`history-search:${account.userId}`, 60, 60_000)) { ack({ ok: false, error: "Слишком много запросов" }); return; }
+      const query = String(payload?.query || "").trim();
+      if (query.length > 200) { ack({ ok: false, error: "Запрос слишком длинный (максимум 200 символов)" }); return; }
+      const after = String(payload?.after || "").slice(0, 200) || undefined;
+      try {
+        const page = messageStore ? await messageStore.search(chatId, account.userId, query, after)
+          : searchHistory(messagesFor(chatId), account.userId, query, after);
+        ack({ ok: true, chatId, ...page });
+      } catch { ack({ ok: false, error: "Не удалось выполнить поиск. Повторите запрос." }); }
+    });
+
+    on("history:load", async (payload: { chatId?: string; before?: string; after?: string; around?: string; all?: boolean }, ack) => {
+      if (typeof ack !== "function") return;
+      const account = getSocketAccount(socket.id);
+      const chatId = String(payload?.chatId || "").slice(0, 200);
+      const chat = getChat(chatId);
+      if (!account || !chat || !canAccessChat(chat, account.userId)) { ack?.({ ok: false, error: "Нет доступа" }); return; }
+      if (!rateLimit(`history:${account.userId}`, 60, 60_000)
+        || (payload?.all && !rateLimit(`history-all:${account.userId}`, 12, 60_000))) {
+        ack?.({ ok: false, error: "Слишком много запросов" }); return;
+      }
+      try {
+        if (payload?.all) {
+          ack?.({ ok: true, chatId, messages: await historyForClient(chatId, account.userId), hasMore: false, before: null });
+        } else if (payload?.around || payload?.after) {
+          const id = String(payload.around || payload.after).slice(0, 200);
+          const page = payload.around
+            ? messageStore ? await messageStore.window(chatId, account.userId, id) : selectHistoryWindow(messagesFor(chatId), account.userId, id)
+            : messageStore ? await messageStore.newerPage(chatId, account.userId, id) : selectNewerHistory(messagesFor(chatId), account.userId, id);
+          ack?.({ ok: true, chatId, ...page, messages: await publicMessages(page.messages, account.userId) });
+        } else {
+          const page = await historyPage(chatId, account.userId, String(payload?.before || "").slice(0, 200) || undefined);
+          ack?.({ ok: true, chatId, ...page, messages: await publicMessages(page.messages, account.userId) });
+        }
+      } catch (error) { ack?.({ ok: false, error: (error as Error).message }); }
+    });
+    socket.use((packet, nextPacket) => {
+      const event = String(packet[0]);
+      const ackIndex = packet.length - 1;
+      const acknowledge = packet[ackIndex];
+      const reject = (error: string) => { if (typeof acknowledge === "function") acknowledge({ ok: false, error }); };
+      if (!rateLimit(`socket-packets:${socket.id}`, 100, 10_000)) { reject("Слишком много запросов"); return; }
+      if (!(event === "message" || event.startsWith("message:"))) { nextPacket(); return; }
+      const account = getSocketAccount(socket.id);
+      if (!account) { reject("Нужен вход"); return; }
+      const payload = packet[1];
+      const roomId = String(payload?.toChatId || payload?.chatId || usersBySocket.get(socket.id)?.room || "").slice(0, 200);
+      const chat = getChat(roomId);
+      if (!chat || !canAccessChat(chat, account.userId)) { reject("Нет доступа"); return; }
+      if (event === "message:react") {
+        if (!rateLimit(`reaction:${account.userId}`, 30, 60_000)
+          || !rateLimit(`reaction-room:${roomId}`, 120, 60_000)) return;
+        nextPacket(); return;
+      }
+      if (typeof acknowledge !== "function") return;
+      const recipients = (io.sockets.adapter.rooms.get(roomId)?.size || 0) + chat.memberIds.length;
+      if (chat.memberIds.length > 50 || recipients > 256 || isSocketBackedUp(socket)) {
+        reject("Чат перегружен, повторите позже"); return;
+      }
+      const release = admission.acquire(account.userId, roomId, recipients);
+      if (!release) { reject("Слишком много сообщений, повторите позже"); return; }
+      const timeout = setTimeout(() => { release(); socket.disconnect(true); }, 15_000);
+      timeout.unref();
+      const cleanup = () => { clearTimeout(timeout); release(); };
+      socket.once("disconnect", cleanup);
+      let acknowledged = false;
+      packet[ackIndex] = (result: unknown) => {
+        if (acknowledged) return;
+        acknowledged = true;
+        socket.off("disconnect", cleanup);
+        cleanup(); acknowledge(result);
+      };
+      nextPacket();
+    });
     if (messageStore) {
       socket.use(async (packet, nextPacket) => {
         const ackIndex = packet.length - 1;
@@ -2445,7 +2645,7 @@ app.prepare().then(async () => {
             );
           };
         }
-        if (/^(message|group:(delete|invite)|invite:|text:delete|call:log)/.test(String(packet[0])) && !await messageStore.healthy()) {
+        if (/^(message|dm:delete|group:(delete|invite|leave)|invite:|text:delete|call:log)/.test(String(packet[0])) && !await messageStore.healthy()) {
           if (typeof acknowledge === "function") acknowledge({ ok: false, error: "Хранилище сообщений временно недоступно" });
           return;
         }
@@ -2453,7 +2653,29 @@ app.prepare().then(async () => {
       });
     }
     socket.emit("app:boot", { bootId: APP_BOOT_ID, buildId: APP_BUILD_ID });
-    socket.on("app:prepare-reload", (payload: { buildId?: string }, ack?: (result: { ok: boolean }) => void) => {
+    socket.emit("registration:policy", registrationPolicy());
+    on("registration:invite", (_payload: unknown, ack?: (result: unknown) => void) => {
+      const account = requireAccount(socket);
+      if (!account) { ack?.({ ok: false, error: "Сначала войдите" }); return; }
+      if (!rateLimit(`registration-invite:${account.userId}`, 30, 60_000)) {
+        ack?.({ ok: false, error: "Слишком много запросов. Попробуйте позже" }); return;
+      }
+      const member = getUserById(account.userId);
+      if (!member) { ack?.({ ok: false, error: "Пользователь не найден" }); return; }
+      ack?.({ ok: true, ...memberRegistrationInvite(member), ...registrationPolicy(),
+        canManage: canManageRegistration(account.userId) });
+    });
+    on("registration:configure", (payload: { required?: unknown }, ack?: (result: unknown) => void) => {
+      const account = requireAccount(socket);
+      if (!account) { ack?.({ ok: false, error: "Сначала войдите" }); return; }
+      if (!rateLimit(`registration-configure:${account.userId}`, 12, 60_000)) {
+        ack?.({ ok: false, error: "Слишком много запросов. Попробуйте позже" }); return;
+      }
+      const result = setRegistrationPolicy(account.userId, payload?.required);
+      if (result.ok) io.emit("registration:policy", registrationPolicy());
+      ack?.(result);
+    });
+    on("app:prepare-reload", (payload: { buildId?: string }, ack?: (result: { ok: boolean }) => void) => {
       const account = requireAccount(socket);
       if (!account || payload?.buildId !== APP_BUILD_ID) { ack?.({ ok: false }); return; }
       socket.data.reloadUntil = Date.now() + DEPLOY_RECONNECT_GRACE_MS;
@@ -2468,37 +2690,41 @@ app.prepare().then(async () => {
     });
     // people list only after auth — see afterAuth / broadcastPeople
 
-    socket.on(
+    on(
       "auth:register",
-      (
-        payload: { username?: string; password?: string },
+      async (
+        payload: { username?: string; password?: string; invitationCode?: unknown },
         ack?: (result: {
           ok: boolean;
           account?: AuthAccount;
           error?: string;
         }) => void,
       ) => {
-        if (!rateLimit(`auth:${clientKey(socket)}`, 30, 60_000)) {
+        const invalid = authCredentialsError(payload?.username, payload?.password);
+        if (invalid) { ack?.({ ok: false, error: invalid }); return; }
+        if (!rateLimit(`register-attempt:${clientKey(socket)}`, 12, 60_000)) {
           ack?.({ ok: false, error: "Слишком много попыток, подождите" });
           return;
         }
         const result = registerUser(
           String(payload?.username || ""),
           String(payload?.password || ""),
+          clientKey(socket),
+          payload?.invitationCode,
         );
         if (!result.ok) {
           ack?.({ ok: false, error: result.error });
           return;
         }
         bindSocketAuth(socket.id, result.account.token);
-        afterAuth(io, socket, result.account);
+        await afterAuth(io, socket, result.account);
         ack?.({ ok: true, account: publicAccount(result.account) });
       },
     );
 
-    socket.on(
+    on(
       "auth:login",
-      (
+      async (
         payload: { username?: string; password?: string },
         ack?: (result: {
           ok: boolean;
@@ -2506,7 +2732,12 @@ app.prepare().then(async () => {
           error?: string;
         }) => void,
       ) => {
-        if (!rateLimit(`auth:${clientKey(socket)}`, 30, 60_000)) {
+        if (authCredentialsError(payload?.username, payload?.password)) {
+          ack?.({ ok: false, error: "Неверный логин или пароль" }); return;
+        }
+        const loginKey = normalizeUsername(payload.username!).toLowerCase();
+        if (!rateLimit(`login-name:${clientKey(socket)}:${loginKey}`, 8, 60_000)
+          || !rateLimit(`login-ip:${clientKey(socket)}`, 60, 60_000)) {
           ack?.({ ok: false, error: "Слишком много попыток, подождите" });
           return;
         }
@@ -2519,14 +2750,14 @@ app.prepare().then(async () => {
           return;
         }
         bindSocketAuth(socket.id, result.account.token);
-        afterAuth(io, socket, result.account);
+        await afterAuth(io, socket, result.account);
         ack?.({ ok: true, account: publicAccount(result.account) });
       },
     );
 
-    socket.on(
+    on(
       "auth:restore",
-      (
+      async (
         payload: { token?: string },
         ack?: (result: {
           ok: boolean;
@@ -2534,7 +2765,7 @@ app.prepare().then(async () => {
           error?: string;
         }) => void,
       ) => {
-        if (!rateLimit(`auth:${clientKey(socket)}`, 30, 60_000)) {
+        if (!rateLimit(`restore:${clientKey(socket)}`, 120, 60_000)) {
           ack?.({ ok: false, error: "Слишком много попыток, подождите" });
           return;
         }
@@ -2544,12 +2775,12 @@ app.prepare().then(async () => {
           return;
         }
         bindSocketAuth(socket.id, result.account.token);
-        afterAuth(io, socket, result.account);
+        await afterAuth(io, socket, result.account);
         ack?.({ ok: true, account: publicAccount(result.account) });
       },
     );
 
-    socket.on("auth:logout", () => {
+    on("auth:logout", async () => {
       const account = getSocketAccount(socket.id);
       if (account) {
         const reconnectTimer = voiceDisconnectTimers.get(account.userId);
@@ -2558,17 +2789,18 @@ app.prepare().then(async () => {
         leaveVoiceChannel(io, socket, account.userId);
         touchLastSeen(account.userId);
       }
-      leaveCurrentRoom(io, socket, true);
+      await leaveCurrentRoom(io, socket, true);
       usersBySocket.delete(socket.id);
       unbindSocketAuth(socket.id);
       logoutToken(account?.token);
       broadcastPeople(io);
     });
 
-    socket.on(
+    on(
       "profile:update",
       async (
         payload: {
+          username?: string;
           displayName?: string;
           bio?: string;
           avatarUrl?: string | null;
@@ -2600,6 +2832,7 @@ app.prepare().then(async () => {
         }
 
         const result = updateProfile(account.userId, {
+          username: payload?.username,
           displayName: payload?.displayName,
           bio: payload?.bio,
           avatarUrl,
@@ -2611,16 +2844,21 @@ app.prepare().then(async () => {
         }
 
         bindSocketAuth(socket.id, result.account.token || account.token);
-        afterAuth(io, socket, result.account);
+        await afterAuth(io, socket, result.account);
         refreshPresenceName(io, result.account);
+        for (const [socketId, presence] of usersBySocket) {
+          if (presence.userId !== account.userId || socketId === socket.id) continue;
+          const peerAccount = getSocketAccount(socketId);
+          if (peerAccount) io.to(socketId).emit("profile:updated", publicAccount(peerAccount));
+        }
         for (const chat of listChatsForUser(result.account.userId)) {
-          notifyChatMembers(io, chat);
+          await notifyChatMembers(io, chat);
         }
         ack?.({ ok: true, account: publicAccount(result.account) });
       },
     );
 
-    socket.on(
+    on(
       "people:search",
       (
         payload: { query?: string },
@@ -2646,10 +2884,10 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on(
+    on(
       "people:suggest",
       (
-        _payload: Record<string, never> | undefined,
+        _payload: { query?: string } | undefined,
         ack?: (result: {
           ok: boolean;
           users?: ReturnType<typeof suggestPeople>;
@@ -2665,11 +2903,11 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: "Слишком много запросов" });
           return;
         }
-        ack?.({ ok: true, users: suggestPeople(account.userId) });
+        ack?.({ ok: true, users: suggestPeople(account.userId, String(_payload?.query || "")) });
       },
     );
 
-    socket.on(
+    on(
       "groups:search",
       (
         payload: { query?: string },
@@ -2698,9 +2936,9 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on(
+    on(
       "group:join",
-      (
+      async (
         payload: { groupId?: string },
         ack?: (result: {
           ok: boolean;
@@ -2728,18 +2966,92 @@ app.prepare().then(async () => {
           return;
         }
         // Refresh chat lists + contact people only for group members (not all users).
-        notifyChatMembers(io, joined.chat);
+        await notifyChatMembers(io, joined.chat);
         for (const memberId of joined.chat.memberIds) {
           emitToUser(io, memberId, "people", peopleForViewer(memberId));
         }
-        const result = joinChat(io, socket, account, joined.chat.id);
+        const result = await joinChat(io, socket, account, joined.chat.id);
         ack?.(result);
       },
     );
 
-    socket.on(
+    on("group:code", (payload: { groupId?: string }, ack?: (result: ReturnType<typeof getGroupInviteCode>) => void) => {
+      const account = requireAccount(socket);
+      if (!account) { ack?.({ ok: false, error: "Сначала войдите в аккаунт" }); return; }
+      if (!rateLimit(`group-code:${account.userId}`, 30, 60_000)) {
+        ack?.({ ok: false, error: "Слишком много запросов" }); return;
+      }
+      try {
+        ack?.(getGroupInviteCode(String(payload?.groupId || ""), account.userId));
+      } catch {
+        ack?.({ ok: false, error: "Не удалось получить код. Попробуйте позже." });
+      }
+    });
+
+    on("group:join-code", async (payload: { code?: string }, ack?: (result: { ok: boolean; session?: { name: string; room: string }; error?: string }) => void) => {
+      const account = requireAccount(socket);
+      if (!account) { ack?.({ ok: false, error: "Сначала войдите в аккаунт" }); return; }
+      if (!rateLimit(`group-code-join:${account.userId}`, 10, 60_000) ||
+          !rateLimit(`group-code-join-ip:${clientKey(socket)}`, 30, 60_000)) {
+        ack?.({ ok: false, error: "Слишком много попыток. Попробуйте через минуту." }); return;
+      }
+      let joined: ReturnType<typeof joinGroupByCode>;
+      try {
+        joined = joinGroupByCode(account.userId, String(payload?.code || ""));
+      } catch {
+        ack?.({ ok: false, error: "Не удалось проверить код. Попробуйте позже." }); return;
+      }
+      if (!joined.ok) { ack?.({ ok: false, error: joined.error }); return; }
+      await notifyChatMembers(io, joined.chat);
+      for (const memberId of joined.chat.memberIds) {
+        emitToUser(io, memberId, "people", peopleForViewer(memberId));
+      }
+      ack?.(await joinChat(io, socket, account, joined.chat.id));
+    });
+
+    on(
+      "dm:delete",
+      async (
+        payload: { chatId?: string; scope?: "self" | "both" },
+        ack?: (result: { ok: boolean; error?: string }) => void,
+      ) => {
+        const account = requireAccount(socket);
+        if (!account) { ack?.({ ok: false, error: "Сначала войдите в аккаунт" }); return; }
+        if (!rateLimit(`dm-delete:${account.userId}`, 12, 60_000)) {
+          ack?.({ ok: false, error: "Слишком часто" }); return;
+        }
+        const chatId = String(payload?.chatId || "");
+        if (payload?.scope !== "self" && payload?.scope !== "both") {
+          ack?.({ ok: false, error: "Выберите способ удаления" }); return;
+        }
+        const result = hideDm(chatId, account.userId, payload.scope === "both");
+        if (!result.ok) { ack?.({ ok: false, error: result.error }); return; }
+        if (payload.scope === "both") clearChatMessages(chatId);
+        else if (messageStore) messageStore.hide(chatId, account.userId);
+        else {
+          const changed = messagesFor(chatId).filter(message => messageVisibleTo(message, account.userId));
+          hideHistoryFor(changed, account.userId);
+          if (changed.length) persistMessages(changed);
+        }
+        for (const userId of result.affectedIds) {
+          pinnedByUser.get(userId)?.delete(chatId);
+          markChatRead(userId, chatId);
+          for (const socketId of socketsForUser(userId)) {
+            const client = io.sockets.sockets.get(socketId);
+            if (!client) continue;
+            if (usersBySocket.get(socketId)?.room === chatId) await leaveCurrentRoom(io, client);
+            client.emit("chat:left", { chatId });
+          }
+        }
+        persistPins();
+        await notifyChatMembers(io, result.chat);
+        ack?.({ ok: true });
+      },
+    );
+
+    on(
       "group:leave",
-      (
+      async (
         payload: { chatId?: string },
         ack?: (result: { ok: boolean; error?: string }) => void,
       ) => {
@@ -2764,23 +3076,37 @@ app.prepare().then(async () => {
           return;
         }
 
+        await messageStore?.forgetViewerSummaries([chatId, ...(left.chat.textChannels || []).map(channel => channel.id)], account.userId);
+
         kickUserFromGroup(io, account.userId, chatId);
-        notifyChatMembers(io, left.chat);
+        if (left.chat.memberIds.length === 0) {
+          clearChatMessages(chatId);
+          for (const channel of left.chat.textChannels || []) clearChatMessages(channel.id);
+          await expireInvitesForGroup(io, chatId, left.chat.title);
+          for (const channel of left.chat.voiceChannels || []) {
+            for (const member of voiceByChannel.get(channel.id)?.values() || []) {
+              io.to(member.socketId).emit("voice:kick", { channelId: channel.id, reason: "channel-closed" });
+            }
+            void deleteLiveKitRoom(channel.id);
+            clearVoiceChannelPresence(channel.id);
+          }
+        }
+        await notifyChatMembers(io, left.chat);
         for (const memberId of left.chat.memberIds) {
           emitToUser(io, memberId, "people", peopleForViewer(memberId));
         }
         for (const socketId of socketsForUser(account.userId)) {
           const memberSocket = io.sockets.sockets.get(socketId);
-          if (memberSocket) emitChats(memberSocket, account.userId);
+          if (memberSocket) await emitChats(memberSocket, account.userId);
         }
 
         ack?.({ ok: true });
       },
     );
 
-    socket.on(
+    on(
       "group:visibility",
-      (
+      async (
         payload: { groupId?: string; visibility?: string },
         ack?: (result: { ok: boolean; error?: string }) => void,
       ) => {
@@ -2808,14 +3134,14 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: updated.error });
           return;
         }
-        notifyChatMembers(io, updated.chat);
+        await notifyChatMembers(io, updated.chat);
         ack?.({ ok: true });
       },
     );
 
-    socket.on(
+    on(
       "join",
-      (
+      async (
         payload: { room?: string },
         ack?: (result: {
           ok: boolean;
@@ -2828,7 +3154,7 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: "Сначала войдите в аккаунт" });
           return;
         }
-        const result = joinChat(
+        const result = await joinChat(
           io,
           socket,
           account,
@@ -2838,9 +3164,9 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on(
+    on(
       "dm:open",
-      (
+      async (
         payload: { userId?: string },
         ack?: (result: {
           ok: boolean;
@@ -2875,15 +3201,15 @@ app.prepare().then(async () => {
           return;
         }
 
-        notifyChatMembers(io, opened.chat);
-        const result = joinChat(io, socket, account, opened.chat.id);
+        await notifyChatMembers(io, opened.chat);
+        const result = await joinChat(io, socket, account, opened.chat.id);
         ack?.(result);
       },
     );
 
-    socket.on(
+    on(
       "group:create",
-      (
+      async (
         payload: {
           title?: string;
           topic?: string;
@@ -2921,93 +3247,20 @@ app.prepare().then(async () => {
           return;
         }
 
-        notifyChatMembers(io, created.chat);
-        const result = joinChat(io, socket, account, created.chat.id);
+        await notifyChatMembers(io, created.chat);
+        const result = await joinChat(io, socket, account, created.chat.id);
         ack?.(result);
       },
     );
 
-    socket.on(
-      "group:invite",
-      (
-        payload: { groupId?: string; userId?: string },
-        ack?: (result: { ok: boolean; error?: string }) => void,
-      ) => {
-        const account = requireAccount(socket);
-        if (!account) {
-          ack?.({ ok: false, error: "Сначала войдите в аккаунт" });
-          return;
-        }
-        if (!rateLimit(`group-invite:${account.userId}`, 30, 60_000)) {
-          ack?.({ ok: false, error: "Слишком часто" });
-          return;
-        }
+    // Older clients must use the same daily-code flow as the current UI.
+    on("group:invite", (_payload: unknown, ack?: (result: { ok: boolean; error: string }) => void) => {
+      ack?.({ ok: false, error: "Приглашайте по коду группы" });
+    });
 
-        const groupId = String(payload?.groupId || "");
-        const targetUserId = String(payload?.userId || "");
-        const group = getChat(groupId);
-        if (!group || group.type !== "group") {
-          ack?.({ ok: false, error: "Группа не найдена" });
-          return;
-        }
-        if (!canAccessChat(group, account.userId)) {
-          ack?.({ ok: false, error: "Нет доступа" });
-          return;
-        }
-        if (!targetUserId || targetUserId === account.userId) {
-          ack?.({ ok: false, error: "Укажите пользователя" });
-          return;
-        }
-        if (!getUserById(targetUserId)) {
-          ack?.({ ok: false, error: "Пользователь не найден" });
-          return;
-        }
-        if (group.memberIds.includes(targetUserId)) {
-          ack?.({ ok: false, error: "Уже в группе" });
-          return;
-        }
-
-        const opened = openDm(account.userId, targetUserId);
-        if (!opened.ok) {
-          ack?.({ ok: false, error: opened.error });
-          return;
-        }
-
-        const dm = opened.chat;
-        const existingInvite = messagesFor(dm.id).find(
-          (item) =>
-            item.kind === "invite" &&
-            item.invite?.groupId === groupId &&
-            item.invite.status === "pending",
-        );
-        if (existingInvite) {
-          ack?.({ ok: false, error: "Приглашение уже отправлено" });
-          return;
-        }
-
-        const inviteMessage: ChatMessage = {
-          id: randomUUID(),
-          room: dm.id,
-          author: labelOf(account),
-          authorId: account.userId,
-          text: `Приглашение в группу «${group.title}»`,
-          createdAt: Date.now(),
-          kind: "invite",
-          invite: {
-            groupId: group.id,
-            groupTitle: group.title,
-            status: "pending",
-          },
-        };
-        pushMessage(io, dm, inviteMessage);
-        notifyChatMembers(io, dm);
-        ack?.({ ok: true });
-      },
-    );
-
-    socket.on(
+    on(
       "group:invite:respond",
-      (
+      async (
         payload: {
           chatId?: string;
           messageId?: string;
@@ -3034,7 +3287,7 @@ app.prepare().then(async () => {
           return;
         }
 
-        const message = messagesFor(chatId).find((item) => item.id === messageId);
+        const message = await findMessage(chatId, messageId, account.userId);
         if (!message || message.kind !== "invite" || !message.invite) {
           ack?.({ ok: false, error: "Приглашение не найдено" });
           return;
@@ -3052,10 +3305,16 @@ app.prepare().then(async () => {
         if (!accept) {
           message.invite = { ...message.invite, status: "declined" };
           message.text = `Отклонено: «${message.invite.groupTitle}»`;
-          persistMessages();
-          io.to(chatId).emit("message:update", publicMessage(message));
-          notifyChatMembers(io, dm);
+          persistMessages([message]);
+          await emitRoomMessage(io, "message:update", message);
+          await notifyChatMembers(io, dm);
           ack?.({ ok: true });
+          return;
+        }
+
+        const invitedGroup = getChat(message.invite.groupId);
+        if (invitedGroup && groupVisibility(invitedGroup) === "private") {
+          ack?.({ ok: false, error: "Для вступления в закрытую группу нужен актуальный код приглашения" });
           return;
         }
 
@@ -3065,9 +3324,9 @@ app.prepare().then(async () => {
           if (added.error === "Группа не найдена") {
             message.invite = { ...message.invite, status: "expired" };
             message.text = `Группа «${message.invite.groupTitle}» удалена`;
-            persistMessages();
-            io.to(chatId).emit("message:update", publicMessage(message));
-            notifyChatMembers(io, dm);
+            persistMessages([message]);
+            await emitRoomMessage(io, "message:update", message);
+            await notifyChatMembers(io, dm);
             ack?.({ ok: false, error: "Группа удалена" });
             return;
           }
@@ -3077,17 +3336,17 @@ app.prepare().then(async () => {
 
         message.invite = { ...message.invite, status: "accepted" };
         message.text = `Принято: «${message.invite.groupTitle}»`;
-        persistMessages();
-        io.to(chatId).emit("message:update", publicMessage(message));
-        notifyChatMembers(io, dm);
-        notifyChatMembers(io, added.chat);
+        persistMessages([message]);
+        await emitRoomMessage(io, "message:update", message);
+        await notifyChatMembers(io, dm);
+        await notifyChatMembers(io, added.chat);
         ack?.({ ok: true, groupId: added.chat.id });
       },
     );
 
-    socket.on(
+    on(
       "group:delete",
-      (
+      async (
         payload: { chatId?: string },
         ack?: (result: { ok: boolean; error?: string }) => void,
       ) => {
@@ -3124,7 +3383,9 @@ app.prepare().then(async () => {
           return;
         }
 
-        expireInvitesForGroup(io, chatId, deleted.chat.title);
+        clearChatMessages(chatId);
+        for (const channel of deleted.chat.textChannels || []) clearChatMessages(channel.id);
+        await expireInvitesForGroup(io, chatId, deleted.chat.title);
         // Tear down voice sessions in this group's channels so members'
         // clients close WebRTC before their sockets leave the chat.
         for (const channel of deleted.chat.voiceChannels || []) {
@@ -3140,7 +3401,6 @@ app.prepare().then(async () => {
           void deleteLiveKitRoom(channel.id);
           clearVoiceChannelPresence(channel.id);
         }
-        clearChatMessages(chatId);
         io.to(chatId).emit("chat:deleted", { chatId });
         kickSocketsFromChat(io, chatId);
 
@@ -3148,7 +3408,7 @@ app.prepare().then(async () => {
         for (const memberId of deleted.chat.memberIds) {
           for (const socketId of socketsForUser(memberId)) {
             const memberSocket = io.sockets.sockets.get(socketId);
-            if (memberSocket) emitChats(memberSocket, memberId);
+            if (memberSocket) await emitChats(memberSocket, memberId);
           }
         }
 
@@ -3156,7 +3416,7 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on(
+    on(
       "group:avatar",
       async (
         payload: { chatId?: string; avatarUrl?: string | null },
@@ -3205,14 +3465,14 @@ app.prepare().then(async () => {
           return;
         }
 
-        notifyChatMembers(io, updated.chat);
+        await notifyChatMembers(io, updated.chat);
         ack?.({ ok: true });
       },
     );
 
-    socket.on(
+    on(
       "group:update",
-      (
+      async (
         payload: { chatId?: string; title?: string; topic?: string },
         ack?: (result: { ok: boolean; error?: string }) => void,
       ) => {
@@ -3253,18 +3513,18 @@ app.prepare().then(async () => {
           return;
         }
 
-        notifyChatMembers(io, updated.chat);
+        await notifyChatMembers(io, updated.chat);
         ack?.({ ok: true });
       },
     );
 
-  socket.on("sticker:list", (_payload: unknown, ack?: (r: { ok: boolean; packs?: unknown[] }) => void) => {
+  on("sticker:list", (_payload: unknown, ack?: (r: { ok: boolean; packs?: unknown[] }) => void) => {
     const account = requireAccount(socket);
     if (!account) { ack?.({ ok: false }); return; }
     ack?.({ ok: true, packs: listPacksForUser(account.userId) });
   });
 
-  socket.on(
+  on(
     "sticker:pack:get",
     (
       payload: { packId?: string },
@@ -3278,7 +3538,7 @@ app.prepare().then(async () => {
     },
   );
 
-  socket.on(
+  on(
     "sticker:pack:create",
     (
       payload: { title?: string },
@@ -3295,7 +3555,7 @@ app.prepare().then(async () => {
     },
   );
 
-  socket.on(
+  on(
     "sticker:pack:update",
     (
       payload: { packId?: string; title?: string },
@@ -3313,7 +3573,7 @@ app.prepare().then(async () => {
     },
   );
 
-  socket.on(
+  on(
     "sticker:pack:delete",
     (
       payload: { packId?: string },
@@ -3330,7 +3590,7 @@ app.prepare().then(async () => {
     },
   );
 
-  socket.on(
+  on(
     "sticker:pack:add",
     (
       payload: {
@@ -3364,7 +3624,7 @@ app.prepare().then(async () => {
     },
   );
 
-  socket.on(
+  on(
     "sticker:pack:remove",
     (
       payload: { packId?: string; stickerId?: string },
@@ -3382,7 +3642,7 @@ app.prepare().then(async () => {
     },
   );
 
-  socket.on(
+  on(
   "sticker:pack:install",
     (
       payload: { packId?: string },
@@ -3408,7 +3668,7 @@ app.prepare().then(async () => {
     },
   );
 
-  socket.on(
+  on(
     "sticker:pack:uninstall",
     (
       payload: { packId?: string },
@@ -3424,9 +3684,9 @@ app.prepare().then(async () => {
     },
   );
 
-  socket.on(
+  on(
     "message:sticker",
-    (
+    async (
       payload: {
         chatId?: string;
         packId?: string;
@@ -3476,16 +3736,16 @@ app.prepare().then(async () => {
           width: found.sticker.width,
           height: found.sticker.height,
         },
-        replyTo: resolveReply(chatId, payload?.replyToId),
+        replyTo: await resolveReply(chatId, payload?.replyToId, account.userId),
       };
-      pushMessage(io, chat, message);
-      ack?.({ ok: true, message: publicMessage(message) });
+      await pushMessage(io, chat, message);
+      ack?.({ ok: true, message: await publicMessage(message, account.userId) });
     },
   );
 
-    socket.on(
+    on(
       "room:media",
-      (
+      async (
         payload: {
           chatId?: string;
           kind?: "media" | "file" | "all";
@@ -3527,25 +3787,22 @@ app.prepare().then(async () => {
           payload?.kind === "media" || payload?.kind === "file"
             ? payload.kind
             : "all";
-        const limit = Math.min(
+        const limit = Math.floor(Math.min(
           Math.max(Number(payload?.limit) || 48, 1),
           100,
-        );
-        const offset = Math.max(Number(payload?.offset) || 0, 0);
-        const all = collectRoomMedia(chatId, kind);
-        const items = all.slice(offset, offset + limit);
+        ));
+        const offset = Math.floor(Math.max(Number(payload?.offset) || 0, 0));
+        const page = await collectRoomMedia(chatId, kind, account.userId, offset, limit);
         ack?.({
           ok: true,
-          items,
-          total: all.length,
-          hasMore: offset + limit < all.length,
+          ...page,
         });
       },
     );
 
-    socket.on(
+    on(
       "chats:switch",
-      (
+      async (
         payload: { chatId?: string },
         ack?: (result: {
           ok: boolean;
@@ -3558,7 +3815,7 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: "Сначала войдите в аккаунт" });
           return;
         }
-        const result = joinChat(
+        const result = await joinChat(
           io,
           socket,
           account,
@@ -3568,9 +3825,9 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on(
+    on(
       "message",
-      (
+      async (
         payload: {
           text?: string;
           replyToId?: string;
@@ -3618,25 +3875,20 @@ app.prepare().then(async () => {
         // Cross-restart dedupe: the in-memory idempotency map dies with the
         // process, so also match persisted messages by clientId.
         if (clientId) {
-          const duplicate = messagesFor(presence.room!).find(
-            (item) =>
-              item.clientId === clientId &&
-              item.authorId === account.userId,
-          );
+          const duplicate = await findClientMessage(presence.room!, account.userId, clientId, account.userId);
           if (duplicate) {
-            ack?.({ ok: true, message: publicMessage(duplicate) });
+            ack?.({ ok: true, message: await publicMessage(duplicate, account.userId) });
             return;
           }
         }
 
-        const { id, existing } = resolveClientMessageId(
+        const { id, existing } = await resolveClientMessageId(
           account.userId,
           rawClientId,
-          (messageId) =>
-            messagesFor(presence.room!).find((item) => item.id === messageId),
+          (messageId) => findMessage(presence.room!, messageId, account.userId),
         );
         if (existing) {
-          ack?.({ ok: true, message: publicMessage(existing) });
+          ack?.({ ok: true, message: await publicMessage(existing, account.userId) });
           return;
         }
 
@@ -3649,19 +3901,19 @@ app.prepare().then(async () => {
           createdAt: Date.now(),
           kind: "text",
           clientId: clientId || undefined,
-          replyTo: resolveReply(presence.room, payload?.replyToId),
+          replyTo: await resolveReply(presence.room, payload?.replyToId, account.userId),
         };
-        pushMessage(io, chat, message);
+        await pushMessage(io, chat, message);
         socket.to(presence.room).emit("typing", {
           chatId: presence.room,
           name: labelOf(account),
           isTyping: false,
         });
-        ack?.({ ok: true, message: publicMessage(message) });
+        ack?.({ ok: true, message: await publicMessage(message, account.userId) });
       },
     );
 
-    socket.on("chats:read", (payload: { chatId?: string }) => {
+    on("chats:read", async (payload: { chatId?: string }) => {
       const account = requireAccount(socket);
       const chatId = String(payload?.chatId || "");
       if (!account || !chatId) return;
@@ -3670,7 +3922,8 @@ app.prepare().then(async () => {
       if (!chat || !canAccessChat(chat, account.userId)) return;
       const before = lastReadByUser.get(account.userId)?.get(chatId) ?? 0;
       const readAt = markChatRead(account.userId, chatId);
-      emitChats(socket, account.userId);
+      if (socket.handshake.auth?.chatPatches === 1) socket.emit("chat:update", await chatUpdateFor(chat, account.userId));
+      else await emitChats(socket, account.userId);
       if (readAt === before) return; // nothing advanced — skip broadcast
       socket.to(chatId).emit("chat:read", {
         chatId,
@@ -3679,7 +3932,7 @@ app.prepare().then(async () => {
       });
     });
 
-    socket.on(
+    on(
       "chats:members",
       (
         payload: { chatId?: string },
@@ -3691,7 +3944,11 @@ app.prepare().then(async () => {
       ) => {
         const account = requireAccount(socket);
         const chatId = String(payload?.chatId || "");
-        if (!account || !chatId) {
+        if (!account) {
+          ack?.({ ok: false, error: "Сначала войдите" });
+          return;
+        }
+        if (!chatId) {
           ack?.({ ok: false, error: "Нет чата" });
           return;
         }
@@ -3715,15 +3972,19 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on(
+    on(
       "chats:pin",
-      (
+      async (
         payload: { chatId?: string },
         ack?: (result: { ok: boolean; pinned?: boolean; error?: string }) => void,
       ) => {
         const account = requireAccount(socket);
         const chatId = String(payload?.chatId || "");
-        if (!account || !chatId) {
+        if (!account) {
+          ack?.({ ok: false, error: "Сначала войдите" });
+          return;
+        }
+        if (!chatId) {
           ack?.({ ok: false, error: "Нет чата" });
           return;
         }
@@ -3733,14 +3994,14 @@ app.prepare().then(async () => {
           return;
         }
         const pinned = togglePinned(account.userId, chatId);
-        emitChats(socket, account.userId);
+        await emitChats(socket, account.userId);
         ack?.({ ok: true, pinned });
       },
     );
 
-    socket.on(
+    on(
       "message:react",
-      (
+      async (
         payload: { chatId?: string; messageId?: string; emoji?: string },
         ack?: (result: { ok: boolean; error?: string }) => void,
       ) => {
@@ -3759,22 +4020,22 @@ app.prepare().then(async () => {
           return;
         }
 
-        const message = messagesFor(chatId).find((item) => item.id === messageId);
+        const message = await findMessage(chatId, messageId, account.userId);
         if (!message || message.kind === "system") {
           ack?.({ ok: false, error: "Сообщение не найдено" });
           return;
         }
 
         const updated = toggleReaction(message, account.userId, emoji);
-        persistMessages();
-        io.to(chatId).emit("message:update", publicMessage(updated));
+        persistMessages([updated]);
+        await emitRoomMessage(io, "message:update", updated);
         ack?.({ ok: true });
       },
     );
 
-    socket.on(
+    on(
       "message:delete",
-      (
+      async (
         payload: { chatId?: string; messageId?: string },
         ack?: (result: { ok: boolean; error?: string }) => void,
       ) => {
@@ -3797,7 +4058,7 @@ app.prepare().then(async () => {
           return;
         }
 
-        const message = messagesFor(chatId).find((item) => item.id === messageId);
+        const message = await findMessage(chatId, messageId, account.userId);
         if (!message) {
           ack?.({ ok: false, error: "Сообщение не найдено" });
           return;
@@ -3821,30 +4082,30 @@ app.prepare().then(async () => {
           return;
         }
 
-        const redacted = redactMessage(chatId, messageId);
+        const redacted = await redactMessage(chatId, messageId);
         if (!redacted) {
           ack?.({ ok: false, error: "Сообщение не найдено" });
           return;
         }
 
-        io.to(chatId).emit("message:update", publicMessage(redacted.tombstone));
+        await emitRoomMessage(io, "message:update", redacted.tombstone);
         for (const updated of redacted.replyUpdates) {
-          io.to(chatId).emit("message:update", publicMessage(updated));
+          await emitRoomMessage(io, "message:update", updated);
         }
         // Legacy clients still listening for hard-delete.
         io.to(chatId).emit("message:deleted", {
           chatId,
           messageId,
-          tombstone: publicMessage(redacted.tombstone),
+          tombstone: await publicMessage(redacted.tombstone),
         });
-        notifyChatMembers(io, chat);
+        await notifyChatMembers(io, chat);
         ack?.({ ok: true });
       },
     );
 
-    socket.on(
+    on(
       "message:edit",
-      (
+      async (
         payload: { chatId?: string; messageId?: string; text?: string },
         ack?: (result: { ok: boolean; error?: string }) => void,
       ) => {
@@ -3865,7 +4126,7 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: "Нет доступа" });
           return;
         }
-        const message = messagesFor(chatId).find((item) => item.id === messageId);
+        const message = await findMessage(chatId, messageId, account.userId);
         if (!message || message.kind === "system" || message.kind === "call") {
           ack?.({ ok: false, error: "Сообщение не найдено" });
           return;
@@ -3880,16 +4141,16 @@ app.prepare().then(async () => {
         }
         message.text = text;
         message.editedAt = Date.now();
-        persistMessages();
-        io.to(chatId).emit("message:update", publicMessage(message));
-        notifyChatMembers(io, chat);
+        persistMessages([message]);
+        await emitRoomMessage(io, "message:update", message);
+        await notifyChatMembers(io, chat);
         ack?.({ ok: true });
       },
     );
 
-    socket.on(
+    on(
       "message:pin",
-      (
+      async (
         payload: { chatId?: string; messageId?: string },
         ack?: (result: {
           ok: boolean;
@@ -3909,32 +4170,31 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: "Нет доступа" });
           return;
         }
-        const list = messagesFor(chatId);
-        const message = list.find((item) => item.id === messageId);
+        const message = await findMessage(chatId, messageId, account.userId);
         if (!message || message.kind === "system") {
           ack?.({ ok: false, error: "Сообщение не найдено" });
           return;
         }
         const nextPinned = !message.pinned;
-        const previouslyPinned = list.filter(
-          (item) => item.pinned && item.id !== messageId,
-        );
-        for (const item of previouslyPinned) {
+        const previouslyPinned: ChatMessage[] = [];
+        for await (const item of scanMessages(chatId, account.userId, false, { "message.pinned": true })) {
+          if (!item.pinned || item.id === messageId) continue;
           item.pinned = false;
+          previouslyPinned.push(item);
         }
         message.pinned = nextPinned;
-        persistMessages();
-        io.to(chatId).emit("message:update", publicMessage(message));
+        persistMessages([message, ...previouslyPinned]);
+        await emitRoomMessage(io, "message:update", message);
         for (const item of previouslyPinned) {
-          io.to(chatId).emit("message:update", publicMessage(item));
+          await emitRoomMessage(io, "message:update", item);
         }
         ack?.({ ok: true, pinned: nextPinned });
       },
     );
 
-    socket.on(
+    on(
       "message:forward",
-      (
+      async (
         payload: {
           fromChatId?: string;
           messageId?: string;
@@ -3965,7 +4225,7 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: "Нет доступа" });
           return;
         }
-        const source = messagesFor(fromChatId).find((item) => item.id === messageId);
+        const source = await findMessage(fromChatId, messageId, account.userId);
         if (!source || source.kind === "system" || source.kind === "call") {
           ack?.({ ok: false, error: "Сообщение не найдено" });
           return;
@@ -3992,12 +4252,12 @@ app.prepare().then(async () => {
             text: source.text?.slice(0, 120),
           },
         };
-        pushMessage(io, toChat, message);
+        await pushMessage(io, toChat, message);
         ack?.({ ok: true });
       },
     );
 
-    socket.on(
+    on(
       "message:file",
       async (
         payload: {
@@ -4053,11 +4313,7 @@ app.prepare().then(async () => {
           ? rawClientId
           : "";
         if (clientId) {
-          const duplicate = messagesFor(chatId).find(
-            (item) =>
-              item.clientId === clientId &&
-              item.authorId === account.userId,
-          );
+          const duplicate = await findClientMessage(chatId, account.userId, clientId);
           if (duplicate) {
             ack?.({ ok: true });
             return;
@@ -4177,7 +4433,7 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: "Нет доступа" });
           return;
         }
-        if (clientId && messagesFor(chatId).some((item) => item.clientId === clientId && item.authorId === account.userId)) {
+        if (clientId && (await findClientMessage(chatId, account.userId, clientId))) {
           ack?.({ ok: true });
           return;
         }
@@ -4230,19 +4486,19 @@ app.prepare().then(async () => {
           kind: "file",
           file: attachments[0],
           files: attachments.length > 1 ? attachments : undefined,
-          replyTo: resolveReply(chatId, payload?.replyToId),
+          replyTo: await resolveReply(chatId, payload?.replyToId, account.userId),
         };
-        pushMessage(io, chat, saved);
+        await pushMessage(io, chat, saved);
         if (voiceAttachmentOf(saved)) {
-          startVoiceTranscription(io, chat, saved);
+          await startVoiceTranscription(io, chat, saved);
         }
         ack?.({ ok: true });
       },
     );
 
-    socket.on(
+    on(
       "message:transcribe",
-      (
+      async (
         payload: { chatId?: string; messageId?: string },
         ack?: (result: { ok: boolean; error?: string }) => void,
       ) => {
@@ -4262,7 +4518,7 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: "Нет доступа" });
           return;
         }
-        const message = messagesFor(chatId).find((item) => item.id === messageId);
+        const message = await findMessage(chatId, messageId, account.userId);
         if (
           !message ||
           message.kind === "system" ||
@@ -4276,14 +4532,14 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: "Расшифровка недоступна" });
           return;
         }
-        startVoiceTranscription(io, chat, message, {
+        await startVoiceTranscription(io, chat, message, {
           force: message.transcriptionStatus === "error",
         });
         ack?.({ ok: true });
       },
     );
 
-    socket.on("typing", (isTyping: boolean) => {
+    on("typing", (isTyping: boolean) => {
       const account = requireAccount(socket);
       const presence = usersBySocket.get(socket.id);
       if (!account || !presence?.room) return;
@@ -4295,7 +4551,7 @@ app.prepare().then(async () => {
       });
     });
 
-    socket.on(
+    on(
       "call:invite",
       (
         payload: {
@@ -4456,7 +4712,7 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on(
+    on(
       "call:signal",
       (payload: {
         callId?: string;
@@ -4576,9 +4832,9 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on(
+    on(
       "call:log",
-      (payload: { chatId?: string; text?: string }) => {
+      async (payload: { chatId?: string; text?: string }) => {
         const account = requireAccount(socket);
         const chatId = String(payload?.chatId || "");
         const text = String(payload?.text || "").slice(0, 120);
@@ -4590,7 +4846,7 @@ app.prepare().then(async () => {
         if (!chat || !canAccessChat(chat, account.userId) || chat.type !== "dm") {
           return;
         }
-        pushMessage(io, chat, {
+        await pushMessage(io, chat, {
           id: randomUUID(),
           room: chatId,
           author: labelOf(account),
@@ -4602,14 +4858,14 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on("leave", () => {
-      leaveCurrentRoom(io, socket);
+    on("leave", async () => {
+      await leaveCurrentRoom(io, socket);
       broadcastPeople(io);
     });
 
-    socket.on(
+    on(
       "voice:create",
-      (
+      async (
         payload: { groupId?: string; title?: string },
         ack?: (result: {
           ok: boolean;
@@ -4636,7 +4892,7 @@ app.prepare().then(async () => {
           return;
         }
         emitVoiceState(io, created.chat);
-        notifyChatMembers(io, created.chat);
+        await notifyChatMembers(io, created.chat);
         ack?.({
           ok: true,
           channel: { id: created.channel.id, title: created.channel.title },
@@ -4644,9 +4900,9 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on(
+    on(
       "voice:delete",
-      (
+      async (
         payload: { groupId?: string; channelId?: string },
         ack?: (result: { ok: boolean; error?: string }) => void,
       ) => {
@@ -4669,14 +4925,14 @@ app.prepare().then(async () => {
         void deleteLiveKitRoom(channelId);
         clearVoiceChannelPresence(channelId);
         emitVoiceState(io, deleted.chat);
-        notifyChatMembers(io, deleted.chat);
+        await notifyChatMembers(io, deleted.chat);
         ack?.({ ok: true });
       },
     );
 
-    socket.on(
+    on(
       "text:create",
-      (
+      async (
         payload: { groupId?: string; title?: string },
         ack?: (result: {
           ok: boolean;
@@ -4702,7 +4958,7 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: created.error });
           return;
         }
-        notifyChatMembers(io, created.chat);
+        await notifyChatMembers(io, created.chat);
         ack?.({
           ok: true,
           channel: { id: created.channel.id, title: created.channel.title },
@@ -4710,9 +4966,9 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on(
+    on(
       "text:delete",
-      (
+      async (
         payload: { groupId?: string; channelId?: string },
         ack?: (result: { ok: boolean; error?: string }) => void,
       ) => {
@@ -4739,15 +4995,15 @@ app.prepare().then(async () => {
           const member = getSocketAccount(socketId);
           if (memberSocket && member) {
             memberSocket.emit("chat:moved", { room: groupId });
-            joinChat(io, memberSocket, member, groupId);
+            await joinChat(io, memberSocket, member, groupId);
           }
         }
-        notifyChatMembers(io, deleted.chat);
+        await notifyChatMembers(io, deleted.chat);
         ack?.({ ok: true });
       },
     );
 
-    socket.on(
+    on(
       "voice:join",
       (
         payload: { channelId?: string },
@@ -4883,7 +5139,7 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on(
+    on(
       "voice:leave",
       (
         _payload?: unknown,
@@ -4899,7 +5155,7 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on(
+    on(
       "voice:mute",
       (
         payload: { muted?: boolean },
@@ -4934,7 +5190,7 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on(
+    on(
       "voice:deafen",
       (
         payload: { deafened?: boolean },
@@ -4972,7 +5228,7 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on(
+    on(
       "voice:speaking",
       (payload: { speaking?: boolean }) => {
         const account = requireAccount(socket);
@@ -4994,7 +5250,7 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on(
+    on(
       "voice:media",
       (
         payload: { cameraOff?: boolean; sharingScreen?: boolean },
@@ -5056,11 +5312,11 @@ app.prepare().then(async () => {
       },
     );
 
-    socket.on("voice:signal", () => {
+    on("voice:signal", () => {
       // Group channels are always LiveKit SFU. Mesh signaling is never relayed.
     });
 
-    socket.on("disconnect", () => {
+    on("disconnect", async () => {
       const account = requireAccount(socket);
       if (account) {
         const voiceChannelId = voiceBySocket.get(socket.id);
@@ -5110,7 +5366,7 @@ app.prepare().then(async () => {
         }
         touchLastSeen(account.userId);
       }
-      leaveCurrentRoom(io, socket);
+      await leaveCurrentRoom(io, socket);
       usersBySocket.delete(socket.id);
       unbindSocketAuth(socket.id);
       broadcastPeople(io);
@@ -5154,6 +5410,7 @@ app.prepare().then(async () => {
     }, 15_000);
     void (async () => {
       try {
+        await messageTasks.idle();
         await Promise.all([persistMessages, persistReads, persistPins, persistLiveMedia].map((p) => p.idle()));
         flushAllPersists();
         if (messageStore) await messageStore.close();

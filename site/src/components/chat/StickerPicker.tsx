@@ -1,5 +1,8 @@
 "use client";
 
+import { ChatImage } from "@/components/chat/ChatImage";
+import { AnimatedSticker } from "@/components/chat/AnimatedSticker";
+
 import {
   useCallback,
   useEffect,
@@ -18,7 +21,7 @@ import {
   IconUpload,
 } from "@/lib/icons";
 import type { StickerPack } from "@/lib/types";
-import { MAX_STICKER_BYTES } from "@/lib/files";
+import { MAX_STICKER_BYTES, thumbSrc } from "@/lib/files";
 import { StickerCropDialog } from "@/components/chat/StickerCropDialog";
 import { ConfirmDialog } from "@/components/chat/ConfirmDialog";
 import { layoutGifMosaic } from "@/lib/gifMosaic";
@@ -346,8 +349,8 @@ export function StickerPicker({
             title={pack.title}
           >
             {pack.coverUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={pack.coverUrl} alt="" draggable={false} />
+
+              <ChatImage src={thumbSrc(pack.coverUrl)} alt="" draggable={false} />
             ) : (
               <IconSticker size={18} />
             )}
@@ -494,7 +497,7 @@ export function StickerPicker({
                       aria-label={sticker.name || "Отправить стикер"}
                     >
                       {sticker.animated ? (
-                        <video
+                        <AnimatedSticker
                           src={sticker.url}
                           autoPlay
                           loop
@@ -504,9 +507,9 @@ export function StickerPicker({
                           aria-hidden
                         />
                       ) : (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          src={sticker.url}
+
+                        <ChatImage
+                          src={thumbSrc(sticker.url)}
                           alt=""
                           loading="lazy"
                           draggable={false}

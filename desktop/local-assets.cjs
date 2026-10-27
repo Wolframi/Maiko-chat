@@ -41,7 +41,13 @@ function configureLocalAssets({ siteSession, trusted, log }) {
   log(`Local assets available: ${Object.keys(manifest).length}`);
   const handler = async (request) => {
     const url = new URL(request.url);
-    const relative = manifest[url.pathname];
+    const captureModule = { '/__maiko_desktop/daw-worklet.js': 'daw-worklet.js',
+      '/__maiko_desktop/automatic-audio.js': 'automatic-audio.js' }[url.pathname];
+    const relative = captureModule ? null : manifest[url.pathname];
+    if (captureModule && ['GET', 'HEAD'].includes(request.method) && trusted(url.href)
+      && (!request.initiatorOrigin || trusted(request.initiatorOrigin))) {
+      return localResponse(request, path.join(__dirname, 'ui', captureModule));
+    }
     // Only app-owned, enumerated static files at the selected site's origin.
     if (relative && ['GET', 'HEAD'].includes(request.method) && trusted(url.href)
       && (!request.initiatorOrigin || trusted(request.initiatorOrigin))) {

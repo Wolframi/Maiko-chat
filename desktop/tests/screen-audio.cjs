@@ -102,7 +102,8 @@ async function main() {
         assert.equal(owners[source.id.split(':')[1]], await apps[0].evaluate(() => process.pid), 'HWND resolves the actual selected app process');
       }
       await picker.getByRole('button', { name: kind === 'screen' ? `Экран ${source.name}` : source.name, exact: true }).click();
-      assert.match(await picker.locator('#audio-hint').textContent(), kind === 'screen' ? /без голосов/ : /Другие приложения/);
+      assert.match(await picker.locator('#audio-hint').textContent(), /автоматически/);
+      assert.equal(await picker.locator('#audio-source').count(), 0, 'No manual audio source selector');
       if (audio) await picker.getByRole('checkbox').check();
       await picker.getByRole('button', { name: 'Поделиться', exact: true }).click({ noWaitAfter: true }).catch((error) => { if (!picker.isClosed()) throw error; });
       const error = await request; if (error) throw error;
@@ -111,7 +112,7 @@ async function main() {
     const screen = await choose('screen');
     console.log('Screen levels:', JSON.stringify(screen));
     assert.equal(screen.audioCount, 1); assert.equal(screen.settings.restrictOwnAudio, true); assert.equal(screen.cloneRestricted, true);
-    assert.equal(screen.nativeDevice, 'loopbackWithoutChrome'); assert.deepEqual(screen.warnings, []);
+    assert.deepEqual(screen.warnings, []);
     assert.ok(screen.wanted > -100 && screen.unrelated > -100, `PC audio included: ${JSON.stringify(screen)}`);
     assert.ok(screen.voice < screen.wanted - 35 && screen.remoteScreen < screen.wanted - 35, `Maiko voice and screen excluded: ${JSON.stringify(screen)}`);
     const window = await choose('window');

@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, useRef, useCallback } from "react";
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type { AuthAccount, ChatMessage, PeopleUser } from "@/lib/types";
-import { Avatar } from "@/components/chat/Avatar";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { TypingIndicator } from "@/components/chat/TypingIndicator";
+import { ScrollAnchoredList } from "@/components/chat/ScrollAnchoredList";
 import { formatDayChip } from "@/lib/dates";
 import { isMediaAttachment, messageAttachments } from "@/lib/files";
 import { soloEmojiSizePx } from "@/lib/emojiText";
@@ -12,12 +13,21 @@ import { soloEmojiSizePx } from "@/lib/emojiText";
 type MessageListProps = {
   chatId: string;
   messages: ChatMessage[];
+  historyVersion?: number;
   people: PeopleUser[];
   account: AuthAccount;
   othersTyping: string[];
   searchQuery?: string;
   activeMatchId?: string | null;
   loading?: boolean;
+  hasMore?: boolean;
+  hasNewer?: boolean;
+  loadingOlder?: boolean;
+  historyError?: string | null;
+  onLoadOlder?: () => Promise<boolean>;
+  onLoadNewer?: () => Promise<boolean>;
+  onLoadLatest?: () => Promise<boolean>;
+  jumpRequest?: { id: string; nonce: number } | null;
   unreadAtOpen?: number;
   onReply?: (message: ChatMessage) => void;
   onOpenImage?: (src: string, name: string, kind?: "image" | "video") => void;
@@ -53,35 +63,6 @@ function sameDay(a: number, b: number) {
 
 function isChatMessage(message: ChatMessage) {
   return message.kind !== "system" && message.kind !== "call";
-}
-
-function isPlaqueMessage(message: ChatMessage) {
-  return (
-    message.kind !== "system" &&
-    message.kind !== "call" &&
-    message.kind !== "invite"
-  );
-}
-
-function plaqueAuthor(
-  message: ChatMessage,
-  peopleById: Map<string, PeopleUser>,
-  account?: AuthAccount,
-) {
-  if (account && message.authorId === account.userId) {
-    return {
-      name: account.displayName || account.username,
-      avatarUrl: account.avatarUrl,
-    };
-  }
-  const byId = message.authorId ? peopleById.get(message.authorId) : undefined;
-  if (byId) {
-    return {
-      name: byId.displayName || byId.username,
-      avatarUrl: byId.avatarUrl,
-    };
-  }
-  return { name: message.author, avatarUrl: undefined as string | undefined };
 }
 
 /** Same author, < 5 min, same day — tdesktop isAttachedToPrevious / isAttachedToNext.
@@ -138,15 +119,41 @@ function messageKey(message: ChatMessage) {
   return message.clientKey || message.id || `${message.room}-${message.createdAt}`;
 }
 
+type ListContext = { names: string[]; hasMore: boolean; loadingOlder: boolean; preserveScroll: boolean; anchorKey: string; scrollRevision: { current: number }; historyError?: string | null; onLoadOlder?: () => Promise<boolean> };
+function HistoryHeader({ context }: { context?: ListContext }) {
+  if (!context?.hasMore) return null;
+  return <div className="message-history-more"><button type="button" disabled={context.loadingOlder} onClick={() => void context.onLoadOlder?.()}>
+    {context.loadingOlder ? "Загружаем сообщения…" : context.historyError || "Предыдущие сообщения"}
+  </button></div>;
+}
+function HistoryFooter({ context }: { context?: ListContext }) {
+  return <div className="message-history-footer">
+    <TypingIndicator names={context?.names ?? []} />
+  </div>;
+}
+const listComponents = { Header: HistoryHeader, Footer: HistoryFooter, List: ScrollAnchoredList };
+const initialFirstItemIndex = 1_000_000_000;
+const listOverscan = { main: 240, reverse: 120 };
+const listViewport = { top: 400, bottom: 400 };
+
 export function MessageList({
   chatId,
   messages,
+  historyVersion = 0,
   people,
   account,
   othersTyping,
   searchQuery = "",
   activeMatchId = null,
   loading = false,
+  hasMore = false,
+  hasNewer = false,
+  loadingOlder = false,
+  historyError = null,
+  onLoadOlder,
+  onLoadNewer,
+  onLoadLatest,
+  jumpRequest = null,
   unreadAtOpen = 0,
   onReply,
   onOpenImage,
@@ -167,12 +174,48 @@ export function MessageList({
   canModerate = false,
   showOwnAvatar = false,
 }: MessageListProps) {
-  const scrollerRef = useRef<HTMLDivElement>(null);
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const scrollerRef = useRef<HTMLElement | null>(null);
+  const viewportObserverRef = useRef<ResizeObserver | null>(null);
+  const preparingPageRef = useRef(false);
+  const loadingNewerRef = useRef(false);
+  const scrollRevisionRef = useRef(0);
+  // Update data and its index in the same render so Virtuoso can prepend while
+  // preserving its measured rows and the user's ongoing scroll movement.
+  const listWindowRef = useRef({ chatId, historyVersion, messages, hasNewer, appendingHistory: false, prepending: false, firstItemIndex: initialFirstItemIndex });
+  const listWindow = useMemo(() => {
+    const previous = listWindowRef.current;
+    if (previous.messages === messages && previous.chatId === chatId && previous.historyVersion === historyVersion && previous.hasNewer === hasNewer) return previous;
+    let firstItemIndex = initialFirstItemIndex;
+    let appendingHistory = false;
+    let prepending = false;
+    if (previous.chatId === chatId && previous.historyVersion === historyVersion) {
+      const oldFirst = previous.messages[0];
+      const newFirst = messages[0];
+      const prepended = oldFirst ? messages.findIndex(message => messageKey(message) === messageKey(oldFirst)) : -1;
+      const removed = newFirst ? previous.messages.findIndex(message => messageKey(message) === messageKey(newFirst)) : -1;
+      if (prepended >= 0) firstItemIndex = previous.firstItemIndex - prepended;
+      else if (removed >= 0) firstItemIndex = previous.firstItemIndex + removed;
+      appendingHistory = previous.hasNewer && prepended === 0 && messages.length > previous.messages.length;
+      prepending = prepended > 0;
+    }
+    return { chatId, historyVersion, messages, hasNewer, appendingHistory, prepending, firstItemIndex };
+  }, [chatId, hasNewer, historyVersion, messages]);
+  useLayoutEffect(() => { listWindowRef.current = listWindow; }, [listWindow]);
+  const firstItemIndex = listWindow.firstItemIndex;
+  const appliedJumpRef = useRef<number | null>(null);
+  const appliedSearchRef = useRef("");
+  const initialScrollReadyRef = useRef(false);
+  const initialTargetRef = useRef<string | null | undefined>(undefined);
+  const initialFrameRef = useRef(0);
+  const tailRequestedRef = useRef(false);
+  // Deferred row measurements must preserve explicit navigation until user input.
+  const navigationTargetRef = useRef<string | null>(null);
   const nearBottomRef = useRef(true);
-  const jumpingRef = useRef(false);
   const firstRender = useRef(true);
   const prevCountRef = useRef(messages.length);
   const prevTailKeyRef = useRef<string | null>(null);
+  const previousHistoryRef = useRef({ version: historyVersion, hasNewer });
   const seenChatIdRef = useRef(chatId);
   const enteredKeysRef = useRef(new Set<string>());
   const [showJump, setShowJump] = useState(false);
@@ -262,137 +305,131 @@ export function MessageList({
   }, [account, activeMatchId, firstUnreadIndex, messages, searchQuery]);
 
   type ListItem = (typeof items)[number];
-  type ListSegment =
-    | { type: "day"; key: string; label: string }
-    | { type: "single"; key: string; item: ListItem }
-    | {
-        type: "group";
-        key: string;
-        items: ListItem[];
-        author: { name: string; avatarUrl?: string };
-      };
-
-  const segments = useMemo(() => {
-    const out: ListSegment[] = [];
-    let group: Extract<ListSegment, { type: "group" }> | null = null;
-
-    function flush() {
-      if (group) out.push(group);
-      group = null;
-    }
-
-    for (const item of items) {
-      if (item.showDay) {
-        flush();
-        out.push({
-          type: "day",
-          key: `day-${item.key}`,
-          label: formatDayChip(item.message.createdAt),
-        });
-      }
-      if (!isPlaqueMessage(item.message)) {
-        flush();
-        out.push({ type: "single", key: item.key, item });
-        continue;
-      }
-      if (group && item.attachPrev) {
-        group.items.push(item);
-        group.author = plaqueAuthor(item.message, peopleById, account);
-        continue;
-      }
-      flush();
-      group = {
-        type: "group",
-        key: `g-${item.key}`,
-        items: [item],
-        author: plaqueAuthor(item.message, peopleById, account),
-      };
-    }
-    flush();
-    return out;
-  }, [account, items, peopleById]);
-
   useEffect(() => {
     setShowUnreadMark(unreadAtOpen > 0);
   }, [chatId, unreadAtOpen]);
 
-  useEffect(() => {
-    const node = scrollerRef.current;
-    if (!node) return;
+  const unreadId = firstUnreadIndex >= 0 ? messages[firstUnreadIndex]?.id : null;
 
-    function onScroll() {
-      const el = scrollerRef.current;
-      if (!el) return;
-      const near = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-      // Smooth "jump to bottom" passes through far positions — don't unpin mid-flight.
-      if (jumpingRef.current) {
-        if (!near) return;
-        jumpingRef.current = false;
-      }
-      nearBottomRef.current = near;
-      setShowJump(!near);
-      if (near) {
-        setPendingNew(0);
-        setShowUnreadMark(false);
-        onMarkRead?.();
-      }
+  const positionMessage = useCallback((index: number, id: string) => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const bounds = scroller.getBoundingClientRect();
+    const row = document.getElementById(`msg-${id}`);
+    if (row && scroller.contains(row)) {
+      const rect = row.getBoundingClientRect();
+      scroller.scrollTop += rect.top - bounds.top - (scroller.clientHeight - rect.height) / 2;
+      return;
     }
-
-    // Media grows the list after it decodes; stay pinned if we were at the bottom.
-    function onMediaLoad() {
-      const el = scrollerRef.current;
-      // Side-chat width drag reflows every bubble. Pinning here fights the
-      // scroll lock and forces a layout of the whole thread on each move.
-      if (!el || el.dataset.lockScroll || el.closest(".is-side-resizing")) return;
-      if (nearBottomRef.current) el.scrollTop = el.scrollHeight;
-    }
-
-    function cancelJump() {
-      jumpingRef.current = false;
-    }
-
-    // Anything that changes height without a scroll event (waveforms, previews,
-    // reactions, entry animations, composer/keyboard resizing the viewport).
-    const resizeObserver =
-      typeof ResizeObserver !== "undefined" ? new ResizeObserver(onMediaLoad) : null;
-    const observeChildren = () => {
-      if (!resizeObserver) return;
-      resizeObserver.disconnect();
-      resizeObserver.observe(node);
-      for (const child of Array.from(node.children)) resizeObserver.observe(child);
-    };
-    const mutationObserver = resizeObserver ? new MutationObserver(observeChildren) : null;
-    observeChildren();
-    mutationObserver?.observe(node, { childList: true });
-
-    node.addEventListener("scroll", onScroll, { passive: true });
-    node.addEventListener("load", onMediaLoad, true);
-    node.addEventListener("loadedmetadata", onMediaLoad, true);
-    node.addEventListener("wheel", cancelJump, { passive: true });
-    node.addEventListener("touchstart", cancelJump, { passive: true });
-    onScroll();
-    return () => {
-      resizeObserver?.disconnect();
-      mutationObserver?.disconnect();
-      node.removeEventListener("scroll", onScroll);
-      node.removeEventListener("load", onMediaLoad, true);
-      node.removeEventListener("loadedmetadata", onMediaLoad, true);
-      node.removeEventListener("wheel", cancelJump);
-      node.removeEventListener("touchstart", cancelJump);
-    };
-  }, [onMarkRead]);
-
-  function stickToBottom() {
-    const node = scrollerRef.current;
-    if (!node) return;
-    node.scrollTop = node.scrollHeight;
-    requestAnimationFrame(() => {
-      const el = scrollerRef.current;
-      if (el && nearBottomRef.current) {
-        el.scrollTop = el.scrollHeight;
+    // Use the measured size tree to reveal an unmounted row. Unlike
+    // scrollToIndex, this leaves no delayed retry that can override a wheel
+    // gesture after navigation has already finished.
+    virtuosoRef.current?.getState(({ ranges }) => {
+      let offset = 0;
+      let height = 0;
+      for (const range of ranges) {
+        if (range.startIndex > index) break;
+        offset += Math.max(0, Math.min(index, range.endIndex + 1) - range.startIndex) * range.size;
+        if (index <= range.endIndex) { height = range.size; break; }
       }
+      const list = scroller.querySelector<HTMLElement>("[data-testid='virtuoso-item-list']");
+      if (!list || !height) return;
+      const start = list.getBoundingClientRect().top + scroller.scrollTop - bounds.top;
+      scroller.scrollTop = start + offset - (scroller.clientHeight - height) / 2;
     });
+  }, []);
+
+  const settleInitialPosition = useCallback(() => {
+    const target = navigationTargetRef.current;
+    if (target) {
+      const index = items.findIndex(item => item.message.id === target);
+      if (index >= 0) positionMessage(index, target);
+      return;
+    }
+    if (tailRequestedRef.current && items.length) {
+      if (scrollerRef.current) scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
+      return;
+    }
+    if (initialScrollReadyRef.current || initialTargetRef.current === undefined) return;
+    const id = initialTargetRef.current;
+    const index = id ? items.findIndex(item => item.message.id === id) : -1;
+    if (index >= 0 && id) positionMessage(index, id);
+    else if (scrollerRef.current) scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
+  }, [items, positionMessage]);
+
+  const settlePositionRef = useRef(settleInitialPosition);
+  useLayoutEffect(() => { settlePositionRef.current = settleInitialPosition; }, [settleInitialPosition]);
+  const scheduleInitialPosition = useCallback(() => {
+    cancelAnimationFrame(initialFrameRef.current);
+    if (initialScrollReadyRef.current && !navigationTargetRef.current && !tailRequestedRef.current) return;
+    // Async navigation may finish after a replacement window has committed.
+    // Always position using the current rows, rather than the caller's rows.
+    initialFrameRef.current = requestAnimationFrame(() => settlePositionRef.current());
+  }, []);
+
+  const bindScroller = useCallback((element: HTMLElement | Window | null) => {
+    viewportObserverRef.current?.disconnect();
+    scrollerRef.current = element instanceof HTMLElement ? element : null;
+    if (scrollerRef.current) {
+      viewportObserverRef.current = new ResizeObserver(scheduleInitialPosition);
+      viewportObserverRef.current.observe(scrollerRef.current);
+    }
+  }, [scheduleInitialPosition]);
+
+  useLayoutEffect(() => {
+    if (loading || !items.length) return;
+    if (initialTargetRef.current === undefined) initialTargetRef.current = unreadId ?? null;
+    scheduleInitialPosition();
+    return () => cancelAnimationFrame(initialFrameRef.current);
+  }, [loading, scheduleInitialPosition, settleInitialPosition, items.length, unreadId]);
+
+  const loadOlder = useCallback(async () => {
+    if (!onLoadOlder || loadingOlder || preparingPageRef.current || loadingNewerRef.current) return false;
+    preparingPageRef.current = true;
+    try {
+      // startReached can fire before React commits the newly visible rows.
+      // A fast response must not replace those rows before an anchor exists.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        const scroller = scrollerRef.current;
+        if (!scroller) return false;
+        const bounds = scroller.getBoundingClientRect();
+        const visible = Array.from(scroller.querySelectorAll<HTMLElement>("[id^='msg-']"))
+          .some(row => { const rect = row.getBoundingClientRect(); return rect.bottom > bounds.top && rect.top < bounds.bottom; });
+        if (visible) break;
+        if (attempt === 2) return false;
+      }
+      return await onLoadOlder();
+    } finally {
+      // Ignore boundary callbacks from the intermediate prepend measurements.
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      preparingPageRef.current = false;
+    }
+  }, [loadingOlder, onLoadOlder]);
+
+  const loadNewer = useCallback(async () => {
+    if (!hasNewer || !onLoadNewer || loadingOlder || preparingPageRef.current || loadingNewerRef.current || !initialScrollReadyRef.current || navigationTargetRef.current) return;
+    loadingNewerRef.current = true;
+    try { await onLoadNewer(); }
+    finally { loadingNewerRef.current = false; }
+  }, [hasNewer, loadingOlder, onLoadNewer]);
+
+  function scrollIntent() {
+    scrollRevisionRef.current++;
+    navigationTargetRef.current = null;
+    initialScrollReadyRef.current = true;
+    tailRequestedRef.current = false;
   }
+
+  const onBottomChange = useCallback((atBottom: boolean) => {
+    nearBottomRef.current = atBottom;
+    setShowJump(!atBottom);
+    if (atBottom && !hasNewer) {
+      setPendingNew(0);
+      setShowUnreadMark(false);
+      onMarkRead?.();
+    }
+  }, [hasNewer, onMarkRead]);
 
   useEffect(() => {
     if (seenChatIdRef.current !== chatId) {
@@ -400,90 +437,70 @@ export function MessageList({
       firstRender.current = true;
       prevCountRef.current = 0;
       prevTailKeyRef.current = null;
-      nearBottomRef.current = true;
       enteredKeysRef.current = new Set();
       setPendingNew(0);
-      setShowJump(false);
     }
-
-    const node = scrollerRef.current;
-    if (!node || loading) return;
-
+    if (loading) return;
     const newest = messages[messages.length - 1];
     const tailKey = newest ? messageKey(newest) : null;
-
-    if (firstRender.current) {
-      for (const message of messages) {
-        enteredKeysRef.current.add(messageKey(message));
-      }
-      if (firstUnreadIndex > 0) {
-        const target = document.getElementById(
-          `msg-${messages[firstUnreadIndex]?.id}`,
-        );
-        target?.scrollIntoView({ block: "center" });
-      } else {
-        stickToBottom();
-      }
-      firstRender.current = false;
-      nearBottomRef.current = firstUnreadIndex <= 0;
-      prevCountRef.current = messages.length;
-      prevTailKeyRef.current = tailKey;
-      setShowJump(firstUnreadIndex > 0);
-      setPendingNew(0);
-      return;
-    }
-
-    const prevCount = prevCountRef.current;
-    const grewBy = Math.max(0, messages.length - prevCount);
-    const tailChanged = Boolean(tailKey) && tailKey !== prevTailKeyRef.current;
+    const grewBy = Math.max(0, messages.length - prevCountRef.current);
+    const appended = prevTailKeyRef.current !== null && tailKey !== prevTailKeyRef.current;
+    const returnedToLatest = previousHistoryRef.current.hasNewer && !hasNewer && previousHistoryRef.current.version !== historyVersion;
+    previousHistoryRef.current = { version: historyVersion, hasNewer };
     prevCountRef.current = messages.length;
     prevTailKeyRef.current = tailKey;
-
-    if (newest) enteredKeysRef.current.add(messageKey(newest));
-
-    if (searchQuery.trim() || activeMatchId) return;
-
-    if (grewBy === 0 && !tailChanged) return;
-
-    const newestIsMine = Boolean(newest && isMine(newest, account));
-
-    if (!nearBottomRef.current && !newestIsMine) {
-      if (grewBy > 0) {
-        setPendingNew((count) => count + grewBy);
-        setShowJump(true);
-      }
+    if (firstRender.current) {
+      for (const message of messages) enteredKeysRef.current.add(messageKey(message));
+      firstRender.current = false;
       return;
     }
-
-    nearBottomRef.current = true;
-    setPendingNew(0);
-    setShowJump(false);
-    stickToBottom();
-  }, [
-    account,
-    chatId,
-    messages,
-    searchQuery,
-    activeMatchId,
-    loading,
-    firstUnreadIndex,
-  ]);
+    if (newest) enteredKeysRef.current.add(messageKey(newest));
+    if ((!appended && !returnedToLatest) || searchQuery.trim() || activeMatchId || hasNewer || listWindow.appendingHistory) return;
+    if ((newest && isMine(newest, account)) || nearBottomRef.current) {
+      navigationTargetRef.current = null;
+      tailRequestedRef.current = true;
+      scheduleInitialPosition();
+    } else if (!nearBottomRef.current && grewBy > 0) {
+      setPendingNew(count => count + grewBy);
+    }
+  }, [account, activeMatchId, chatId, hasNewer, historyVersion, listWindow.appendingHistory, loading, messages, scheduleInitialPosition, searchQuery]);
 
   useEffect(() => {
-    if (!activeMatchId) return;
-    const el = document.getElementById(`msg-${activeMatchId}`);
-    el?.scrollIntoView({ behavior: "smooth", block: "center" });
-  }, [activeMatchId]);
+    const id = activeMatchId || jumpRequest?.id;
+    if (!id) return;
+    const searchKey = activeMatchId ? `${searchQuery}\0${activeMatchId}` : "";
+    if (activeMatchId && appliedSearchRef.current === searchKey) return;
+    if (!activeMatchId) {
+      appliedSearchRef.current = "";
+      if (!jumpRequest || appliedJumpRef.current === jumpRequest.nonce) return;
+    }
+    const index = items.findIndex(item => item.message.id === id);
+    if (index < 0) return;
+    initialScrollReadyRef.current = true;
+    tailRequestedRef.current = false;
+    navigationTargetRef.current = id;
+    if (activeMatchId) appliedSearchRef.current = searchKey;
+    else if (jumpRequest) appliedJumpRef.current = jumpRequest.nonce;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    positionMessage(index, id);
+    scheduleInitialPosition();
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        const element = document.getElementById(`msg-${id}`);
+        element?.classList.add("is-flash");
+        timer = setTimeout(() => element?.classList.remove("is-flash"), 1200);
+      });
+    });
+    return () => { cancelAnimationFrame(frame); clearTimeout(timer); document.getElementById(`msg-${id}`)?.classList.remove("is-flash"); };
+  }, [activeMatchId, jumpRequest, searchQuery, items, positionMessage, scheduleInitialPosition]);
 
-  function jumpBottom() {
-    const node = scrollerRef.current;
-    if (!node) return;
-    nearBottomRef.current = true;
-    jumpingRef.current = true;
-    setShowJump(false);
+  async function jumpBottom() {
+    navigationTargetRef.current = null;
+    tailRequestedRef.current = true;
+    if (hasNewer && !await onLoadLatest?.()) { tailRequestedRef.current = false; return; }
     setPendingNew(0);
     setShowUnreadMark(false);
-    node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+    scheduleInitialPosition();
   }
 
   function renderItem(
@@ -565,86 +582,57 @@ export function MessageList({
   }
 
   return (
-    <div className="room__messages-wrap">
-      <div className="room__messages" ref={scrollerRef}>
-        {loading ? (
-          <div className="msg-skeleton" aria-hidden>
-            <div className="msg-skeleton__row">
-              <i />
-              <span />
-            </div>
-            <div className="msg-skeleton__row msg-skeleton__row--mine">
-              <span />
-            </div>
-            <div className="msg-skeleton__row">
-              <i />
-              <span />
-            </div>
-            <div className="msg-skeleton__row msg-skeleton__row--mine">
-              <span />
-            </div>
-            <div className="msg-skeleton__row">
-              <i />
-              <span />
-            </div>
-          </div>
-        ) : messages.length === 0 ? (
-          <div className="room__empty room__empty--thread">
-            <p className="room__empty-brand">Майко</p>
-            <p className="room__empty-copy">Напишите первое сообщение</p>
-          </div>
-        ) : (
-          <>
-            <div className="room__messages-anchor" aria-hidden />
-            {segments.map((segment) => {
-              if (segment.type === "day") {
-                return (
-                  <p key={segment.key} className="day-chip">
-                    {segment.label}
-                  </p>
-                );
-              }
-              if (segment.type === "single") {
-                return renderItem(segment.item, { skipDay: true });
-              }
-              const mine = segment.items[0]?.mine ?? false;
-              return (
-                <div
-                  key={segment.key}
-                  className={`bubble-group ${mine ? "bubble-group--mine" : ""}`}
-                >
-                  {!mine || showOwnAvatar ? (
-                    <div className="bubble-group__rail">
-                      <div className="bubble-group__avatar">
-                        <Avatar
-                          name={segment.author.name}
-                          src={segment.author.avatarUrl}
-                          size="md"
-                        />
-                      </div>
-                    </div>
-                  ) : null}
-                  <div className="bubble-group__body">
-                    {segment.items.map((item) =>
-                      renderItem(item, {
-                        skipDay: true,
-                        hideAvatarColumn: true,
-                      }),
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </>
-        )}
+    <div className="room__messages-wrap" data-loaded-messages={messages.length}
+      onWheelCapture={scrollIntent}
+      onTouchStartCapture={scrollIntent}
+      onTouchMoveCapture={scrollIntent}
+      onPointerDownCapture={scrollIntent}
+      onPointerMoveCapture={event => { if (event.buttons) scrollIntent(); }}
+      onKeyDownCapture={scrollIntent}>
+      {loading ? <div className="room__messages"><div className="msg-skeleton" aria-hidden>
+        {Array.from({ length: 5 }, (_, i) => <div key={i} className={`msg-skeleton__row${i % 2 ? " msg-skeleton__row--mine" : ""}`}><i /><span /></div>)}
+      </div></div> : messages.length === 0 ? <div className="room__messages"><div className="room__empty room__empty--thread">
+        <p className="room__empty-brand">Майко</p><p className="room__empty-copy">Напишите первое сообщение</p>
         <TypingIndicator names={othersTyping} />
-      </div>
+      </div></div> : <Virtuoso
+        key={`${chatId}:${historyVersion}`}
+        ref={virtuosoRef}
+        className="room__messages room__messages--virtual"
+        style={{ padding: 0, overflowAnchor: "none" }}
+        data={items}
+        firstItemIndex={firstItemIndex}
+        context={{ names: othersTyping, hasMore, loadingOlder, preserveScroll: listWindow.prepending || listWindow.appendingHistory, anchorKey: `${firstItemIndex}:${items.length}`, scrollRevision: scrollRevisionRef, historyError, onLoadOlder: loadOlder }}
+        components={listComponents}
+        defaultItemHeight={76}
+        alignToBottom
+        atBottomThreshold={120}
+        atBottomStateChange={onBottomChange}
+        followOutput={false}
+        totalListHeightChanged={scheduleInitialPosition}
+        startReached={() => {
+          const scroller = scrollerRef.current;
+          if (hasMore && !historyError && initialScrollReadyRef.current && scroller && scroller.scrollTop < 600) void loadOlder();
+        }}
+        endReached={() => void loadNewer()}
+        onScroll={() => {
+          if (!hasNewer) return;
+          const scroller = scrollerRef.current;
+          if (scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 320) void loadNewer();
+        }}
+        overscan={listOverscan}
+        increaseViewportBy={listViewport}
+        skipAnimationFrameInResizeObserver
+        computeItemKey={(_, item) => item.key}
+        scrollerRef={bindScroller}
+        itemContent={(_, item) => <div className="message-virtual-segment">{renderItem(item)}</div>}
+      />}
 
-      {showJump && !loading && (
+      {(showJump || hasNewer) && !loading && (
         <button
           type="button"
           className={`room__jump ${pendingNew > 0 ? "has-new" : ""}`}
           onClick={jumpBottom}
+          disabled={loadingOlder}
           aria-label={
             pendingNew > 0 ? "К новым сообщениям" : "Прокрутить вниз"
           }

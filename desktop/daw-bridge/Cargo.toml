@@ -1,0 +1,16 @@
+[package]
+name = "maiko-daw-bridge"
+version = "0.2.1"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vst3 = "=0.3.0"
+
+[profile.release]
+panic = "abort"
+lto = true
+strip = true

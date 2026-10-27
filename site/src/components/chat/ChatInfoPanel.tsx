@@ -27,7 +27,7 @@ import {
   IconTrash,
   IconUsers,
 } from "@/lib/icons";
-import { formatBytes, bareMediaUrl, validateAvatarFile, downloadHref, displayFileName } from "@/lib/files";
+import { formatBytes, signedMediaSrc, validateAvatarFile, downloadHref, displayFileName } from "@/lib/files";
 import { easeOutSoft, sheetSpring } from "@/lib/motion";
 import type {
   ChatInfo,
@@ -65,6 +65,7 @@ type ChatInfoPanelProps = {
   }>;
   onOpenMedia: (item: RoomMediaItem) => void;
   onDeleteGroup?: () => void | Promise<void>;
+  onDeleteDm?: () => void;
   onLeaveGroup?: () => void | Promise<void>;
 };
 
@@ -85,6 +86,7 @@ export function ChatInfoPanel({
   onFetchMedia,
   onOpenMedia,
   onDeleteGroup,
+  onDeleteDm,
   onLeaveGroup,
 }: ChatInfoPanelProps) {
   const [tab, setTab] = useState<Tab>("media");
@@ -416,7 +418,7 @@ export function ChatInfoPanel({
                           />
                           <span>
                             <strong>Закрытая</strong>
-                            <em>Только по приглашению</em>
+                            <em>Вступление по коду</em>
                           </span>
                         </label>
                       </fieldset>
@@ -489,7 +491,7 @@ export function ChatInfoPanel({
               ) : tab === "media" ? (
                 <div className="chat-info__grid">
                   {items.map((item) => {
-                    const src = bareMediaUrl(item.file.url);
+                    const src = signedMediaSrc(item.file.url);
                     return (
                     <button
                       key={item.messageId}
@@ -575,6 +577,13 @@ export function ChatInfoPanel({
 
             {(localError || error) && (
               <p className="chat-info__error">{localError || error}</p>
+            )}
+
+            {chat?.type === "dm" && onDeleteDm && (
+              <button type="button" className="chat-info__danger" disabled={busy} onClick={onDeleteDm}>
+                <IconTrash size={16} />
+                Удалить чат
+              </button>
             )}
 
             {canLeaveGroup && onLeaveGroup && (
