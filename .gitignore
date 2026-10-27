@@ -95,3 +95,16 @@ output/
 __pycache__/
 *.pyc
 .groq-*
+
+# Local AI agent instructions, settings, and working context
+GEMINI.md
+.agents/
+.agent/
+.mcp.json
+.mcp/
+.aider*
+.github/copilot-instructions.md
+.github/instructions/
+.github/prompts/
+/docs/mcp.md
+/work/
