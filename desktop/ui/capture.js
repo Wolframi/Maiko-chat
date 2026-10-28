@@ -33,9 +33,11 @@ dawButton.addEventListener('click', async () => {
     const result = await api.installDawBridge();
     if (!result?.installed) throw new Error('VST3 не установлен');
     showDawInstalled(true);
+    dawStatus.textContent = 'В FL Studio откройте Options → Manage plugins → Find installed plugins. Добавьте Maiko DAW Bridge на Master.';
+    dawStatus.hidden = false;
   } catch {
     showDawInstalled(false);
-    dawStatus.textContent = 'Не удалось установить VST3. Закройте DAW и повторите. Проверьте доступ к папке VST3.';
+    dawStatus.textContent = 'Не удалось установить VST3. Закройте DAW и повторите. Разрешите установку в системную папку VST3 в запросе Windows.';
     dawStatus.hidden = false;
   }
 });

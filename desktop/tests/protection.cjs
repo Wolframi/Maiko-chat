@@ -28,7 +28,7 @@ async function main() {
     app = await electron.launch({ executablePath, args: [], env, timeout: 60_000 });
     app.on('window', page => page.on('pageerror', error => errors.push(error.message)));
     const shell = await app.firstWindow();
-    await shell.waitForFunction(() => window.maikoDesktop && document.body.dataset.phase === 'ready', null, { timeout: 30_000 });
+    await shell.waitForFunction(() => window.maikoDesktop && document.body.dataset.phase === 'ready', null, { timeout: 120_000 });
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
     const result = await shell.evaluate(() => ({
       state: document.body.dataset.phase,

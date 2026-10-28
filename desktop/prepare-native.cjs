@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 if (process.platform === 'win32') {
   const compiler = path.join(process.env.SystemRoot || 'C:\\Windows', 'Microsoft.NET/Framework64/v4.0.30319/csc.exe');
-  for (const name of ['window-processes', 'capture-processes', 'window-animations', 'refresh-shell-icons', 'update-window']) {
+  for (const name of ['window-processes', 'capture-processes', 'window-animations', 'refresh-shell-icons', 'update-window', 'install-daw-bridge']) {
     const source = path.join(__dirname, `native/${name}.cs`);
     const extra = name === 'update-window' ? [path.join(__dirname, 'native/maiko-animation.cs')] : [];
     const output = path.join(__dirname, `native/${name}.exe`);

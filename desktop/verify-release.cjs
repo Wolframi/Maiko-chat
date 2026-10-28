@@ -25,7 +25,7 @@ const asar = require('@electron/asar');
 const archive = path.join(release, 'win-unpacked/resources/app.asar');
 require('./verify-protection.cjs').verify(archive);
 if (asar.listPackage(archive).some((name) => /native[\\/].*\.zip$/.test(name))) throw new Error('VST3 ZIP must not be bundled');
-for (const helper of ['capture-processes.exe', 'window-processes.exe', 'update-window.exe']) {
+for (const helper of ['capture-processes.exe', 'window-processes.exe', 'update-window.exe', 'install-daw-bridge.exe']) {
   const packed = fs.readFileSync(path.join(release, 'win-unpacked/resources/app.asar.unpacked/native', helper));
   if (!packed.equals(fs.readFileSync(path.join(__dirname, 'native', helper)))) throw new Error(`Packaged ${helper} differs`);
 }

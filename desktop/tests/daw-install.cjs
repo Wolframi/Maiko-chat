@@ -41,7 +41,7 @@ async function main() {
       });
       request.catch(() => {});
       const picker = await ready;
-      await picker.locator('.source').first().waitFor();
+      await picker.locator('#sources button').first().waitFor();
       return { picker, close: async () => {
         await picker.getByRole('button', { name: 'Отмена', exact: true }).click({ noWaitAfter: true }).catch((error) => { if (!picker.isClosed()) throw error; });
         assert.ok(['NotAllowedError', 'AbortError'].includes(await request));
