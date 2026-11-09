@@ -54,7 +54,8 @@ class UpdateWindow : Form {
         close.Click += (sender, args) => Close(); Controls.Add(close);
     }
     bool Signal(string name) {
-        try { return File.ReadAllText(Path.Combine(directory, name)) == token; }
+        string file = Path.Combine(directory, name);
+        try { return File.Exists(file) && File.ReadAllText(file) == token; }
         catch { return false; }
     }
     void Tick(object sender, EventArgs args) {

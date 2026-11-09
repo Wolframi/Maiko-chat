@@ -27,7 +27,7 @@ async function main() {
   let app;
   try {
     app = await electron.launch({ executablePath: process.env.MAIKO_TEST_EXECUTABLE || require('electron'),
-      args: process.env.MAIKO_TEST_EXECUTABLE ? [] : [path.resolve(__dirname, '..')], env });
+      args: process.env.MAIKO_TEST_EXECUTABLE ? [] : [path.resolve(__dirname, '..')], env, timeout: 60000 });
     const shell = await app.firstWindow();
     await app.evaluate(({ BrowserWindow }) => {
       const win = BrowserWindow.getAllWindows()[0];
@@ -42,16 +42,39 @@ async function main() {
     assert.equal(await shell.getByText('Почти на месте').count(), 0);
     for (let attempt = 0; !pending && attempt < 40; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
     assert.ok(pending, 'The site starts loading alongside the local animation');
+    const releasedAt = Date.now();
     pending.setHeader('content-type', 'text/html');
     pending.end('<!doctype html><title>Ready</title><body>Ready</body>');
-    assert.equal((await shell.evaluate(() => window.maikoDesktop.state())).phase, 'loading', 'A fast site cannot cut the model animation short');
+    if (releasedAt - Number(startedAt) < 2900) {
+      assert.equal((await shell.evaluate(() => window.maikoDesktop.state())).phase, 'loading', 'A fast site cannot cut the model animation short');
+    }
     assert.ok(!requests.some(url => /models|maiko.*bin/.test(url)), 'The model makes no network requests');
     await shell.waitForFunction(() => document.body.dataset.phase === 'ready');
     const playedMs = await shell.evaluate(start => Date.now() - Number(start), startedAt);
-    assert.ok(playedMs >= 2900, `The model should play for three seconds, got ${playedMs} ms`);
-    assert.ok(playedMs < 4500, `A ready site should not wait for the old five-second intro, got ${playedMs} ms`);
+    const startupTiming = await shell.evaluate(() => ({
+      loadMs: performance.getEntriesByType('navigation')[0]?.loadEventEnd,
+      modelReadyMs: Number(document.querySelector('#startup-model').dataset.startedAt) - performance.timeOrigin,
+    }));
+    assert.ok(playedMs >= 2900, `The model should play for three seconds, got ${playedMs} ms; ${JSON.stringify(startupTiming)}`);
+    // Attaching the test debugger can itself be slow on a cold launch. Until
+    // this test releases HTTP, the app must keep its model up regardless of
+    // how long the minimum intro has already played.
+    const readyDeadline = Math.max(Number(startedAt) + 3000, releasedAt);
+    assert.ok(Date.now() - readyDeadline < 1500, `A ready site adds no delay beyond the three-second intro; ${JSON.stringify(startupTiming)}`);
     assert.equal(await shell.locator('#startup-model').isVisible(), false);
     // Keep model validation outside the timed fast-start path.
+    const graphPath = await shell.evaluate(() => ({
+      precomputed: performance.getEntriesByName('maiko-graph-precomputed').length,
+      rust: performance.getEntriesByName('maiko-graph-rust').length,
+      js: performance.getEntriesByName('maiko-graph-js').length,
+    }));
+    assert.deepEqual(graphPath, { precomputed: 1, rust: 0, js: 0 });
+    const wasmHeader = await shell.evaluate(async () => [...(await window.maikoDesktop.startupParticleWasm()).slice(0, 4)]);
+    const graphHeader = await shell.evaluate(async () => [...(await window.maikoDesktop.startupParticleGraph('hiphop', 84000)).slice(0, 4)]);
+    assert.deepEqual(graphHeader, [77, 75, 80, 71]);
+    await assert.rejects(shell.evaluate(() => window.maikoDesktop.startupParticleGraph('../config.json', 84000)), /Invalid startup particle graph/);
+    await assert.rejects(shell.evaluate(() => window.maikoDesktop.startupParticleGraph('hiphop', 1)), /Invalid startup particle graph/);
+    assert.deepEqual(wasmHeader, [0, 97, 115, 109], 'Particle WASM is available from the local package');
     await assert.rejects(shell.evaluate(() => window.maikoDesktop.startupModel('../config.json')), /Неизвестная анимация/);
     for (const intro of ['hiphop', 'samba']) {
       const header = await shell.evaluate(async intro => {
@@ -93,6 +116,29 @@ async function main() {
     await shell.waitForFunction(() => document.body.dataset.phase === 'ready');
     assert.equal(await shell.locator('#startup-model').isVisible(), false, 'Switch directly to the ready UI after its signal');
     assert.ok(Date.now() - refreshReadyAt < 2000, 'Later interface refreshes do not repeat the three-second startup wait');
+    await shell.evaluate(() => {
+      const original = HTMLCanvasElement.prototype.getContext;
+      window.forceCanvasFallback = true;
+      HTMLCanvasElement.prototype.getContext = function (type, ...args) {
+        if (type === 'webgl2' && window.forceCanvasFallback) return null;
+        return original.call(this, type, ...args);
+      };
+    });
+    const refresh = () => app.evaluate(({ BrowserWindow }) => {
+      const view = BrowserWindow.getAllWindows()[0].contentView.children.find(view => /^http:/.test(view.webContents?.getURL()));
+      return view.webContents.reload();
+    });
+    await refresh();
+    await shell.waitForFunction(() => document.querySelector('#startup-model')?.dataset.renderer === 'canvas' && document.querySelector('#startup-model').dataset.state === 'ready');
+    assert.equal(await shell.locator('#startup-model').getAttribute('data-points'), '14000');
+    await site.evaluate(() => window.maikoMediaShell.siteUpdate('ready'));
+    await shell.waitForFunction(() => document.body.dataset.phase === 'ready');
+    await shell.evaluate(() => { window.forceCanvasFallback = false; });
+    await refresh();
+    await shell.waitForFunction(() => document.querySelector('#startup-model')?.dataset.renderer === 'webgl' && document.querySelector('#startup-model').dataset.state === 'ready');
+    assert.equal(await shell.locator('#startup-model').getAttribute('data-points'), '84000', 'A transient graphics failure must not permanently reduce later refreshes to Canvas');
+    await site.evaluate(() => window.maikoMediaShell.siteUpdate('ready'));
+    await shell.waitForFunction(() => document.body.dataset.phase === 'ready');
     // Retry / error transitions must not leave the spinner card or GPU loop up.
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('desktop:state-changed', {
       phase: 'error', message: 'Нет подключения', maximized: false,
@@ -104,7 +150,7 @@ async function main() {
     await app.close(); app = null; pending = null;
     env.MAIKO_DESKTOP_USER_DATA += '-reduced';
     app = await electron.launch({ executablePath: process.env.MAIKO_TEST_EXECUTABLE || require('electron'),
-      args: process.env.MAIKO_TEST_EXECUTABLE ? [] : [path.resolve(__dirname, '..')], env });
+      args: process.env.MAIKO_TEST_EXECUTABLE ? [] : [path.resolve(__dirname, '..')], env, timeout: 60000 });
     const reducedShell = await app.firstWindow();
     await reducedShell.emulateMedia({ reducedMotion: 'reduce' });
     await reducedShell.waitForFunction(() => document.querySelector('#startup-model')?.dataset.state === 'ready');

@@ -37,19 +37,21 @@ test("private invitations check membership, reject last week's code and survive 
   const auth = fileURLToPath(new URL("../src/server/auth.ts", import.meta.url));
   const chats = fileURLToPath(new URL("../src/server/chats.ts", import.meta.url));
   const run = (body: string) => execFileSync(process.execPath, ["--require", loader, "-e", `
+    (async () => {
     const assert=require('node:assert/strict');const fs=require('node:fs');
     fs.mkdirSync('data', { recursive: true });
     if (!fs.existsSync('data/registration-invites.json')) fs.writeFileSync('data/registration-invites.json', JSON.stringify({ required: false, adminUserId: null, secret: 'a'.repeat(64) }));
     const auth=require(${JSON.stringify(auth)});const chats=require(${JSON.stringify(chats)});
     const account=result=>{assert.equal(result.ok,true,result.error);return result.account;};
     ${body}
+    })().catch(error => { console.error(error); process.exitCode = 1; });
   `], { cwd: folder, encoding: "utf8", windowsHide: true, timeout: 20000 });
   run(`
     const midnight=Date.UTC(2026,9,18,19);
     let now=midnight-1000;Date.now=()=>now;
-    const owner=account(auth.registerUser('code-owner','Password123!'));
-    const guest=account(auth.registerUser('code-guest','Password123!'));
-    const later=account(auth.registerUser('code-later','Password123!'));
+    const owner=account((await auth.registerUser('code-owner','Password123!')));
+    const guest=account((await auth.registerUser('code-guest','Password123!')));
+    const later=account((await auth.registerUser('code-later','Password123!')));
     const group=chats.createGroup(owner.userId,'Hidden group','',[],'private').chat;
     const before=chats.getGroupInviteCode(group.id,owner.userId,now);
     assert.equal(before.ok,true);
@@ -73,7 +75,7 @@ test("private invitations check membership, reject last week's code and survive 
     const state=JSON.parse(fs.readFileSync('state.json','utf8'));Date.now=()=>state.now;
     const current=chats.getGroupInviteCode(state.groupId,state.owner.userId,state.now);
     assert.equal(current.invite.code,state.current.code);
-    const guest=account(auth.registerUser('over-capacity','Password123!'));
+    const guest=account((await auth.registerUser('over-capacity','Password123!')));
     const group=chats.getChat(state.groupId);
     group.memberIds=[state.owner.userId,...Array.from({length:49},(_,i)=>'fixture-'+i)];
     assert.equal(chats.joinGroupByCode(guest.userId,current.invite.code,state.now).ok,false);

@@ -6,7 +6,10 @@ import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
 import { ChatSidebar } from "./ChatSidebar";
 import { ServerRail } from "./ServerRail";
-import { ChatInfoPanel } from "./ChatInfoPanel";
+import type { ChatInfoPanel as ChatInfoPanelType } from "./ChatInfoPanel";
+import { deferredFeature, FeatureGate } from "./DeferredFeature";
+
+const ChatInfoPanel = deferredFeature(() => import("./ChatInfoPanel").then(module => module.ChatInfoPanel));
 
 type ThreadProps = Omit<ComponentProps<typeof MessageList>, "messages" | "historyVersion" | "people" | "account" | "othersTyping" | "loading" | "hasMore" | "hasNewer" | "loadingOlder" | "historyError" | "peerReadAt">;
 export const ThreadMessages = memo(function ThreadMessages(props: ThreadProps) {
@@ -24,7 +27,8 @@ ThreadMessages.displayName = "ThreadMessages";
 
 export const ThreadComposer = memo(function ThreadComposer(props: Omit<ComponentProps<typeof Composer>, "disabled" | "error">) {
   const state = useRuntimeState("conversation", state => ({ disabled: state.historyLoading && !state.messages.length, error: state.composerError }));
-  return <Composer {...props} {...state} />;
+  const cachedView = useRuntimeState("core", state => state.cachedView);
+  return <Composer {...props} {...state} disabled={state.disabled || cachedView} />;
 });
 ThreadComposer.displayName = "ThreadComposer";
 
@@ -35,9 +39,9 @@ export const ConnectedSidebar = memo(function ConnectedSidebar(props: Omit<Compo
 });
 ConnectedSidebar.displayName = "ConnectedSidebar";
 
-export const ConnectedChatInfoPanel = memo(function ConnectedChatInfoPanel(props: Omit<ComponentProps<typeof ChatInfoPanel>, "chat">) {
+export const ConnectedChatInfoPanel = memo(function ConnectedChatInfoPanel(props: Omit<ComponentProps<typeof ChatInfoPanelType>, "chat">) {
   const chat = useRuntimeState("list", state => props.open ? state.currentChat : null);
-  return <ChatInfoPanel {...props} chat={chat} />;
+  return <FeatureGate active={props.open}><ChatInfoPanel {...props} chat={chat} /></FeatureGate>;
 });
 
 export const ConnectedServerRail = memo(function ConnectedServerRail(props: Omit<ComponentProps<typeof ServerRail>, "groups" | "unreadHome">) {

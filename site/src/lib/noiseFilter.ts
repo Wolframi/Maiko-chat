@@ -1,7 +1,7 @@
 "use client";
 
 import type { LocalAudioTrack, AudioProcessorOptions, TrackProcessor } from "livekit-client";
-import { Track } from "livekit-client";
+import type { Track } from "livekit-client";
 import { createDtlnGraph, type DtlnGraph } from "@/lib/dtlnGraph";
 import { toast } from "sonner";
 import { emitVoiceSettings, getMicDeviceId } from "@/lib/mediaDevices";

@@ -16,7 +16,6 @@ import {
   IconMic,
   IconMicOff,
   IconMinimize,
-  IconPhone,
   IconPhoneOff,
   IconScreen,
   IconHeadphones,
@@ -32,15 +31,13 @@ import {
   ScreenVolumeKnob,
   type ScreenSource,
 } from "@/components/chat/ScreenShareStage";
-import { getSoundEnabled } from "@/lib/notify";
-import { applyAudioOutput } from "@/lib/mediaDevices";
-import { startIncomingRingtone, startOutgoingRingtone } from "@/lib/ringtone";
-import { easeOutSoft, softSpring, sheetSpring } from "@/lib/motion";
+import { softSpring, sheetSpring } from "@/lib/motion";
 import {
   pickCameraStream,
   pickScreenStream,
 } from "@/lib/webrtcMedia";
 import { noiseFilterLabel, type NoiseFilterKind } from "@/lib/noiseFilter";
+import { CallAlerts, isOutboundRinging } from "./CallAlerts";
 
 function useStablePickedStream(
   stream: MediaStream | null | undefined,
@@ -116,6 +113,7 @@ type CallMediaProps = {
 };
 
 type CallOverlayProps = {
+  externalAlerts?: boolean;
   incoming: IncomingCall | null;
   active: ActiveCall | null;
   localStream: MediaStream | null;
@@ -170,26 +168,6 @@ function callLinkBanner(status: string, ringing: boolean) {
   if (/переподключ/i.test(status)) return status;
   if (/связь (нестабильна|потеряна)/i.test(status)) return status;
   return null;
-}
-
-function useRingTone(enabled: boolean) {
-  useEffect(() => {
-    if (!enabled) return;
-    if (!getSoundEnabled()) return;
-    return startIncomingRingtone();
-  }, [enabled]);
-}
-
-function useOutgoingRing(enabled: boolean) {
-  useEffect(() => {
-    if (!enabled) return;
-    if (!getSoundEnabled()) return;
-    return startOutgoingRingtone();
-  }, [enabled]);
-}
-
-function isOutboundRinging(outbound: boolean, status: string) {
-  return outbound && (status === "Звоним…" || status === "Звонок" || status === "");
 }
 
 export function CallPanel({
@@ -553,6 +531,7 @@ function DockPortal({ children }: { children: ReactNode }) {
 }
 
 export function CallOverlay({
+  externalAlerts = false,
   incoming,
   active,
   localStream,
@@ -591,7 +570,6 @@ export function CallOverlay({
   onToggleScreenShare,
   onToggleMinimized,
 }: CallOverlayProps) {
-  const acceptRef = useRef<HTMLButtonElement>(null);
   const showIncoming = Boolean(incoming && !active);
   const callInThisChat = Boolean(
     active && currentChatId && active.chatId === currentChatId,
@@ -610,90 +588,22 @@ export function CallOverlay({
     return list;
   }, [localStream, remoteStream, remoteSharingScreen, sharingScreen]);
 
-  useRingTone(showIncoming);
-  useOutgoingRing(
-    Boolean(active && isOutboundRinging(active.outbound, status)),
-  );
-
   useEffect(() => {
-    if (!showIncoming) return;
-    const timer = window.setTimeout(() => acceptRef.current?.focus(), 40);
-    return () => window.clearTimeout(timer);
-  }, [showIncoming]);
-
-  useEffect(() => {
-    if (!showIncoming && !showDock) return;
+    if (!showDock) return;
     function onKey(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      if (showIncoming) onReject();
-      else if (showDock) onToggleMinimized();
+      onToggleMinimized();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [showIncoming, showDock, onReject, onToggleMinimized]);
-
-  useEffect(() => {
-    void applyAudioOutput(remoteAudioRef.current);
-  }, [remoteAudioRef, active]);
+  }, [showDock, onToggleMinimized]);
 
   return (
     <>
       {showDock ? null : <ScreenShareKeepalive sources={screenKeepalives} />}
-      <audio ref={remoteAudioRef} autoPlay playsInline hidden />
-
-      <AnimatePresence>
-        {showIncoming && incoming && (
-          <motion.div
-            className="call"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Входящий звонок"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.22, ease: easeOutSoft }}
-          >
-            <motion.div
-              className="call__card call__card--incoming"
-              initial={{ opacity: 0, y: 16, scale: 0.98 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              transition={sheetSpring}
-            >
-              <div className="call__ring">
-                <Avatar
-                  name={incoming.fromName}
-                  src={incomingAvatarUrl}
-                  size="lg"
-                />
-              </div>
-              <p className="call__label">Входящий звонок</p>
-              <h2 className="call__name">{incoming.fromName}</h2>
-              <div className="call__actions call__actions--dock">
-                <button
-                  type="button"
-                  className="call__btn call__btn--circle call__btn--bad"
-                  onClick={onReject}
-                  aria-label="Отклонить"
-                  title="Отклонить"
-                >
-                  <IconPhoneOff size={22} />
-                </button>
-                <button
-                  ref={acceptRef}
-                  type="button"
-                  className="call__btn call__btn--circle call__btn--ok"
-                  onClick={onAccept}
-                  aria-label="Ответить"
-                  title="Ответить"
-                >
-                  <IconPhone size={22} />
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {!externalAlerts && <CallAlerts incoming={incoming} active={active} status={status}
+        incomingAvatarUrl={incomingAvatarUrl} remoteAudioRef={remoteAudioRef} onAccept={onAccept} onReject={onReject} />}
 
       <AnimatePresence>
         {showDock && active ? (

@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { useIsPresent } from "motion/react";
 import { chooseMaikoIntro, createMaikoCanvasRenderer, createMaikoRenderer, prepareMaikoDance, maikoIntroAsset, maikoIntroDuration, type MaikoIntro } from "@/lib/maikoDance";
 import { MAIKO_INTRO_START_SECONDS } from "@/lib/maikoIntro";
+import { warmMaikoParticleGraph } from "@/lib/maikoParticleGraph";
 import { HologramMaikoFallback } from "@/components/chat/HologramMaikoFallback";
 
 const subscribe = () => () => {};
@@ -33,6 +34,7 @@ export function HologramMaiko({ onReady, intro: selectedIntro }: { onReady?: (du
     const startRandom = startRandomRef.current ?? (startRandomRef.current = Math.random());
     canvas.dataset.maikoIntro = intro;
     const controller = new AbortController();
+    void warmMaikoParticleGraph(intro, fallback ? innerWidth < 600 ? 7000 : 14000 : innerWidth < 600 ? 40000 : 84000);
     const fail = () => { if (fallback) setUnavailable(true); else setFallback(true); };
     const loadTimeout = window.setTimeout(() => { controller.abort(); setUnavailable(true); }, 4500);
     const media = matchMedia("(prefers-reduced-motion: reduce)");

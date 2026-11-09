@@ -13,19 +13,14 @@ import { AnimatePresence, motion } from "motion/react";
 import type { AuthAccount } from "@/lib/types";
 import type { Socket } from "socket.io-client";
 import { RegistrationInvitesPanel } from "@/components/chat/RegistrationInvitesPanel";
+import { DevicesPanel } from "@/components/chat/DevicesPanel";
 import { Avatar } from "@/components/chat/Avatar";
 import { ConfirmDialog } from "@/components/chat/ConfirmDialog";
-import dynamic from "next/dynamic";
+import { deferredFeature, FeatureGate } from "./DeferredFeature";
 
-const AvatarCropDialog = dynamic(
-  () => import("@/components/chat/AvatarCropDialog").then((mod) => mod.AvatarCropDialog),
-  { ssr: false }
-);
+const AvatarCropDialog = deferredFeature(() => import("./AvatarCropDialog").then(module => module.AvatarCropDialog));
 
-const RingtoneTrimDialog = dynamic(
-  () => import("@/components/chat/RingtoneTrimDialog").then((mod) => mod.RingtoneTrimDialog),
-  { ssr: false }
-);
+const RingtoneTrimDialog = deferredFeature(() => import("./RingtoneTrimDialog").then(module => module.RingtoneTrimDialog));
 import {
   IconCamera,
   IconClose,
@@ -137,7 +132,7 @@ export function ProfilePanel({
   const [trimLimit, setTrimLimit] = useState(30);
   const catalogControllerRef = useRef<AbortController | null>(null);
   const [confirmDeleteCustom, setConfirmDeleteCustom] = useState(false);
-  const [tab, setTab] = useState<"account" | "voice" | "ringtone" | "invites">("account");
+  const [tab, setTab] = useState<"account" | "voice" | "ringtone" | "invites" | "devices">("account");
   const stopPreviewRef = useRef<(() => void) | null>(null);
   const fileInputId = useId();
   const ringtoneInputRef = useRef<HTMLInputElement>(null);
@@ -449,7 +444,7 @@ export function ProfilePanel({
               <div>
                 <p className="profile__eyebrow">Профиль</p>
                 <h2>
-                  {tab === "invites" ? "Приглашения" : tab === "ringtone"
+                  {tab === "devices" ? "Устройства" : tab === "invites" ? "Приглашения" : tab === "ringtone"
                     ? "Рингтон"
                     : tab === "voice"
                       ? "Голос и звук"
@@ -506,9 +501,16 @@ export function ProfilePanel({
                 onClick={() => { stopPreview(); setTab("invites"); }}>
                 Приглашения
               </button>
+              <button type="button" role="tab" aria-selected={tab === "devices"}
+                className={`profile__tab ${tab === "devices" ? "is-active" : ""}`}
+                onClick={() => { stopPreview(); setTab("devices"); }}>
+                Устройства
+              </button>
             </div>
 
-            {tab === "invites" ? (
+            {tab === "devices" ? (
+              <DevicesPanel key={account.token} socket={socket} connected={connected} onLogout={onLogout} />
+            ) : tab === "invites" ? (
               <RegistrationInvitesPanel key={account.token} socket={socket} connected={connected} />
             ) : tab === "voice" ? (
               <VoiceSettings />
@@ -1021,15 +1023,15 @@ export function ProfilePanel({
         </div>
       )}
     </AnimatePresence>
-      <AvatarCropDialog
+      <FeatureGate active={Boolean(cropFile)}><AvatarCropDialog
         open={Boolean(cropFile)}
         file={cropFile}
         onCancel={() => setCropFile(null)}
         onComplete={(file) => {
           void uploadCroppedAvatar(file);
         }}
-      />
-      <RingtoneTrimDialog
+      /></FeatureGate>
+      <FeatureGate active={Boolean(trimFile)}><RingtoneTrimDialog
         open={Boolean(trimFile)}
         file={trimFile}
         initialStart={trimStart}
@@ -1037,7 +1039,7 @@ export function ProfilePanel({
         maxDuration={trimLimit}
         onCancel={() => setTrimFile(null)}
         onComplete={applyCustomRingtone}
-      />
+      /></FeatureGate>
       <ConfirmDialog
         open={confirmDeleteCustom}
         title="Удалить свой рингтон?"

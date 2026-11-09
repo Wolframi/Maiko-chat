@@ -22,9 +22,11 @@ import {
 } from "@/lib/icons";
 import type { StickerPack } from "@/lib/types";
 import { MAX_STICKER_BYTES, thumbSrc } from "@/lib/files";
-import { StickerCropDialog } from "@/components/chat/StickerCropDialog";
+import { deferredFeature, FeatureGate } from "./DeferredFeature";
 import { ConfirmDialog } from "@/components/chat/ConfirmDialog";
 import { layoutGifMosaic } from "@/lib/gifMosaic";
+
+const StickerCropDialog = deferredFeature(() => import("./StickerCropDialog").then(module => module.StickerCropDialog));
 
 type StickerPickerProps = {
   open: boolean;
@@ -350,7 +352,7 @@ export function StickerPicker({
           >
             {pack.coverUrl ? (
 
-              <ChatImage src={thumbSrc(pack.coverUrl)} alt="" draggable={false} />
+              <ChatImage src={thumbSrc(pack.coverUrl)} sticker alt="" draggable={false} />
             ) : (
               <IconSticker size={18} />
             )}
@@ -510,6 +512,7 @@ export function StickerPicker({
 
                         <ChatImage
                           src={thumbSrc(sticker.url)}
+                          sticker
                           alt=""
                           loading="lazy"
                           draggable={false}
@@ -553,12 +556,12 @@ export function StickerPicker({
       onCancel={() => setPendingDelete(null)}
       onConfirm={() => void handleConfirmDelete()}
     />
-    <StickerCropDialog
+    <FeatureGate active={Boolean(cropFile)}><StickerCropDialog
       open={Boolean(cropFile)}
       file={cropFile}
       onCancel={handleCropCancel}
       onComplete={handleCropComplete}
-    />
+    /></FeatureGate>
     </>
   );
 }

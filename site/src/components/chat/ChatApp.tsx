@@ -21,9 +21,8 @@ import { JoinGate } from "@/components/chat/JoinGate";
 import { GroupInviteButton } from "@/components/chat/GroupInvitePanel";
 import { type RailFocus } from "@/components/chat/ServerRail";
 import { GuildMemberList } from "@/components/chat/GuildMemberList";
-import { ProfilePanel } from "@/components/chat/ProfilePanel";
+import { deferredFeature, FeatureGate } from "./DeferredFeature";
 import { AudioPlaybackBar } from "@/components/chat/AudioPlaybackBar";
-import dynamic from "next/dynamic";
 import { HologramMaiko } from "@/components/chat/HologramMaiko";
 import type { MaikoIntro } from "@/lib/maikoIntro";
 import { Avatar } from "@/components/chat/Avatar";
@@ -41,10 +40,7 @@ type SideScrollLock = {
   pinBottom: boolean;
 };
 
-const MediaLightbox = dynamic(
-  () => import("@/components/chat/ImageLightbox").then((mod) => mod.MediaLightbox),
-  { ssr: false }
-);
+const MediaLightbox = deferredFeature(() => import("./ImageLightbox").then(module => module.MediaLightbox));
 import {
   IconChevronDown,
   IconChevronUp,
@@ -70,7 +66,8 @@ import { getDesktopMediaRuntime } from "@/lib/desktopMedia";
 import { peekLastRoom, peekMediaResume, saveLastRoom } from "@/lib/mediaResume";
 import { getSavedRingtone, prefetchRingtone } from "@/lib/ringtone";
 import { Toaster, toast } from "sonner";
-import { StickerPackViewer } from "@/components/chat/StickerPackViewer";
+const ProfilePanel = deferredFeature(() => import("./ProfilePanel").then(module => module.ProfilePanel));
+const StickerPackViewer = deferredFeature(() => import("./StickerPackViewer").then(module => module.StickerPackViewer));
 
 type SidebarPanel = RailFocus;
 
@@ -89,6 +86,7 @@ function ChatWorkspace({ intro }: { intro?: MaikoIntro }) {
   const {
     socket,
     connected,
+    cachedView,
     authReady,
     account,
     session,
@@ -340,6 +338,12 @@ function ChatWorkspace({ intro }: { intro?: MaikoIntro }) {
   const restoreRoomRef = useRef<string | null>(null);
   const restoreTriesRef = useRef(0);
   const restoredOnceRef = useRef(false);
+  useEffect(() => {
+    if (!cachedView || restoredOnceRef.current || !session?.room) return;
+    const group = chats.find(chat => chat.type === "group" &&
+      (chat.id === session.room || chat.textChannels?.some(channel => channel.id === session.room)));
+    if (group) setSidebarPanel(group.id);
+  }, [cachedView, chats, session?.room]);
   useEffect(() => {
     if (!authReady || !account || !connected) return;
     if (restoredOnceRef.current) return;
@@ -1502,12 +1506,12 @@ function ChatWorkspace({ intro }: { intro?: MaikoIntro }) {
         onExpand={handleExpandVoice}
       />
 
-      <MediaLightbox
+      <FeatureGate active={Boolean(lightbox)}><MediaLightbox
         item={lightbox}
         onClose={() => setLightbox(null)}
-      />
+      /></FeatureGate>
 
-      <StickerPackViewer
+      <FeatureGate active={Boolean(stickerViewer)}><StickerPackViewer
         open={Boolean(stickerViewer)}
         packId={stickerViewer?.packId ?? null}
         focusStickerId={stickerViewer?.stickerId ?? null}
@@ -1516,7 +1520,7 @@ function ChatWorkspace({ intro }: { intro?: MaikoIntro }) {
         onInstall={installStickerPack}
         onUninstall={uninstallStickerPack}
         onClose={() => setStickerViewer(null)}
-      />
+      /></FeatureGate>
 
       <ConnectedChatInfoPanel
         open={chatInfoOpen && showChatInfo}
@@ -1552,7 +1556,7 @@ function ChatWorkspace({ intro }: { intro?: MaikoIntro }) {
       />
 
       {account && (
-        <ProfilePanel
+        <FeatureGate active={profileOpen}><ProfilePanel
           socket={socket}
           open={profileOpen}
           account={account}
@@ -1566,7 +1570,7 @@ function ChatWorkspace({ intro }: { intro?: MaikoIntro }) {
           onSave={handleSaveProfile}
           onUploadAvatar={uploadAvatar}
           onLogout={handleLogout}
-        />
+        /></FeatureGate>
       )}
 
       <AnimatePresence mode="wait">

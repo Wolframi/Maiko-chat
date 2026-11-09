@@ -2,6 +2,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { publicAsset, nextAsset } = require('./asset-manifest.cjs');
 const config = require('./config.json');
+const { execFileSync } = require('node:child_process');
 
 const project = path.resolve(__dirname, '../site');
 const destination = path.join(__dirname, 'bundled-assets');
@@ -88,6 +89,9 @@ async function collectCachedDeployment(archive) {
 }
 
 async function main() {
+  execFileSync(process.execPath, [path.join(project, 'scripts/prepare-particle-graph.mjs')], { stdio: 'inherit', windowsHide: true });
+  const particles = JSON.parse(await fs.readFile(path.join(project, 'native/particle-graph/artifact.json'), 'utf8'));
+  const precomputed = JSON.parse(await fs.readFile(path.join(project, 'native/particle-graph/precomputed.json'), 'utf8'));
   // Reuse the site's model renderer in the local startup surface, without a
   // network request or a second React application inside the Electron shell.
   await require('esbuild').build({
@@ -108,6 +112,17 @@ async function main() {
   // Keep the usable bundle intact when deployment download fails.
   await fs.rm(staging, { recursive: true, force: true });
   await copyDirectory(path.join(project, 'public'), '', publicAsset);
+  // Fixed local IPC resource for the shell; the website uses the content-hashed URL.
+  await save('/wasm/startup-particle-graph.wasm', await fs.readFile(path.join(project, 'public', particles.asset)));
+  for (const [intro, model] of Object.entries(precomputed.models)) {
+    for (const [count, graph] of Object.entries(model.graphs)) {
+      const bytes = await fs.readFile(path.join(project, 'public', graph.asset));
+      await save(`/particles/startup-${intro}-${count}.bin`, bytes);
+      // Chromium fetch sees decoded bytes, just as with HTTP Content-Encoding.
+      // Keep the hashed website URL local without requiring a gzip protocol handler.
+      manifest[`${graph.asset}.gz`] = graph.asset.slice(1);
+    }
+  }
   for (const name of ['icon.png', 'apple-icon.png', 'favicon.ico']) {
     const file = await fs.readFile(path.join(project, 'src', 'app', name)).catch((error) => { if (error.code !== 'ENOENT') throw error; });
     if (file) await save('/' + name, file);

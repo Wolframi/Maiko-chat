@@ -287,6 +287,7 @@ export function StickerPackViewer({
 
                       <ChatImage
                         src={thumbSrc(sticker.url)}
+                        sticker
                         alt=""
                         draggable={false}
                         loading="lazy"

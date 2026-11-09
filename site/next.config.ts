@@ -4,6 +4,8 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { lanDevHosts } from "./src/lib/devHosts";
 import { MAIKO_MODEL_VERSION } from "./src/lib/maikoIntro";
+import { MAIKO_PARTICLE_WASM_URL } from "./src/lib/maikoParticleWasmAsset";
+import { MAIKO_PARTICLE_GRAPH_ASSETS } from "./src/lib/maikoParticleGraphAssets";
 
 const nextConfig: NextConfig = {
   generateBuildId: async () => process.env.NEXT_PUBLIC_SITE_VERSION || randomUUID(),
@@ -12,7 +14,20 @@ const nextConfig: NextConfig = {
   // The Electron client has its own lockfile; keep the web workspace explicit.
   turbopack: { root: process.cwd() },
   async headers() {
-    return [...["runtime.wasm", "model-1.tflite", "model-2.tflite"].map((asset) => ({
+    return [{
+      source: MAIKO_PARTICLE_WASM_URL,
+      headers: [
+        { key: "Content-Type", value: "application/wasm" },
+        { key: "Cache-Control", value: "public, max-age=31536000, immutable" },
+      ],
+    }, ...Object.values(MAIKO_PARTICLE_GRAPH_ASSETS).flatMap(model => Object.values(model.graphs).map(graph => ({
+      source: `${graph.asset}.gz`,
+      headers: [
+        { key: "Content-Type", value: "application/octet-stream" },
+        { key: "Content-Encoding", value: "gzip" },
+        { key: "Cache-Control", value: "public, max-age=31536000, immutable" },
+      ],
+    }))), ...["runtime.wasm", "model-1.tflite", "model-2.tflite"].map((asset) => ({
       source: `/audio/dtln-0.1.1/${asset}`,
       headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
     })), ...["hiphop", "samba"].map(intro => ({

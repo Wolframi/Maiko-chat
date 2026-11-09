@@ -1,0 +1,77 @@
+{
+  "sourceSha256": "6d4eb22fa9bd6d662be411cf195103a76cefdc39ecfcd2caa29cd8bc856c8f24",
+  "inputs": {
+    "hiphop": "aca385688e0de4fe15b06cbf47035fe1276fb63cf6fd25f9c15adb5c155063ed",
+    "samba": "06733b74e22d081250df4c25a0fd8f1eebcc1f30d00e3edb4349410b957192f2"
+  },
+  "models": {
+    "hiphop": {
+      "checksum": 1879133985,
+      "bytes": 2364632,
+      "graphs": {
+        "7000": {
+          "asset": "/particles/maiko-hiphop-7000-a6b3c5884c1db717.bin",
+          "sha256": "a6b3c5884c1db71755462313748835ecfe7c4ecc306742516eb0480b834574f6",
+          "checksum": 3435698686,
+          "bytes": 84024,
+          "gzipBytes": 45167
+        },
+        "14000": {
+          "asset": "/particles/maiko-hiphop-14000-ac38984f992ed6bb.bin",
+          "sha256": "ac38984f992ed6bbe1f6c873e04f5ae89c0dad88f0bed7d52429d67980b130cb",
+          "checksum": 3044087389,
+          "bytes": 168024,
+          "gzipBytes": 96876
+        },
+        "40000": {
+          "asset": "/particles/maiko-hiphop-40000-e43d9d5d4a9e4f01.bin",
+          "sha256": "e43d9d5d4a9e4f01dc544efc6c4cd40f89e6f252f6842f1a9098be1b1bb8999a",
+          "checksum": 2960814268,
+          "bytes": 480024,
+          "gzipBytes": 299439
+        },
+        "84000": {
+          "asset": "/particles/maiko-hiphop-84000-eb812a190a323bf2.bin",
+          "sha256": "eb812a190a323bf2279de4a339706f77bfdce94e5c12f9799a7beeda0e33d1f0",
+          "checksum": 2453959362,
+          "bytes": 1008024,
+          "gzipBytes": 667304
+        }
+      }
+    },
+    "samba": {
+      "checksum": 133386341,
+      "bytes": 2447312,
+      "graphs": {
+        "7000": {
+          "asset": "/particles/maiko-samba-7000-13f560a400c1a15c.bin",
+          "sha256": "13f560a400c1a15c2e37031d709240024c7d5be5bde2f8220ac7a11143524b16",
+          "checksum": 2204751167,
+          "bytes": 84024,
+          "gzipBytes": 45034
+        },
+        "14000": {
+          "asset": "/particles/maiko-samba-14000-130ded2005ecf6e3.bin",
+          "sha256": "130ded2005ecf6e369288f5c574adee5d1945ce1131a4413614af6653f7a65bd",
+          "checksum": 949555379,
+          "bytes": 168024,
+          "gzipBytes": 96752
+        },
+        "40000": {
+          "asset": "/particles/maiko-samba-40000-59b264a93bb81f72.bin",
+          "sha256": "59b264a93bb81f72fe5558d2ed6b009d84a108bc0292c1780349d9b102cca224",
+          "checksum": 3183687051,
+          "bytes": 480024,
+          "gzipBytes": 298810
+        },
+        "84000": {
+          "asset": "/particles/maiko-samba-84000-e14da91dc47c431b.bin",
+          "sha256": "e14da91dc47c431b6db4bbfe0b190a579eb01d40dba37e5c598d7cc687b87b8e",
+          "checksum": 3983668059,
+          "bytes": 1008024,
+          "gzipBytes": 665716
+        }
+      }
+    }
+  }
+}

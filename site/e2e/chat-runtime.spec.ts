@@ -11,6 +11,9 @@ test("isolated runtimes keep direct calls and messages connected", async ({ brow
   const contexts = await Promise.all([0, 1].map(() => browser.newContext({ baseURL: server.base,
     permissions: ["microphone", "camera"], reducedMotion: "reduce", viewport: { width: 1280, height: 900 } })));
   const errors: string[] = [];
+  let releaseCallUi = () => {};
+  const callUiGate = new Promise<void>(resolve => { releaseCallUi = resolve; });
+  let holdCallUi = false;
   let stage = "login";
   try {
     for (const context of contexts) {
@@ -27,6 +30,10 @@ test("isolated runtimes keep direct calls and messages connected", async ({ brow
     }
     await contexts[0].addInitScript(token => localStorage.setItem("pulse-chat-token", token), server.token);
     const [caller, receiver] = await Promise.all(contexts.map(context => context.newPage()));
+    await receiver.route("**/_next/static/chunks/**", async route => {
+      if (holdCallUi && new URL(route.request().url()).pathname.endsWith(".js")) await callUiGate;
+      await route.continue();
+    });
     for (const page of [caller, receiver]) page.on("pageerror", error => errors.push(error.message));
     await Promise.all([caller.goto("/"), receiver.goto("/")]);
     await receiver.getByPlaceholder("artem").fill("seeduser1");
@@ -36,11 +43,17 @@ test("isolated runtimes keep direct calls and messages connected", async ({ brow
     await caller.getByRole("button", { name: "Люди", exact: true }).click();
     await caller.getByRole("textbox", { name: "Поиск людей и групп" }).fill("@seeduser1");
     await caller.getByRole("button", { name: /Seed User 1\s+@seeduser1/ }).click();
+    holdCallUi = true;
     await caller.getByRole("button", { name: "Звонок", exact: true }).click();
     stage = "accept";
+    await expect(receiver.getByRole("dialog", { name: "Входящий звонок", exact: true })).toBeVisible();
     await receiver.getByRole("button", { name: "Ответить", exact: true }).click();
     await expect(caller.locator(".call__status")).toHaveText(/\d+:\d{2}/);
     await expect(receiver.locator(".header-call em")).toHaveText(/\d+:\d{2}/);
+    await expect.poll(() => receiver.evaluate(() => [...document.querySelectorAll("audio")].some(audio =>
+      audio.srcObject instanceof MediaStream && audio.srcObject.getAudioTracks().length > 0))).toBe(true);
+    holdCallUi = false;
+    releaseCallUi();
     stage = "expand receiver";
     await receiver.getByRole("button", { name: "Вернуться к звонку с Seed User 0", exact: true }).click();
     await expect(receiver.locator(".call__status")).toHaveText(/\d+:\d{2}/);
@@ -67,6 +80,7 @@ test("isolated runtimes keep direct calls and messages connected", async ({ brow
     console.log(JSON.stringify({ stage, errors }));
     throw error;
   } finally {
+    releaseCallUi();
     await server.stop();
     await Promise.all(contexts.map(context => context.close()));
   }

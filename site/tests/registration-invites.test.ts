@@ -30,12 +30,14 @@ function fixture(t: TestContext) {
 
 function run(folder: string, body: string) {
   execFileSync(process.execPath, ["--require", loader, "-e", `
+    (async () => {
     const assert = require('node:assert/strict');
     const fs = require('node:fs');
     Date.now = () => ${createdAt + 1000};
     const auth = require(${JSON.stringify(authPath)});
     const invites = require(${JSON.stringify(invitesPath)});
     ${body}
+    })().catch(error => { console.error(error); process.exitCode = 1; });
   `], { cwd: folder, windowsHide: true, encoding: "utf8", timeout: 20000 });
 }
 
@@ -47,9 +49,9 @@ test("registration requires a current member code by default and records the inv
     const code = invites.memberRegistrationInvite(member).code;
     assert.match(code, /^[A-F0-9]{4}(-[A-F0-9]{4}){4}$/);
     for (const input of [undefined, null, {}, '', 'BAD', 'a'.repeat(1000)]) {
-      assert.equal(auth.registerUser('new-user','Password123!', 'ip', input).ok, false);
+      assert.equal((await auth.registerUser('new-user','Password123!', 'ip', input)).ok, false);
     }
-    const result = auth.registerUser('new-user','Password123!', 'ip', ' '+code.toLowerCase()+' ');
+    const result = (await auth.registerUser('new-user','Password123!', 'ip', ' '+code.toLowerCase()+' '));
     assert.equal(result.ok,true,result.error);
     assert.equal(auth.getUserById(result.account.userId).invitedBy,'member');
     assert.equal(auth.listUsers().find(u=>u.id===result.account.userId).invitedBy,undefined);
@@ -59,7 +61,7 @@ test("registration requires a current member code by default and records the inv
   run(folder, `
     const code = fs.readFileSync('code.txt','utf8');
     assert.equal(invites.memberRegistrationInvite(auth.getUserById('member')).code,code);
-    assert.equal(auth.registerUser('after-restart','Password123!',undefined,code).ok,true);
+    assert.equal((await auth.registerUser('after-restart','Password123!',undefined,code)).ok,true);
     const user = JSON.parse(fs.readFileSync('data/users.json')).find(u=>u.username==='new-user');
     assert.equal(user.invitedBy,'member');
   `);
@@ -89,9 +91,9 @@ test("only the pinned Artem account can toggle registration, including after ren
     assert.equal(invites.setRegistrationPolicy('member',false).ok,false);
     assert.equal(invites.setRegistrationPolicy('real-artem','false').ok,false);
     assert.equal(invites.setRegistrationPolicy('real-artem',false).ok,true);
-    assert.equal(auth.registerUser('open-user','Password123!').ok,true);
+    assert.equal((await auth.registerUser('open-user','Password123!')).ok,true);
     assert.equal(auth.updateProfile('real-artem',{username:'renamed'}).ok,true);
-    const impostor=auth.registerUser('artem','Password123!');
+    const impostor=(await auth.registerUser('artem','Password123!'));
     assert.equal(impostor.ok,true);
     assert.equal(invites.canManageRegistration(impostor.account.userId),false);
     assert.equal(invites.canManageRegistration('real-artem'),true);
@@ -101,7 +103,7 @@ test("only the pinned Artem account can toggle registration, including after ren
     assert.equal(invites.canManageRegistration('real-artem'),true);
     assert.equal(invites.canManageRegistration(auth.listUsers().find(u=>u.username==='artem').id),false);
     assert.equal(invites.setRegistrationPolicy('real-artem',true).ok,true);
-    assert.equal(auth.registerUser('closed-user','Password123!').ok,false);
+    assert.equal((await auth.registerUser('closed-user','Password123!')).ok,false);
   `);
 });
 
@@ -109,4 +111,19 @@ test("corrupt settings fail closed without enabling public registration", t => {
   const folder = fixture(t);
   writeFileSync(path.join(folder,"data/registration-invites.json"), '{"required":false}');
   assert.throws(() => run(folder, ""), /Invalid registration invite settings/);
+});
+
+test("registration rechecks invite policy and expiry after async password hashing", t => {
+  run(fixture(t), `
+    invites.setRegistrationPolicy('real-artem', false);
+    const pendingOpen = auth.registerUser('pending-open', 'Password123!');
+    invites.setRegistrationPolicy('real-artem', true);
+    assert.equal((await pendingOpen).ok, false);
+    const member = auth.getUserById('member');
+    const { code, expiresAt } = invites.memberRegistrationInvite(member);
+    const pendingInvite = auth.registerUser('pending-invite', 'Password123!', 'ip', code);
+    Date.now = () => expiresAt;
+    assert.equal((await pendingInvite).ok, false);
+    assert.equal(auth.listUsers().length, 2);
+  `);
 });

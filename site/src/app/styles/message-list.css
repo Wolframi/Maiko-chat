@@ -80,9 +80,17 @@
   scroll-behavior: auto;
 }
 
-.room__messages.room__messages--virtual {
+.room__messages.room__messages--virtual,
+.room__messages.room__messages--native,
+.room__messages.room__messages--native:has(.bubble-row--plaque) {
   display: block;
   padding: 0;
+}
+
+.room__messages-native-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
 }
 
 .message-virtual-segment {

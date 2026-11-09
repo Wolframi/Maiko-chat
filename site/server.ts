@@ -48,6 +48,10 @@ import {
   onSessionRevoked,
   socketIdsForToken,
   ensureDemoUsers,
+  recordSessionAccess,
+  listDeviceSessions,
+  revokeDeviceSession,
+  revokeOtherDeviceSessions,
   type AuthAccount,
 } from "./src/server/auth";
 import {
@@ -98,9 +102,9 @@ import {
   handleUpload,
   tryServeUpload,
   getUploadInfo,
+  getUploadMicroPreview,
   withUploadFile,
   mimeFromName,
-  isBlockedUpload,
   isValidStoredAvatar,
   uploadOwnedBy,
   signUploadUrl,
@@ -137,6 +141,7 @@ import {
   isVoiceNote,
   messageAttachments,
   parseMediaSize,
+  isGifAttachment,
 } from "./src/lib/files";
 import {
   hasTranscriptionKey,
@@ -144,6 +149,7 @@ import {
   transcribeAudioFile,
 } from "./src/server/transcribe";
 import { parseGiphyMediaUrl } from "./src/lib/giphyMedia";
+import { validMicroPreview } from "./src/lib/microPreview";
 import type { RoomMediaItem } from "./src/lib/types";
 import {
   isDevAccessibleHost,
@@ -342,11 +348,6 @@ async function deleteLiveKitRoom(channelId: string) {
   }
 }
 const publicOrigin = (process.env.PUBLIC_ORIGIN || "").replace(/\/$/, "");
-
-// Opt-in only: set SEED_DEMO=1 to create demo logins for try-out deploys.
-if (process.env.SEED_DEMO === "1") {
-  ensureDemoUsers();
-}
 
 type ReplyPreview = {
   id: string;
@@ -1377,10 +1378,11 @@ async function publicMessage(message: ChatMessage, viewerId?: string, replySourc
   }
   const attachments = messageAttachments(next);
   if (!attachments.length) return next;
-  const signed = attachments.map((file) => ({
+  const signed = await Promise.all(attachments.map(async (file) => ({
     ...file,
+    microPreview: isGifAttachment(file) ? undefined : validMicroPreview(file.microPreview) || await getUploadMicroPreview(file),
     url: signUploadUrl(bareUploadUrl(file.url)),
-  }));
+  })));
   return {
     ...next,
     file: signed[0],
@@ -1688,7 +1690,12 @@ async function collectRoomMedia(
       });
     }
   }
-  return { items, total, hasMore: offset + items.length < total };
+  const enriched = await Promise.all(items.map(async item => ({
+    ...item,
+    file: { ...item.file, microPreview: isGifAttachment(item.file) ? undefined
+      : validMicroPreview(item.file.microPreview) || await getUploadMicroPreview(item.file) },
+  })));
+  return { items: enriched, total, hasMore: offset + items.length < total };
 }
 
 function socketsForUser(userId: string) {
@@ -2078,6 +2085,10 @@ function refreshPresenceName(io: Server, account: AuthAccount) {
 }
 
 app.prepare().then(async () => {
+  // Finish demo password hashing before accepting connections.
+  if (process.env.SEED_DEMO === "1") {
+    await ensureDemoUsers();
+  }
   if (messageStore) {
     await messageStore.connect();
     const rooms = await messageStore.initialize();
@@ -2487,6 +2498,12 @@ app.prepare().then(async () => {
 
   function clientKey(socket: Socket) { return clientAddress(socket.request); }
 
+  async function recordDevice(socket: Socket, token: string) {
+    await recordSessionAccess(token, {
+      ip: clientKey(socket), userAgent: String(socket.request.headers["user-agent"] || ""),
+    });
+  }
+
   const admission = new MessageAdmission();
   setInterval(() => {
     const sample = admission.sample();
@@ -2690,6 +2707,28 @@ app.prepare().then(async () => {
     });
     // people list only after auth — see afterAuth / broadcastPeople
 
+    on("auth:devices", (_payload: unknown, ack?: (result: unknown) => void) => {
+      const account = requireAccount(socket);
+      if (!account) { ack?.({ ok: false, error: "Сначала войдите" }); return; }
+      if (!rateLimit(`devices-list:${account.userId}`, 60, 60_000)) {
+        ack?.({ ok: false, error: "Слишком много запросов. Попробуйте позже" }); return;
+      }
+      ack?.(listDeviceSessions(account.token));
+    });
+
+    on("auth:device-revoke", (payload: { id?: unknown; others?: unknown }, ack?: (result: unknown) => void) => {
+      const account = requireAccount(socket);
+      if (!account) { ack?.({ ok: false, error: "Сначала войдите" }); return; }
+      if (!rateLimit(`devices-revoke:${account.userId}`, 20, 60_000)) {
+        ack?.({ ok: false, error: "Слишком много запросов. Попробуйте позже" }); return;
+      }
+      const result = payload?.others === true
+        ? revokeOtherDeviceSessions(account.token)
+        : revokeDeviceSession(account.token, payload?.id);
+      ack?.(result);
+      if (result.ok) emitToUser(io, account.userId, "auth:devices-changed", {});
+    });
+
     on(
       "auth:register",
       async (
@@ -2706,7 +2745,7 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: "Слишком много попыток, подождите" });
           return;
         }
-        const result = registerUser(
+        const result = await registerUser(
           String(payload?.username || ""),
           String(payload?.password || ""),
           clientKey(socket),
@@ -2716,9 +2755,12 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: result.error });
           return;
         }
+        await recordDevice(socket, result.account.token);
+        if (!restoreSession(result.account.token).ok) { ack?.({ ok: false, error: "Сеанс завершён" }); return; }
         bindSocketAuth(socket.id, result.account.token);
         await afterAuth(io, socket, result.account);
         ack?.({ ok: true, account: publicAccount(result.account) });
+        emitToUser(io, result.account.userId, "auth:devices-changed", {});
       },
     );
 
@@ -2741,7 +2783,7 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: "Слишком много попыток, подождите" });
           return;
         }
-        const result = loginUser(
+        const result = await loginUser(
           String(payload?.username || ""),
           String(payload?.password || ""),
         );
@@ -2749,9 +2791,12 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: result.error });
           return;
         }
+        await recordDevice(socket, result.account.token);
+        if (!restoreSession(result.account.token).ok) { ack?.({ ok: false, error: "Сеанс завершён" }); return; }
         bindSocketAuth(socket.id, result.account.token);
         await afterAuth(io, socket, result.account);
         ack?.({ ok: true, account: publicAccount(result.account) });
+        emitToUser(io, result.account.userId, "auth:devices-changed", {});
       },
     );
 
@@ -2774,6 +2819,8 @@ app.prepare().then(async () => {
           ack?.({ ok: false, error: result.error });
           return;
         }
+        await recordDevice(socket, result.account.token);
+        if (!restoreSession(result.account.token).ok) { ack?.({ ok: false, error: "Сеанс завершён" }); return; }
         bindSocketAuth(socket.id, result.account.token);
         await afterAuth(io, socket, result.account);
         ack?.({ ok: true, account: publicAccount(result.account) });
@@ -2793,6 +2840,7 @@ app.prepare().then(async () => {
       usersBySocket.delete(socket.id);
       unbindSocketAuth(socket.id);
       logoutToken(account?.token);
+      if (account) emitToUser(io, account.userId, "auth:devices-changed", {});
       broadcastPeople(io);
     });
 
@@ -4351,10 +4399,6 @@ app.prepare().then(async () => {
             const safeFileName = String(file?.name || remote.name)
               .replace(/[\u0000-\u001F\u007F]/g, "")
               .slice(0, 120) || remote.name;
-            if (isBlockedUpload(safeFileName, remote.mime)) {
-              ack?.({ ok: false, error: "Этот тип файла запрещён" });
-              return;
-            }
             resolved.push({
               url: remote.url,
               name: safeFileName,
@@ -4404,13 +4448,6 @@ app.prepare().then(async () => {
                       ? "audio/wav"
                       : "audio/webm"
             : fromName;
-          if (
-            isBlockedUpload(safeFileName, serverMime) ||
-            isBlockedUpload(stored.fileName, serverMime)
-          ) {
-            ack?.({ ok: false, error: "Этот тип файла запрещён" });
-            return;
-          }
           if (!uploadOwnedBy(url, account.userId)) {
             ack?.({ ok: false, error: "Файл вам не принадлежит" });
             return;
@@ -4428,7 +4465,13 @@ app.prepare().then(async () => {
           });
         }
 
-        // S3 checks yield to other socket events; recheck access and deduplication.
+        const attachments = await Promise.all(resolved.map(async ({ url, name, size, mime, width, height }) => {
+          const microPreview = await getUploadMicroPreview({ url, name, size, mime });
+          return { url, name, size, mime, ...(width && height ? { width, height } : {}),
+            ...(microPreview ? { microPreview } : {}) };
+        }));
+
+        // Storage/preview work yields to socket events; recheck access and deduplication.
         if (!canAccessChat(chat, account.userId) || getSocketAccount(socket.id)?.userId !== account.userId) {
           ack?.({ ok: false, error: "Нет доступа" });
           return;
@@ -4466,14 +4509,6 @@ app.prepare().then(async () => {
             : isImageAttachment(first) || isVideoAttachment(first)
               ? rawText
               : rawText || first.name;
-
-        const attachments = resolved.map(({ url, name, size, mime, width, height }) => ({
-          url,
-          name,
-          size,
-          mime,
-          ...(width && height ? { width, height } : {}),
-        }));
 
         const saved: ChatMessage = {
           id: randomUUID(),

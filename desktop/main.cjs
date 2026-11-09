@@ -1,3 +1,5 @@
+const startupProfile = require('./startup-profile.cjs');
+startupProfile.mark('main-entry');
 const { app, BrowserWindow, WebContentsView, Menu, ipcMain, shell, session, screen, utilityProcess, nativeTheme } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -12,6 +14,7 @@ const { createUpdates } = require('./updates.cjs');
 const { createUpdateHandoff } = require('./update-handoff.cjs');
 const { createDownloads } = require('./downloads.cjs');
 const { configureDownloadsPanel } = require('./downloads-panel.cjs');
+startupProfile.mark('imports-ready');
 
 app.setName('Maiko');
 // Match Chromium's unpainted surfaces and the Windows resize frame to our UI.
@@ -89,6 +92,7 @@ function trusted(url) { return state.url && isSameOrigin(url, state.url); }
 function finishStartupIntro() {
   if (startupIntroFinished) return;
   startupIntroFinished = true;
+  startupProfile.mark('intro-finished');
   clearTimeout(startupIntroFallback);
   showLoadedSite();
 }
@@ -154,11 +158,13 @@ async function openExternal(url) {
   } catch (error) { log(error.message); }
 }
 function createSite() {
+  startupProfile.mark('site-view-start');
   const view = new WebContentsView({ webPreferences: {
     partition: 'persist:maiko-site', sandbox: true, contextIsolation: true,
     preload: path.join(__dirname, 'site-preload.cjs'),
     nodeIntegration: false, webSecurity: true, backgroundThrottling: false,
   } });
+  startupProfile.mark('site-view-created');
   view.setBackgroundColor('#0c0c0e');
   view.setVisible(false);
   win.contentView.addChildView(view);
@@ -187,6 +193,7 @@ function createSite() {
   const showSite = () => {
     if (contents.isDestroyed() || state.phase === 'error' || !startupIntroFinished || !helpersReady || (waitsForInterface && !interfaceReady) || !trusted(contents.getURL())) return;
     publish({ phase: 'ready', message: state.mode === 'local' ? 'Локальный сервер' : 'Подключено' });
+    startupProfile.mark('site-ready');
     view.setVisible(true);
     contents.focus();
     if (updateHandoff?.incoming) {
@@ -201,6 +208,7 @@ function createSite() {
     if (waitsForInterface) showSite();
   };
   contents.on('dom-ready', () => {
+    startupProfile.mark('site-dom-ready');
     if (!trusted(contents.getURL())) return;
     void Promise.all([
       contents.insertCSS(siteLayoutCSS),
@@ -266,6 +274,7 @@ function createSite() {
   return view;
 }
 async function connect(url) {
+  startupProfile.mark('connect-start');
   const generation = ++loadGeneration;
   site?.setVisible(false);
   publish({ phase: 'loading', message: 'Запускаем Майко…' });
@@ -286,6 +295,7 @@ async function connect(url) {
     publish({ url: target });
     if (!site) { site = createSite(); layout(); }
     const entry = await siteEntryUrl(target);
+    startupProfile.mark('site-entry-resolved');
     if (generation !== loadGeneration || !win || win.isDestroyed()) return;
     await site.webContents.loadURL(entry);
   } catch (error) {
@@ -300,10 +310,9 @@ function saveWindow() {
   fs.writeFileSync(settingsPath(), JSON.stringify({ bounds: win.getNormalBounds(), maximized: win.isMaximized() }, null, 2));
 }
 function createWindow() {
+  startupProfile.mark('window-create-start');
   startupIntroFinished = !!updateHandoff?.incoming;
   clearTimeout(startupIntroFallback);
-  // A missing renderer or failed graphics initialization must not hold the UI.
-  if (!startupIntroFinished) startupIntroFallback = setTimeout(finishStartupIntro, 15_000);
   const saved = readJson(settingsPath());
   win = new BrowserWindow({
     ...visibleBounds(saved.bounds, screen.getAllDisplays()),
@@ -315,6 +324,14 @@ function createWindow() {
     icon: path.join(__dirname, 'assets', 'icon.png'), show: false, autoHideMenuBar: true,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false },
   });
+  startupProfile.mark('window-created');
+  win.webContents.on('dom-ready', () => startupProfile.mark('shell-dom-ready'));
+  win.webContents.on('did-finish-load', () => startupProfile.mark('shell-load'));
+  if (process.env.MAIKO_DESKTOP_PROFILE) {
+    win.webContents.on('console-message', (_event, details) => startupProfile.mark('shell-console', {
+      level: details.level, message: details.message,
+    }));
+  }
   win.setMenu(null);
   // Cover newly exposed pixels while Chromium draws its next frame.
   // The shell and site's native surfaces use the same dark background.
@@ -350,14 +367,22 @@ function createWindow() {
     site = undefined; win = undefined;
   });
   win.once('ready-to-show', () => {
+    startupProfile.mark('window-ready-to-show');
     if (saved.maximized) toggleMaximize();
     layout();
     if (!testing && !updateHandoff?.incoming) win.show();
   });
   const createdWindow = win;
   makeWindowRectangular(createdWindow);
+  startupProfile.mark('window-native-ready');
   void createdWindow.loadURL(uiUrl).then(() => {
     if (createdWindow.isDestroyed()) return;
+    // The watchdog covers model initialization, not native window creation.
+    // A cold GPU/renderer startup can take longer than the entire timeout.
+    if (!startupIntroFinished) startupIntroFallback = setTimeout(() => {
+      startupProfile.mark('intro-watchdog');
+      finishStartupIntro();
+    }, 15_000);
     publish();
     return connect((testing || !app.isPackaged ? process.env.MAIKO_DESKTOP_URL : undefined) || defaults.url);
   }).catch((error) => { if (win && !win.isDestroyed()) log(error.stack || error.message); });
@@ -371,6 +396,7 @@ else {
     win.show(); win.focus();
   });
   app.whenReady().then(() => {
+    startupProfile.mark('app-ready');
     app.setAppUserModelId('io.maiko.desktop');
     Menu.setApplicationMenu(null);
     updateHandoff = createUpdateHandoff({ app, getWindow: () => win, getSite: () => site, log });
@@ -422,6 +448,17 @@ else {
     ipcMain.handle('desktop:startup-model-finished', (event) => {
       requireShell(event);
       finishStartupIntro();
+    });
+    ipcMain.handle('desktop:startup-particle-wasm', (event) => {
+      requireShell(event);
+      return fs.promises.readFile(path.join(__dirname, 'bundled-assets', 'wasm', 'startup-particle-graph.wasm'));
+    });
+    ipcMain.handle('desktop:startup-particle-graph', (event, intro, count) => {
+      requireShell(event);
+      if (!['hiphop', 'samba'].includes(intro) || ![7000, 14000, 40000, 84000].includes(count)) {
+        throw new Error('Invalid startup particle graph');
+      }
+      return fs.promises.readFile(path.join(__dirname, 'bundled-assets', 'particles', `startup-${intro}-${count}.bin`));
     });
     ipcMain.handle('desktop:control', (event, action) => {
       requireShell(event);

@@ -11,6 +11,7 @@ sealed class MaikoAnimation : IDisposable {
     readonly int count, bones, frames, fps, width, height;
     readonly float[] data, palette, pose;
     readonly byte[] pixels;
+    readonly float[] depth;
     readonly double start, pixelRatio;
     public readonly Bitmap Image;
     double previous = -1;
@@ -23,6 +24,7 @@ sealed class MaikoAnimation : IDisposable {
         pixelRatio = Math.Max(1, dpr);
         Image = new Bitmap(width, height, PixelFormat.Format32bppPArgb);
         pixels = new byte[width * height * 4];
+        depth = new float[width * height];
         using (var reader = new BinaryReader(File.OpenRead(file))) {
             if (reader.ReadUInt32() != 0x4e414b4d || reader.ReadUInt32() != 1) throw new InvalidDataException("Invalid Maiko model");
             int total = reader.ReadInt32(); bones = reader.ReadInt32(); frames = reader.ReadInt32(); fps = reader.ReadInt32();
@@ -54,6 +56,7 @@ sealed class MaikoAnimation : IDisposable {
         double time = Math.Max(0, elapsed);
         if (time == previous) return;
         previous = time; Array.Clear(pixels, 0, pixels.Length);
+        for (int i = 0; i < depth.Length; i++) depth[i] = Single.NegativeInfinity;
         double cycle = Math.Max(0, time - 1.1) % 12;
         double frame = Math.Min(frames - 1, (start + (cycle <= 6 ? cycle : 12 - cycle)) * fps);
         int first = (int)frame, second = Math.Min(frames - 1, first + 1);
@@ -78,6 +81,7 @@ sealed class MaikoAnimation : IDisposable {
                 nz += (pose[a + 2] * dx + pose[a + 5] * dy + pose[a + 8] * dz) * weight;
             }
             double rx = x * cos - z * sin; z = x * sin + z * cos; x = rx;
+            y = Math.Max(y, -1.199);
             double front = Math.Max(0, (nx * sin + nz * cos) / Math.Max(.0001, Math.Sqrt(nx * nx + ny * ny + nz * nz)));
             double seed = data[k + 15], entry = Smooth(.14 + seed * .18, .95 + seed * .18, time), scatter = (1 - entry) * (1 - entry);
             if (scatter > 0) {
@@ -90,34 +94,33 @@ sealed class MaikoAnimation : IDisposable {
             double perspective = 4.8 / Math.Max(.1, 4.8 - z);
             double px = width / 2.0 + x * perspective * scale, py = height / 2.0 - y * perspective * scale;
             double alpha = Math.Min(1, ((.05 + Math.Sqrt(front) * 1.28) * data[k + 14] * entry + .18 * (1 - entry)) * fade);
-            if (pixelRatio > 1.1) {
-                // Preserve the particle's CSS size on scaled displays while
-                // rasterizing coverage directly into physical pixels.
-                double half = pixelRatio * .5;
-                double left = px - half, right = px + half, top = py - half, bottom = py + half;
-                for (int sampleY = (int)Math.Floor(top); sampleY < bottom; sampleY++) {
-                    double coverageY = Math.Max(0, Math.Min(sampleY + 1, bottom) - Math.Max(sampleY, top));
-                    for (int sampleX = (int)Math.Floor(left); sampleX < right; sampleX++) {
-                        double coverageX = Math.Max(0, Math.Min(sampleX + 1, right) - Math.Max(sampleX, left));
-                        Put(sampleX, sampleY, (int)(255 * alpha * coverageX * coverageY));
-                    }
+            if (alpha < .025) continue;
+            // Match WebGL's circular point sprites, physical pixel size and
+            // depth test. Square source-over splats let the back of the model
+            // shine through its face and washed out the update animation.
+            double size = (1.3 * (1 - entry) * pixelRatio + Math.Max(1.05 * pixelRatio, scale * .0041) * entry)
+                * (.85 + seed * .3) * perspective;
+            if (seed >= .9) size *= 1 + entry * .35;
+            double half = size * .5;
+            for (int sampleY = (int)Math.Ceiling(py - half - .5); sampleY < py + half - .5; sampleY++) {
+                for (int sampleX = (int)Math.Ceiling(px - half - .5); sampleX < px + half - .5; sampleX++) {
+                    double dx = (sampleX + .5 - px) / size, dy = (sampleY + .5 - py) / size;
+                    double r = Math.Sqrt(dx * dx + dy * dy);
+                    if (r >= .5) continue;
+                    Put(sampleX, sampleY, (int)(255 * alpha * (1 - Smooth(.28, .5, r))), (float)z);
                 }
-                continue;
             }
-            // Subpixel coverage avoids jitter when a particle crosses a pixel.
-            int ix = (int)Math.Floor(px), iy = (int)Math.Floor(py);
-            double fx = px - ix, fy = py - iy, level = 255 * alpha;
-            Put(ix, iy, (int)(level * (1 - fx) * (1 - fy)));
-            Put(ix + 1, iy, (int)(level * fx * (1 - fy)));
-            Put(ix, iy + 1, (int)(level * (1 - fx) * fy));
-            Put(ix + 1, iy + 1, (int)(level * fx * fy));
         }
         var bits = Image.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppPArgb);
         try { Marshal.Copy(pixels, 0, bits.Scan0, pixels.Length); } finally { Image.UnlockBits(bits); }
     }
-    void Put(int x, int y, int level) {
-        if (x < 0 || y < 0 || x >= width || y >= height || level < 1) return;
-        int offset = (y * width + x) * 4;
+    void Put(int x, int y, int level, float z) {
+        if (x < 0 || y < 0 || x >= width || y >= height) return;
+        int pixel = y * width + x;
+        if (z <= depth[pixel]) return;
+        depth[pixel] = z;
+        if (level < 1) return;
+        int offset = pixel * 4;
         // White source-over, matching the WebGL blend instead of burning out
         // facial detail when several particles cover the same pixel.
         byte value = (byte)(pixels[offset] + Math.Min(255, level) * (255 - pixels[offset]) / 255);

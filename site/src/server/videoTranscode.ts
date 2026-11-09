@@ -198,7 +198,9 @@ async function transcodeInPlace(filePath: string, mime?: string): Promise<boolea
     "-pix_fmt",
     "yuv420p",
     "-vf",
-    "scale=720:-2:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1",
+    // Fixed even width and -2 produce H.264-safe dimensions on older ffmpeg
+    // builds too; force_divisible_by is unavailable on the production VPS.
+    "scale=720:-2,setsar=1",
     "-c:a",
     "aac",
     "-b:a",

@@ -10,12 +10,11 @@ import {
 } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { Avatar } from "@/components/chat/Avatar";
-import dynamic from "next/dynamic";
+import { ChatImage } from "@/components/chat/ChatImage";
+import { VideoPreview } from "@/components/chat/VideoPreview";
+import { deferredFeature, FeatureGate } from "./DeferredFeature";
 
-const AvatarCropDialog = dynamic(
-  () => import("@/components/chat/AvatarCropDialog").then((mod) => mod.AvatarCropDialog),
-  { ssr: false }
-);
+const AvatarCropDialog = deferredFeature(() => import("./AvatarCropDialog").then(module => module.AvatarCropDialog));
 import {
   IconAttach,
   IconCamera,
@@ -27,7 +26,7 @@ import {
   IconTrash,
   IconUsers,
 } from "@/lib/icons";
-import { formatBytes, signedMediaSrc, validateAvatarFile, downloadHref, displayFileName } from "@/lib/files";
+import { formatBytes, signedMediaSrc, validateAvatarFile, downloadHref, displayFileName, isGifAttachment } from "@/lib/files";
 import { easeOutSoft, sheetSpring } from "@/lib/motion";
 import type {
   ChatInfo,
@@ -510,18 +509,17 @@ export function ChatInfoPanel({
                       { }
                       {item.kind === "video" ? (
                         <span className="chat-info__video-thumb">
-                          <video
+                          <VideoPreview
                             src={src}
-                            muted
-                            playsInline
-                            preload="metadata"
+                            microPreview={item.file.microPreview}
                           />
                           <i>
                             <IconPlay size={18} />
                           </i>
                         </span>
                       ) : (
-                        <img src={src} alt="" loading="lazy" decoding="async" />
+                        <ChatImage src={src} microPreview={isGifAttachment(item.file) ? undefined : item.file.microPreview}
+                          resolveMicroPreview={!isGifAttachment(item.file)} alt="" />
                       )}
                     </button>
                     );
@@ -612,14 +610,14 @@ export function ChatInfoPanel({
           </motion.div>
         </div>
       )}
-      <AvatarCropDialog
+      <FeatureGate active={Boolean(cropFile)}><AvatarCropDialog
         open={Boolean(cropFile)}
         file={cropFile}
         onCancel={() => setCropFile(null)}
         onComplete={(file) => {
           void uploadCroppedAvatar(file);
         }}
-      />
+      /></FeatureGate>
     </AnimatePresence>
   );
 }

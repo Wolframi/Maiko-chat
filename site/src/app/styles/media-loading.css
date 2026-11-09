@@ -1,0 +1,51 @@
+.media-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  container-type: size;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.media-loading__ring {
+  position: relative;
+  width: min(48px, 65cqw, 65cqh);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  color: #fff;
+  background: rgba(0, 0, 0, .3);
+  box-shadow: 0 1px 8px rgba(0, 0, 0, .12);
+}
+
+.media-loading__ring svg { display: block; width: 100%; height: 100%; }
+.media-loading__ring--indeterminate svg { animation: media-loading-spin 1s linear infinite; }
+/* Byte progress is already updated per frame; interpolation makes the ring lag. */
+.media-loading__arc { transform-origin: center; transform: rotate(-90deg); transition: none; }
+
+.media-loading__sticker {
+  position: absolute;
+  inset: 16%;
+  border-radius: 25% 25% 30% 25%;
+  clip-path: polygon(0 0, 100% 0, 100% 72%, 72% 100%, 0 100%);
+  background: linear-gradient(110deg, rgba(150, 164, 181, .13) 15%, rgba(185, 198, 215, .32) 45%, rgba(150, 164, 181, .13) 75%);
+  background-size: 230% 100%;
+  animation: media-loading-shimmer 1.4s ease-in-out infinite;
+}
+
+.media-loading--sticker .media-loading__ring { background: rgba(39, 47, 59, .42); }
+.sticker-picker__pack { position: relative; }
+.bubble__media-frame:has(.media-loading) > .bubble__video-play,
+.bubble__album-cell:has(.media-loading) > .bubble__video-play,
+.chat-info__video-thumb:has(.media-loading) > i { opacity: 0; }
+
+@keyframes media-loading-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@keyframes media-loading-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .media-loading__sticker { animation: none; }
+  .media-loading__ring--indeterminate svg { animation: none; }
+  .media-loading__arc { transition: none; }
+}

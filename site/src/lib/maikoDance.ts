@@ -1,5 +1,7 @@
-import { MaikoParticleMotion, MaikoHover, maikoHoverWave, maikoCursorRepulsion, prepareMaikoParticleGraph, type MaikoParticleGraph, MAIKO_PARTICLE_ROAM_THRESHOLD, MAIKO_CURSOR_FALLOFF, MAIKO_CURSOR_STRENGTH, MAIKO_CURSOR_PULSE, MAIKO_CURSOR_SWIRL } from "./maikoParticleMotion";
+import { MaikoParticleMotion, MaikoHover, maikoHoverWave, maikoCursorRepulsion, type MaikoParticleGraph, MAIKO_PARTICLE_ROAM_THRESHOLD, MAIKO_CURSOR_FALLOFF, MAIKO_CURSOR_STRENGTH, MAIKO_CURSOR_PULSE, MAIKO_CURSOR_SWIRL } from "./maikoParticleMotion";
 import {createMaikoParticleGpu} from "./maikoParticleGpu";
+import { prepareMaikoParticleGraphAccelerated } from "./maikoParticleWasm";
+import { loadMaikoParticleGraph, type MaikoParticleGraphSource } from "./maikoParticleGraph";
 
 export { chooseMaikoIntro, maikoIntroAsset, maikoIntroDuration, type MaikoIntro } from "./maikoIntro";
 export const MAIKO_GROUND_Y = -1.2;
@@ -38,10 +40,10 @@ export function decodeMaikoDance(buffer: ArrayBuffer, limit = 84000) {
 }
 export type MaikoDance = ReturnType<typeof decodeMaikoDance>;
 type PreparedMaikoDance = { dance:MaikoDance; graph:MaikoParticleGraph };
-export async function prepareMaikoDance(buffer:ArrayBuffer,limit:number,signal?:AbortSignal):Promise<PreparedMaikoDance> {
+export async function prepareMaikoDance(buffer:ArrayBuffer,limit:number,signal?:AbortSignal,source?:MaikoParticleGraphSource):Promise<PreparedMaikoDance> {
   signal?.throwIfAborted();
   const dance=decodeMaikoDance(buffer,limit);
-  const graph=await prepareMaikoParticleGraph(dance.data,dance.count,signal);
+  const graph=await loadMaikoParticleGraph(buffer,dance.count,signal,source) ?? await prepareMaikoParticleGraphAccelerated(dance.data,dance.count,signal);
   signal?.throwIfAborted();
   return {dance,graph};
 }

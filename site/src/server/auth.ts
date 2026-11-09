@@ -1,7 +1,8 @@
 import {
+  createHash,
   randomBytes,
   randomUUID,
-  scryptSync,
+  scrypt,
   timingSafeEqual,
 } from "node:crypto";
 import {
@@ -17,6 +18,8 @@ import type { SavedRingtone } from "../lib/ringtoneSettings";
 import { allowRegistration } from "./requestSecurity";
 import { nicknameValue, validateNickname } from "../lib/username";
 import { initializeRegistrationInvites, registrationInviter, registrationPolicy } from "./registrationInvites";
+import type { DeviceSessionsResult } from "../lib/deviceSessions";
+import { locateSession, sessionDevice, sessionIp, type SessionContext } from "./sessionDetails";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const MIN_PASSWORD = 8;
@@ -64,6 +67,10 @@ const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json");
 type StoredSession = {
   userId: string;
   issuedAt: number;
+  lastSeenAt?: number;
+  ip?: string;
+  userAgent?: string;
+  location?: string | null;
 };
 
 const usersByName = new Map<string, StoredUser>();
@@ -207,6 +214,10 @@ function loadSessions() {
       token?: string;
       userId?: string;
       issuedAt?: number;
+      lastSeenAt?: number;
+      ip?: string;
+      userAgent?: string;
+      location?: string | null;
     }[];
     for (const row of raw) {
       const token = String(row.token || "");
@@ -218,6 +229,10 @@ function loadSessions() {
       sessionsByToken.set(token, {
         userId: user.id,
         issuedAt: row.issuedAt || Date.now(),
+        lastSeenAt: row.lastSeenAt,
+        ip: typeof row.ip === "string" ? sessionIp(row.ip) : undefined,
+        userAgent: typeof row.userAgent === "string" ? row.userAgent.slice(0, 1024) : undefined,
+        location: typeof row.location === "string" ? row.location.slice(0, 320) : undefined,
       });
     }
   } catch {
@@ -271,15 +286,24 @@ function normalizeBio(input: string) {
     .slice(0, 120);
 }
 
-function hashPassword(password: string, salt = randomBytes(16).toString("hex")) {
-  const hash = scryptSync(password, salt, 64).toString("hex");
+function derivePasswordKey(password: string, salt: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scrypt(password, salt, 64, (error, key) => {
+      if (error) reject(error);
+      else resolve(key);
+    });
+  });
+}
+
+async function hashPassword(password: string, salt = randomBytes(16).toString("hex")) {
+  const hash = (await derivePasswordKey(password, salt)).toString("hex");
   return `${salt}:${hash}`;
 }
 
-function verifyPassword(password: string, stored: string) {
+async function verifyPassword(password: string, stored: string) {
   const [salt, hash] = stored.split(":");
   if (!salt || !hash) return false;
-  const next = scryptSync(password, salt, 64);
+  const next = await derivePasswordKey(password, salt);
   const prev = Buffer.from(hash, "hex");
   if (prev.length !== next.length) return false;
   return timingSafeEqual(prev, next);
@@ -330,11 +354,8 @@ function validatePassword(password: string) {
   return null;
 }
 
-/** Fixed dummy hash so missing-user logins still spend scrypt time. */
-const LOGIN_DUMMY_HASH = hashPassword(
-  "pulse-timing-pad",
-  "0123456789abcdef0123456789abcdef",
-);
+/** Precomputed for "pulse-timing-pad" so imports do not run scrypt. */
+const LOGIN_DUMMY_HASH = "0123456789abcdef0123456789abcdef:58477333fd8923d094d7821847edd4f1cc0c980195a964ac280ed0f97f33e8ad7324e3a15ae683c9262de3a8e69ca7642881debf3aaa601cc87397c410d8b175";
 
 function isPlausibleAvatarUrl(url: string) {
   const bare = String(url || "").split("?")[0].split("#")[0];
@@ -348,7 +369,7 @@ function isPlausibleAvatarUrl(url: string) {
   );
 }
 
-export function registerUser(usernameRaw: string, passwordRaw: string, clientIp?: string, invitationCode?: unknown): AuthResult {
+export async function registerUser(usernameRaw: string, passwordRaw: string, clientIp?: string, invitationCode?: unknown): Promise<AuthResult> {
   const invalid = authCredentialsError(usernameRaw, passwordRaw);
   if (invalid) return { ok: false, error: invalid };
   const username = normalizeUsername(usernameRaw);
@@ -360,7 +381,16 @@ export function registerUser(usernameRaw: string, passwordRaw: string, clientIp?
   if (usersByName.has(username.toLowerCase())) {
     return { ok: false, error: "Такой логин уже занят" };
   }
-  const inviter = registrationInviter(invitationCode, [...usersByName.values()]);
+  let inviter = registrationInviter(invitationCode, [...usersByName.values()]);
+  if (registrationPolicy().required && !inviter) {
+    return { ok: false, error: "Код приглашения недействителен или устарел. Попросите новый код у участника Майко" };
+  }
+  const passwordHash = await hashPassword(password);
+  // Other registrations and profile edits can take this name while scrypt runs.
+  if (usersByName.has(username.toLowerCase())) {
+    return { ok: false, error: "Такой логин уже занят" };
+  }
+  inviter = registrationInviter(invitationCode, [...usersByName.values()]);
   if (registrationPolicy().required && !inviter) {
     return { ok: false, error: "Код приглашения недействителен или устарел. Попросите новый код у участника Майко" };
   }
@@ -373,7 +403,7 @@ export function registerUser(usernameRaw: string, passwordRaw: string, clientIp?
     id: randomUUID(),
     username,
     displayName: username,
-    passwordHash: hashPassword(password),
+    passwordHash,
     createdAt: Date.now(),
     bio: "",
     invitedBy: inviter?.id,
@@ -384,7 +414,7 @@ export function registerUser(usernameRaw: string, passwordRaw: string, clientIp?
 }
 
 /** Creates demo accounts if missing (for local/demo deploys). */
-export function ensureDemoUsers() {
+export async function ensureDemoUsers() {
   const demos: {
     username: string;
     password: string;
@@ -422,8 +452,8 @@ export function ensureDemoUsers() {
     const existing = usersByName.get(demo.username.toLowerCase());
     if (existing) {
       // Keep demo passwords predictable for shared try-out links.
-      if (!verifyPassword(demo.password, existing.passwordHash)) {
-        existing.passwordHash = hashPassword(demo.password);
+      if (!(await verifyPassword(demo.password, existing.passwordHash))) {
+        existing.passwordHash = await hashPassword(demo.password);
         existing.displayName = demo.displayName;
         existing.bio = demo.bio;
         changed = true;
@@ -434,7 +464,7 @@ export function ensureDemoUsers() {
       id: randomUUID(),
       username: demo.username,
       displayName: demo.displayName,
-      passwordHash: hashPassword(demo.password),
+      passwordHash: await hashPassword(demo.password),
       createdAt: Date.now(),
       bio: demo.bio,
     };
@@ -449,16 +479,16 @@ export function ensureDemoUsers() {
   }));
 }
 
-export function loginUser(usernameRaw: string, passwordRaw: string): AuthResult {
+export async function loginUser(usernameRaw: string, passwordRaw: string): Promise<AuthResult> {
   if (authCredentialsError(usernameRaw, passwordRaw)) return { ok: false, error: "Неверный логин или пароль" };
   const username = normalizeUsername(usernameRaw);
   const password = String(passwordRaw || "");
   const user = usersByName.get(username.toLowerCase());
   if (!user) {
-    verifyPassword(password, LOGIN_DUMMY_HASH);
+    await verifyPassword(password, LOGIN_DUMMY_HASH);
     return { ok: false, error: "Неверный логин или пароль" };
   }
-  if (!verifyPassword(password, user.passwordHash)) {
+  if (!(await verifyPassword(password, user.passwordHash))) {
     return { ok: false, error: "Неверный логин или пароль" };
   }
   return { ok: true, account: issueSession(user) };
@@ -481,7 +511,80 @@ export function restoreSession(token?: string): AuthResult {
     saveSessions();
     return { ok: false, error: "Сессия устарела" };
   }
+  // Persist activity at most once a minute per session, including socket actions.
+  if (!session.lastSeenAt || Date.now() - session.lastSeenAt >= 60_000) {
+    session.lastSeenAt = Date.now();
+    saveSessions();
+  }
   return { ok: true, account: toAccount(user, token) };
+}
+
+/** Capture the place of login once; reconnects must not rewrite login history. */
+export async function recordSessionAccess(token: string, context: SessionContext) {
+  const session = sessionsByToken.get(token);
+  if (!session || isSessionExpired(session.issuedAt)) return;
+  const ip = sessionIp(context.ip);
+  const changed = !session.ip || !session.userAgent;
+  if (!session.ip) session.ip = ip;
+  if (!session.userAgent) session.userAgent = context.userAgent.slice(0, 1024);
+  session.lastSeenAt = Date.now();
+  if (changed) saveSessions();
+  if (session.location !== undefined || !session.ip) return;
+  const location = await locateSession(session.ip);
+  // A remote logout while the lookup was running must never revive a session.
+  if (sessionsByToken.get(token) !== session) return;
+  session.location = location;
+  saveSessions();
+}
+
+function sessionId(token: string) {
+  // Opaque management ID: never expose another device's bearer token.
+  return createHash("sha256").update(`device-session:${token}`).digest("hex");
+}
+
+export function listDeviceSessions(token: string): DeviceSessionsResult {
+  const restored = restoreSession(token);
+  if (!restored.ok) return restored;
+  const sessions = [];
+  for (const [otherToken, session] of sessionsByToken) {
+    if (session.userId !== restored.account.userId || isSessionExpired(session.issuedAt)) continue;
+    sessions.push({
+      id: sessionId(otherToken), current: otherToken === token,
+      ...sessionDevice(session.userAgent), ip: session.ip || null,
+      location: session.location || null, issuedAt: session.issuedAt,
+      lastSeenAt: session.lastSeenAt || session.issuedAt,
+    });
+  }
+  sessions.sort((a, b) => Number(b.current) - Number(a.current) || b.lastSeenAt - a.lastSeenAt);
+  return { ok: true, sessions };
+}
+
+export function revokeDeviceSession(token: string, id: unknown): DeviceSessionsResult {
+  const restored = restoreSession(token);
+  if (!restored.ok) return restored;
+  if (typeof id !== "string" || !/^[a-f0-9]{64}$/.test(id)) return { ok: false, error: "Некорректное устройство" };
+  const found = [...sessionsByToken].find(([otherToken, session]) =>
+    session.userId === restored.account.userId && sessionId(otherToken) === id);
+  if (!found) return { ok: false, error: "Сеанс уже завершён или недоступен" };
+  if (found[0] === token) return { ok: false, error: "Для этого устройства используйте кнопку «Выйти» в профиле" };
+  // Save before disconnecting clients. On a disk failure the token stays valid.
+  sessionsByToken.delete(found[0]);
+  try { saveSessions(); }
+  catch (error) { sessionsByToken.set(...found); throw error; }
+  sessionRevokeHandler?.({ userId: found[1].userId, revokedToken: found[0] });
+  return listDeviceSessions(token);
+}
+
+export function revokeOtherDeviceSessions(token: string): DeviceSessionsResult {
+  const restored = restoreSession(token);
+  if (!restored.ok) return restored;
+  const removed = [...sessionsByToken].filter(([otherToken, session]) =>
+    otherToken !== token && session.userId === restored.account.userId);
+  for (const [otherToken] of removed) sessionsByToken.delete(otherToken);
+  try { saveSessions(); }
+  catch (error) { for (const row of removed) sessionsByToken.set(...row); throw error; }
+  for (const [revokedToken, session] of removed) sessionRevokeHandler?.({ userId: session.userId, revokedToken });
+  return listDeviceSessions(token);
 }
 
 export function updateProfile(

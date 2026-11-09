@@ -28,6 +28,9 @@ import { isDevAccessibleHost } from "../lib/devHosts";
 import { restoreSession } from "./auth";
 import { rateLimit } from "./rateLimit";
 import { createMediaPreviewService, previewWithin } from "./mediaPreview";
+import { microPreviewWithin } from "./mediaMicroPreview";
+import { isGifAttachment, isMediaAttachment } from "../lib/files";
+import type { FileAttachment } from "../lib/types";
 import { audioWaveform } from "./audioWaveform";
 import { downloadName, downloadDisposition } from "./downloadName";
 import {
@@ -59,41 +62,6 @@ const previews = createMediaPreviewService(THUMB_DIR);
 const MAX_SIZE = 500 * 1024 * 1024;
 const AVATAR_MAX_SIZE = 2 * 1024 * 1024;
 const DEV = process.env.NODE_ENV !== "production";
-
-const BLOCKED_EXT = new Set([
-  ".svg",
-  ".svgz",
-  ".html",
-  ".htm",
-  ".xhtml",
-  ".xml",
-  ".js",
-  ".mjs",
-  ".cjs",
-  ".php",
-  ".phtml",
-  ".asp",
-  ".aspx",
-  ".jsp",
-  ".cgi",
-  ".exe",
-  ".bat",
-  ".cmd",
-  ".ps1",
-  ".sh",
-  ".wasm",
-]);
-
-const BLOCKED_MIME = new Set([
-  "image/svg+xml",
-  "text/html",
-  "application/xhtml+xml",
-  "text/xml",
-  "application/xml",
-  "application/javascript",
-  "text/javascript",
-  "application/x-javascript",
-]);
 
 const AVATAR_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const AVATAR_MIME = new Set([
@@ -259,34 +227,8 @@ function safeName(name: string) {
 function ensureMediaExtension(fileName: string, mime: string) {
   const safe = safeName(fileName || "file");
   const ext = path.extname(safe).toLowerCase();
-  const known = new Set([
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".jfif",
-    ".gif",
-    ".webp",
-    ".bmp",
-    ".avif",
-    ".heic",
-    ".heif",
-    ".mp4",
-    ".webm",
-    ".mov",
-    ".m4v",
-    ".mp3",
-    ".wav",
-    ".ogg",
-    ".opus",
-    ".m4a",
-    ".aac",
-    ".flac",
-    ".weba",
-    ".pdf",
-    ".txt",
-    ".zip",
-  ]);
-  if (known.has(ext)) return safe;
+  // A supplied extension belongs to the file; MIME hints must not replace it.
+  if (ext) return safe;
   const normalized = String(mime || "")
     .split(";")[0]
     .trim()
@@ -334,6 +276,8 @@ export function mimeFromName(fileName: string) {
     ".heif": "image/heif",
     ".mp4": "video/mp4",
     ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".m4v": "video/mp4",
     ".mp3": "audio/mpeg",
     ".wav": "audio/wav",
     ".ogg": "audio/ogg",
@@ -345,6 +289,35 @@ export function mimeFromName(fileName: string) {
     ".pdf": "application/pdf",
     ".txt": "text/plain",
     ".zip": "application/zip",
+    ".7z": "application/x-7z-compressed",
+    ".rar": "application/vnd.rar",
+    ".tar": "application/x-tar",
+    ".gz": "application/gzip",
+    ".bz2": "application/x-bzip2",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".odt": "application/vnd.oasis.opendocument.text",
+    ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+    ".odp": "application/vnd.oasis.opendocument.presentation",
+    ".rtf": "application/rtf",
+    ".csv": "text/csv",
+    ".tsv": "text/tab-separated-values",
+    ".md": "text/markdown",
+    ".log": "text/plain",
+    ".json": "application/json",
+    ".xml": "application/xml",
+    ".svg": "image/svg+xml",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".wasm": "application/wasm",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
   };
   return map[ext] || "application/octet-stream";
 }
@@ -392,19 +365,9 @@ function resolveUploadMime(fileName: string, rawMime: string) {
   if (ext === ".webm" && mime.startsWith("video/")) return "video/webm";
   if (ext === ".webm" && mime.startsWith("audio/")) return mime;
 
-  return mime || mimeFromName(fileName);
-}
-
-export function isBlockedUpload(fileName: string, mime?: string) {
-  const ext = path.extname(fileName).toLowerCase();
-  if (BLOCKED_EXT.has(ext)) return true;
-  const normalized = String(mime || "")
-    .split(";")[0]
-    .trim()
-    .toLowerCase();
-  if (normalized && BLOCKED_MIME.has(normalized)) return true;
-  if (normalized.startsWith("image/svg")) return true;
-  return false;
+  return !mime || mime === "application/octet-stream" || mime === "binary/octet-stream"
+    ? mimeFromName(fileName)
+    : mime;
 }
 
 function isAllowedAvatar(fileName: string, mime: string) {
@@ -859,7 +822,21 @@ async function serveUpload(req: IncomingMessage, res: ServerResponse) {
     mime = "video/webm";
   }
 
-  const forceAttach = download || !INLINE_MEDIA_EXT.has(ext);
+  const forceAttach = download || !INLINE_MEDIA_EXT.has(ext) || (INLINE_IMAGE_EXT.has(ext) && !looksImage);
+  if (!download && parsed.searchParams.get("microPreview") === "1") {
+    const file = { url: bare, name: fileName, size, mime };
+    if (!isMediaAttachment(file) || isGifAttachment(file)) {
+      res.writeHead(204, { "Cache-Control": "private, no-store" }); res.end(); return;
+    }
+    const hash = await getUploadMicroPreview(file);
+    if (res.destroyed) return;
+    const body = JSON.stringify(hash ? { microPreview: hash } : {});
+    res.writeHead(hash ? 200 : 202, { "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+      ...(!hash ? { "Retry-After": "1" } : {}), "Content-Length": Buffer.byteLength(body) });
+    res.end(req.method === "HEAD" ? undefined : body);
+    return;
+  }
   const suggestedName = download ? downloadName(parsed.searchParams.get("name") || "", original) : original;
   const disposition = downloadDisposition(suggestedName, forceAttach);
 
@@ -895,7 +872,7 @@ async function serveUpload(req: IncomingMessage, res: ServerResponse) {
   const cacheControl = "private, no-store";
 
   const baseHeaders: Record<string, string | number> = {
-    "Content-Type": mime,
+    "Content-Type": forceAttach ? "application/octet-stream" : mime,
     "Cache-Control": cacheControl,
     ETag: etag,
     "Last-Modified": info.mtime.toUTCString(),
@@ -903,6 +880,7 @@ async function serveUpload(req: IncomingMessage, res: ServerResponse) {
     "Accept-Ranges": "bytes",
     "X-Permitted-Cross-Domain-Policies": "none",
     "Content-Disposition": disposition,
+    ...(forceAttach ? { "Content-Security-Policy": "sandbox; default-src 'none'" } : {}),
   };
 
   const ifNoneMatch = String(req.headers["if-none-match"] || "");
@@ -968,6 +946,21 @@ function uploadPreview(info: UploadInfo, width = 430, localSource?: string) {
       ? processingObjectUrl(`uploads/${info.fileName}`)
       : Promise.resolve(path.join(UPLOAD_DIR, info.fileName)),
   });
+}
+
+/** Called only after message access/upload ownership has been checked. */
+export async function getUploadMicroPreview(file: FileAttachment): Promise<string | undefined> {
+  if (!file.url.startsWith("/uploads/") || !isMediaAttachment(file) || isGifAttachment(file)) return;
+  try {
+    return await microPreviewWithin((async () => {
+      const info = await getUploadInfo(file.url);
+      if (!info) return;
+      return previews.microPreview({ name: info.fileName, version: info.etag, width: 430,
+        source: () => s3Enabled ? processingObjectUrl(`uploads/${info.fileName}`)
+          : Promise.resolve(path.join(UPLOAD_DIR, info.fileName)),
+      });
+    })().catch(() => undefined));
+  } catch { return undefined; }
 }
 
 async function warmUploadPreview(fileName: string, mime: string, localSource?: string) {
@@ -1107,10 +1100,6 @@ export function handleUpload(req: IncomingMessage, res: ServerResponse) {
         file.resume();
         return;
       }
-    } else if (isBlockedUpload(original, mime)) {
-      invalidType = true;
-      file.resume();
-      return;
     }
 
     const id = randomUUID();
@@ -1150,8 +1139,7 @@ export function handleUpload(req: IncomingMessage, res: ServerResponse) {
             return;
           }
           if (
-            (isAvatar ||
-              INLINE_IMAGE_EXT.has(path.extname(original).toLowerCase())) &&
+            (isAvatar || INLINE_IMAGE_EXT.has(path.extname(original).toLowerCase())) &&
             !looksLikeImage(full)
           ) {
             badMagic = true;
@@ -1440,10 +1428,6 @@ async function handleDirectUpload(
       return;
     }
     const original = ensureMediaExtension(rawName || "file", rawMime);
-    if (isBlockedUpload(original, rawMime)) {
-      sendJson(res, 400, { ok: false, error: "Этот тип файла запрещён" });
-      return;
-    }
     let pending = 0;
     for (const upload of directUploads.values()) if (upload.userId === userId) pending += 1;
     if (pending >= DIRECT_MAX_PENDING_PER_USER) {
@@ -1555,7 +1539,7 @@ async function handleDirectUpload(
   } catch (error) {
     console.error("[upload] direct complete failed", (error as Error).name);
     await discardDirectUpload(upload);
-    sendJson(res, 400, { ok: false, error: "Не удалось сохранить файл" });
+    sendJson(res, 503, { ok: false, error: "Не удалось сохранить файл" });
     return;
   }
 

@@ -3,16 +3,14 @@
 import { useState, useEffect, useCallback, useRef, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "motion/react";
-import dynamic from "next/dynamic";
 import { IconKeyboard, IconSmile } from "@/lib/icons";
-import { GifPicker } from "@/components/chat/GifPicker";
-import { StickerPicker } from "@/components/chat/StickerPicker";
+import { deferredFeature } from "./DeferredFeature";
 import type { StickerPack } from "@/lib/types";
 
-const EmojiPanel = dynamic(
-  () => import("@/components/chat/EmojiPanel").then((mod) => mod.EmojiPanel),
-  { ssr: false }
-);
+const GifPicker = deferredFeature(() => import("./GifPicker").then(module => module.GifPicker));
+const StickerPicker = deferredFeature(() => import("./StickerPicker").then(module => module.StickerPicker));
+
+const EmojiPanel = deferredFeature(() => import("./EmojiPanel").then(module => module.EmojiPanel));
 
 type PickerTab = "emoji" | "stickers" | "gif";
 

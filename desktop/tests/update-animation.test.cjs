@@ -20,6 +20,6 @@ test('native update animation stays visible and moving beyond the first clip at 
     `/out:${executable}`, path.join(__dirname, 'fixtures/update-animation.cs'), path.join(__dirname, '../native/maiko-animation.cs')], { windowsHide: true });
   const output = path.join(__dirname, '../test-output');
   await fs.mkdir(output, { recursive: true });
-  const result = await run(executable, [path.join(__dirname, '../../site/public/models'), output], { windowsHide: true, timeout: 30000 });
+  const result = await run(executable, [path.join(__dirname, '../../site/public/models'), output, directory], { windowsHide: true, timeout: 30000 });
   t.diagnostic(result.stdout.trim());
 });

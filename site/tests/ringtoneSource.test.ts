@@ -19,6 +19,7 @@ test("trimming requires a session and returns the full source instead of the pre
   const authPath = fileURLToPath(new URL("../src/server/auth.ts", import.meta.url));
   const handlerPath = fileURLToPath(new URL("../src/server/ringtones.ts", import.meta.url));
   execFileSync(process.execPath, ["--require", loader, "-e", `
+    (async () => {
     process.env.MEDIA_STORAGE = 'local';
     const assert = require('node:assert/strict');
     const fs = require('node:fs');
@@ -27,7 +28,7 @@ test("trimming requires a session and returns the full source instead of the pre
     fs.mkdirSync('data', { recursive: true });
     if (!fs.existsSync('data/registration-invites.json')) fs.writeFileSync('data/registration-invites.json', JSON.stringify({ required: false, adminUserId: null, secret: 'a'.repeat(64) }));
     const auth = require(${JSON.stringify(authPath)});
-    const account = auth.registerUser('source-user', 'Password123!').account;
+    const account = (await auth.registerUser('source-user', 'Password123!')).account;
     const remote = 'https://www.youtube.com/watch?v=I48Yz36NoC8';
     const key = createHash('sha1').update(remote).digest('hex');
     const original = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypM4A '), Buffer.alloc(100)]);
@@ -38,7 +39,6 @@ test("trimming requires a session and returns the full source instead of the pre
     fs.writeFileSync('data/ringtones/audio/' + key + '.hook-v4.mp3', currentClip);
     const { handleRingtones } = require(${JSON.stringify(handlerPath)});
     const server = createServer((req, res) => { void handleRingtones(req, res); });
-    (async () => {
       await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
       const base = 'http://127.0.0.1:' + server.address().port + '/api/ringtones/source?u=';
       const headers = { 'x-pulse-token': account.token };

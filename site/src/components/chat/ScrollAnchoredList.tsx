@@ -4,7 +4,7 @@ import { Component, forwardRef, type Ref } from "react";
 import type { ListProps } from "react-virtuoso";
 
 type Props = ListProps & { context?: { preserveScroll: boolean; anchorKey: string; scrollRevision: { current: number } }; listRef: Ref<HTMLDivElement> };
-type Anchor = { id: string; top: number; contentTop: number; scrollTop: number; scroller: HTMLElement; revision: number } | null;
+type Anchor = { id: string; top: number; scrollTop: number; scroller: HTMLElement; revision: number } | null;
 
 // A prepend can also change the day separator and measurements of nearby rows.
 // Take the anchor immediately before each DOM commit, including any user input
@@ -12,26 +12,87 @@ type Anchor = { id: string; top: number; contentTop: number; scrollTop: number; 
 class AnchoredList extends Component<Props> {
   private element: HTMLDivElement | null = null;
   private pendingAnchor: Anchor = null;
-  private heldAnchor: Anchor = null;
+  private pageAnchor: Anchor = null;
+  private settleFrame = 0;
+  private layoutScroll = 0;
+  private restoreScrollBy: (() => void) | null = null;
   private bindElement = (element: HTMLDivElement | null) => {
+    this.restoreScrollBy?.();
+    this.restoreScrollBy = null;
     this.element = element;
+    const scroller = element?.closest<HTMLElement>(".room__messages");
+    if (scroller) {
+      // Virtuoso applies its measured-height compensation through scrollBy.
+      // Track those writes separately from wheel/touch momentum; both cause
+      // trusted scroll events, so an onScroll handler cannot distinguish them.
+      const ownScrollBy = Object.getOwnPropertyDescriptor(scroller, "scrollBy");
+      const scrollBy = scroller.scrollBy;
+      const trackedScrollBy = (...args: unknown[]) => {
+        const before = scroller.scrollTop;
+        Reflect.apply(scrollBy, scroller, args);
+        this.layoutScroll += scroller.scrollTop - before;
+      };
+      scroller.scrollBy = trackedScrollBy;
+      this.restoreScrollBy = () => {
+        if (scroller.scrollBy !== trackedScrollBy) return;
+        if (ownScrollBy) Object.defineProperty(scroller, "scrollBy", ownScrollBy);
+        else delete (scroller as Partial<HTMLElement>).scrollBy;
+      };
+    }
     const { listRef } = this.props;
     if (typeof listRef === "function") listRef(element);
     else if (listRef) listRef.current = element;
   };
 
+  componentWillUnmount() {
+    cancelAnimationFrame(this.settleFrame);
+    this.restoreScrollBy?.();
+  }
+
   getSnapshotBeforeUpdate(previous: Props): Anchor {
     const context = this.props.context;
-    if (!context?.preserveScroll) { this.heldAnchor = null; return null; }
-    if (previous.context?.anchorKey !== context.anchorKey || this.heldAnchor?.revision !== context.scrollRevision.current) this.heldAnchor = null;
-    if (this.heldAnchor) return this.heldAnchor;
+    if (!context?.preserveScroll) { this.pageAnchor = null; return null; }
+    const newPage = previous.context?.anchorKey !== context.anchorKey;
+    if (newPage) {
+      this.pageAnchor = null;
+      cancelAnimationFrame(this.settleFrame);
+      // Virtuoso commits the prepend and its measurements separately. Hold
+      // only this short transaction, never the subsequent reading position.
+      let previousSize = "";
+      let stableFrames = 0;
+      let frames = 0;
+      const settle = () => {
+        if (!this.pageAnchor || !this.element) return;
+        const size = `${this.element.offsetHeight}:${this.element.style.cssText}`;
+        stableFrames = size === previousSize ? stableFrames + 1 : 0;
+        previousSize = size;
+        if (stableFrames >= 3 || ++frames >= 30) { this.pageAnchor = null; return; }
+        this.settleFrame = requestAnimationFrame(settle);
+      };
+      this.settleFrame = requestAnimationFrame(settle);
+    }
+    if (this.pageAnchor) {
+      const anchor = this.pageAnchor;
+      // Momentum has no new input event. Advance the retained screen position
+      // by the native movement before this commit changes the row geometry.
+      anchor.top -= anchor.scroller.scrollTop - anchor.scrollTop - this.layoutScroll;
+      anchor.scrollTop = anchor.scroller.scrollTop;
+      anchor.revision = context.scrollRevision.current;
+      this.layoutScroll = 0;
+      return anchor;
+    }
     const scroller = this.element?.closest<HTMLElement>(".room__messages");
     if (!scroller) return null;
     const bounds = scroller.getBoundingClientRect();
     for (const row of this.element!.querySelectorAll<HTMLElement>("[id^='msg-']")) {
       const rect = row.getBoundingClientRect();
       if (rect.bottom > bounds.top && rect.top < bounds.bottom) {
-        return this.heldAnchor = { id: row.id, top: rect.top, contentTop: rect.top - bounds.top + scroller.scrollTop, scrollTop: scroller.scrollTop, scroller, revision: context.scrollRevision.current };
+        // Capture the current reading position for this commit. A coordinate
+        // retained from a previous commit would undo native scroll momentum.
+        const anchor = { id: row.id, top: rect.top, scrollTop: scroller.scrollTop, scroller, revision: context.scrollRevision.current };
+        this.layoutScroll = 0;
+        if (newPage) this.pageAnchor = anchor;
+        return anchor;
       }
     }
     return null;
@@ -50,19 +111,18 @@ class AnchoredList extends Component<Props> {
     // before correcting variable row heights, still before the next paint.
     queueMicrotask(() => {
       this.pendingAnchor = null;
-      if (this.props.context?.scrollRevision.current !== anchor.revision) return;
-      const row = document.getElementById(anchor.id);
-      if (!row || !this.element?.contains(row)) return;
-      const top = row.getBoundingClientRect().top;
-      const contentTop = top - anchor.scroller.getBoundingClientRect().top + anchor.scroller.scrollTop;
-      // Distinguish native scroll momentum from a layout correction only after
-      // the new rows and their offsets have committed.
-      if (Math.abs(contentTop - anchor.contentTop) < 0.5 && Math.abs(anchor.scroller.scrollTop - anchor.scrollTop) > 0.5) anchor.top = top;
-      const delta = top - anchor.top;
-      if (Math.abs(delta) > 0.5) anchor.scroller.scrollTop += delta;
-      anchor.scrollTop = anchor.scroller.scrollTop;
-      anchor.contentTop = contentTop;
+      this.restoreAnchor(anchor);
     });
+  }
+
+  private restoreAnchor(anchor: NonNullable<Anchor>) {
+    if (this.props.context?.scrollRevision.current !== anchor.revision) return;
+    const row = document.getElementById(anchor.id);
+    if (!row || !this.element?.contains(row)) return;
+    const delta = row.getBoundingClientRect().top - anchor.top;
+    if (Math.abs(delta) > 0.5) anchor.scroller.scrollTop += delta;
+    anchor.scrollTop = anchor.scroller.scrollTop;
+    this.layoutScroll = 0;
   }
 
   render() {

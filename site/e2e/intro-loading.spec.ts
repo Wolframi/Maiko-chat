@@ -6,6 +6,8 @@ import { createServer } from "node:http";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import { MaikoIntroPreload } from "../src/components/chat/MaikoIntroPreload";
+import { MAIKO_PARTICLE_WASM_URL } from "../src/lib/maikoParticleWasmAsset";
+import { maikoParticleGraphAsset } from "../src/lib/maikoParticleGraph";
 
 test.use({ channel: "msedge", viewport: { width: 700, height: 600 } });
 
@@ -27,6 +29,7 @@ test("a slow download plays the particle assembly once and continues into the da
     if (url.pathname === "/") return route.fulfill({ contentType: "text/html", body:
       '<style>body{margin:0;background:#0c0c0e}.hologram-maiko{position:fixed;inset:0;width:100vw;height:100vh}</style><div id="root"></div>' });
     if (url.pathname.endsWith("maiko-atoms.bin")) { previewRequests++; return route.fulfill({ status: 404 }); }
+    if (url.pathname === MAIKO_PARTICLE_WASM_URL) return route.fulfill({ contentType: "application/wasm", body: await readFile(`public${url.pathname}`) });
     await gate;
     // Fetch interception receives an already decoded HTTP body in Chromium.
     return route.fulfill({ contentType: "application/octet-stream",
@@ -68,7 +71,8 @@ test("a slow download plays the particle assembly once and continues into the da
   } finally { release(); }
 });
 
-test("the selected dance preloads before chat JavaScript, shares the fetch and stays cached", async ({ page }) => {
+for (const width of [390, 700]) test(`${width}px: the selected dance and matching graph preload once and stay cached`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 600 });
   const bundle = (await build({ stdin: {
     contents: `import React from "react"; import { createRoot } from "react-dom/client";
       import { HologramMaiko } from "./src/components/chat/HologramMaiko";
@@ -78,9 +82,26 @@ test("the selected dance preloads before chat JavaScript, shares the fetch and s
   }, bundle: true, write: false, jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' } })).outputFiles[0].text;
   const compressed = gzipSync(await readFile("public/models/maiko-samba.bin"), { level: 9 });
   const requests: string[] = [];
+  let wasmRequests = 0;
+  let graphRequests = 0;
+  const graphAsset = maikoParticleGraphAsset("samba", width < 600 ? 40000 : 84000)!;
   const hint = renderToString(createElement(MaikoIntroPreload, { intro: "samba" }));
   expect(hint).toContain('rel="preload"');
+  expect(hint).toContain(graphAsset);
+  expect(hint).not.toContain(MAIKO_PARTICLE_WASM_URL);
   const server = createServer((req, res) => {
+    if (req.url === graphAsset) {
+      graphRequests++;
+      res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Encoding": "gzip", "Cache-Control": "public, max-age=31536000, immutable" });
+      void readFile(`public${graphAsset}`).then(bytes => res.end(bytes));
+      return;
+    }
+    if (req.url === MAIKO_PARTICLE_WASM_URL) {
+      wasmRequests++;
+      res.writeHead(200, { "Content-Type": "application/wasm", "Cache-Control": "public, max-age=31536000, immutable" });
+      void readFile(`public${MAIKO_PARTICLE_WASM_URL}`).then(bytes => res.end(bytes));
+      return;
+    }
     if (req.url?.startsWith("/models/")) {
       requests.push(req.url);
       if (!req.url.startsWith("/models/maiko-samba.bin.gz?")) { res.writeHead(404); res.end(); return; }
@@ -102,6 +123,13 @@ test("the selected dance preloads before chat JavaScript, shares the fetch and s
       await expect.poll(() => page.evaluate(() => (window as unknown as { introReady: number[] }).introReady)).toEqual([8150]);
       await expect(page.locator('canvas[data-maiko-intro="samba"]')).toHaveAttribute("data-maiko-renderer", /webgl|canvas/);
       expect(requests).toHaveLength(1);
+      expect(wasmRequests).toBe(0);
+      expect(graphRequests).toBe(1);
+      const graphResource = await page.evaluate(path => performance.getEntriesByType("resource")
+        .find(entry => new URL(entry.name).pathname === path)?.toJSON(), graphAsset);
+      expect(graphResource?.initiatorType).toBe("link");
+      if (visit === 1) expect(graphResource?.transferSize).toBe(0);
+      expect(await page.evaluate(() => performance.getEntriesByName("maiko-graph-precomputed").length)).toBe(1);
       const resource = await page.evaluate(() => performance.getEntriesByType("resource")
         .find(entry => entry.name.includes("maiko-samba.bin.gz"))?.toJSON());
       expect(resource?.initiatorType).toBe("link");
@@ -127,6 +155,8 @@ test("a failed model download uses the small model without repeating the request
     const path = new URL(route.request().url()).pathname;
     if (path === "/") return route.fulfill({ contentType: "text/html", body: '<div id="root"></div>' });
     if (path.endsWith("maiko-atoms.bin")) return route.fulfill({ body: await readFile("public/models/maiko-atoms.bin") });
+    if (path === MAIKO_PARTICLE_WASM_URL) return route.fulfill({ contentType: "application/wasm", body: await readFile(`public${path}`) });
+    if (path.startsWith("/particles/")) return route.fulfill({ status: 503, body: "Unavailable" });
     downloads++;
     return route.fulfill({ status: 503, body: "Unavailable" });
   });

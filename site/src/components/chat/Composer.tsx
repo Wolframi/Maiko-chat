@@ -285,9 +285,7 @@ export function Composer({
           id: `${file.name}-${file.size}-${file.lastModified}-${Math.random()}`,
           file,
           previewUrl:
-            file.type.startsWith("image/") ||
-            file.type.startsWith("video/") ||
-            /\.(png|jpe?g|gif|webp|mp4|webm|mov)$/i.test(file.name)
+            isMediaAttachment({ name: file.name, mime: file.type })
               ? URL.createObjectURL(file)
               : undefined,
         });

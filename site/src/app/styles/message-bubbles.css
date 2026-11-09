@@ -163,7 +163,74 @@
   align-self: stretch;
   flex-direction: row;
   justify-content: flex-start;
-  padding-left: 0;
+  padding-left: 48px;
+}
+
+/* Keep outgoing text on the same column as incoming text on wide screens.
+   Rows that display an own avatar already reserve the avatar column. */
+.bubble-row--plaque.bubble-row--mine:has(> .avatar) {
+  padding-left: 8px;
+}
+
+[data-avatar-cluster] .bubble-row > .avatar {
+  visibility: var(--message-avatar-visible, hidden);
+  translate: 0 var(--message-avatar-offset, 0px);
+  position: relative;
+  z-index: 2;
+}
+
+/* Standalone text keeps its avatar attached to the row. Media and author
+   streaks follow the visible bottom; native desktop uses a CSS sticky rail. */
+[data-avatar-static] .bubble-row > .avatar,
+.room__messages--native [data-avatar-cluster] .bubble-row > .avatar {
+  visibility: visible;
+  translate: none;
+}
+
+.message-avatar-group {
+  display: grid;
+  min-width: 0;
+}
+
+.message-avatar-group__body,
+.message-avatar-group__rail {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
+.message-avatar-group__rail {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  width: 33px;
+  margin-left: 22px;
+  padding-bottom: 8px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.message-avatar-group__sticky {
+  display: flex;
+  position: sticky;
+  bottom: 8px;
+  flex: none;
+}
+
+.message-avatar-group__sticky > .avatar {
+  width: 33px;
+  height: 33px;
+  font-size: 0.72rem;
+}
+
+[data-avatar-overlay] .bubble-row--plaque.bubble-row--mine:has(> .bubble-row__spacer) {
+  padding-left: 8px;
+}
+
+@media (max-width: 640px) {
+  .message-avatar-group__rail { margin-left: 16px; }
+  .message-avatar-group--mine .message-avatar-group__rail { display: none; }
+  .message-avatar-group--mine[data-avatar-overlay] .bubble-row > .bubble-row__spacer { display: none; }
+  [data-avatar-overlay] .bubble-row--plaque.bubble-row--mine:has(> .bubble-row__spacer) { padding-left: 0; }
 }
 
 .bubble-row--plaque.bubble-row--mine .bubble {

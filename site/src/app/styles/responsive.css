@@ -591,6 +591,7 @@
 
   .bubble-row--plaque.bubble-row--mine {
     justify-content: flex-end;
+    padding-left: 0;
   }
 
   .bubble-row--plaque.bubble-row--mine .bubble {

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
 import { applyChatUpdate, prependHistory } from "@/lib/chatUpdates";
+import { cachedRoomIds, PersistentChatCache } from "@/lib/chatCache";
 import type {
   AuthAccount,
   ChatInfo,
@@ -116,6 +117,7 @@ export function useChat() {
   const [profileError, setProfileError] = useState<string | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
+  const [cachedView, setCachedView] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyVersion, setHistoryVersion] = useState(0);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
@@ -151,6 +153,111 @@ export function useChat() {
     page: { before: string | null; hasMore: boolean };
     tail: { after: string | null; hasNewer: boolean };
   } | null>(null);
+  const persistentCacheRef = useRef<{ token: string; promise: Promise<PersistentChatCache | null> } | null>(null);
+  const cachedRoomsRef = useRef(new Set<string>());
+  const serverChatsReceivedRef = useRef(false);
+  const verifiedTokenRef = useRef<string | null>(null);
+  const authEpochRef = useRef(0);
+
+  const ensurePersistentCache = useCallback((token: string) => {
+    if (persistentCacheRef.current?.token !== token) {
+      const old = persistentCacheRef.current;
+      if (old) void old.promise.then(cache => cache?.close());
+      persistentCacheRef.current = { token, promise: PersistentChatCache.open(token) };
+    }
+    return persistentCacheRef.current;
+  }, []);
+
+  const updatePersistentCache = useCallback((update: (cache: PersistentChatCache) => void) => {
+    const entry = persistentCacheRef.current;
+    if (!entry) return;
+    void entry.promise.then(cache => {
+      if (cache && persistentCacheRef.current === entry) update(cache);
+    }).catch(() => { /* Persistence is optional. */ });
+  }, []);
+
+  // Start disk access alongside the socket, without waiting for the network.
+  useEffect(() => {
+    let active = true;
+    let token = "";
+    try { token = localStorage.getItem(TOKEN_KEY) || ""; } catch { /* unavailable */ }
+    const entry = token ? ensurePersistentCache(token) : null;
+    if (entry) void entry.promise.then(cache => {
+      const snapshot = cache?.read();
+      if (!active || persistentCacheRef.current !== entry || !snapshot) return;
+      let currentToken = "";
+      try { currentToken = localStorage.getItem(TOKEN_KEY) || ""; } catch { /* unavailable */ }
+      if (currentToken !== token) return;
+      if (accountRef.current && accountRef.current.userId !== snapshot.account.userId) return;
+      const restored = accountRef.current ?? { ...snapshot.account, token };
+      if (!accountRef.current) { accountRef.current = restored; setAccount(restored); }
+      if (!serverChatsReceivedRef.current) { chatsRef.current = snapshot.chats; setChats(snapshot.chats); }
+      const allowed = cachedRoomIds(chatsRef.current);
+      for (const room of snapshot.rooms) {
+        if (!allowed.has(room.chatId) || historyCacheRef.current.has(room.chatId)) continue;
+        historyCacheRef.current.set(room.chatId, room.messages);
+        cachedRoomsRef.current.add(room.chatId);
+        peerReadCacheRef.current.set(room.chatId, room.peerReadAt);
+      }
+      if (snapshot.lastRoom && allowed.has(snapshot.lastRoom) && !sessionRef.current && switchSeqRef.current === 0) {
+        const room = snapshot.rooms.find(room => room.chatId === snapshot.lastRoom);
+        const restoredSession = { name: restored.displayName || restored.username, room: snapshot.lastRoom };
+        sessionRef.current = restoredSession;
+        expectedRoomRef.current = snapshot.lastRoom;
+        setSession(restoredSession);
+        messagesRef.current = room?.messages ?? [];
+        setMessages(messagesRef.current);
+        setPeerReadAt(room?.peerReadAt ?? null);
+        // Pagination resumes only after an authoritative history response.
+        setHistoryLoading(!room);
+        setCachedView(true);
+        // Authentication can finish before IndexedDB. Still restore the last
+        // room, but request its server history instead of trusting disk data.
+        if (verifiedTokenRef.current === token && socketRef.current?.connected) {
+          const seq = switchSeqRef.current;
+          socketRef.current.emit("chats:switch", { chatId: snapshot.lastRoom }, (ack: SessionAck) => {
+            if (seq !== switchSeqRef.current || accountRef.current?.token !== token) return;
+            if (ack?.ok && ack.session) setSession(ack.session);
+            else {
+              expectedRoomRef.current = null; sessionRef.current = null;
+              setSession(null); setMessages([]); setHistoryLoading(false); setCachedView(false);
+              updatePersistentCache(cache => cache.removeRoom(snapshot.lastRoom!));
+            }
+          });
+        }
+      }
+      if (verifiedTokenRef.current !== token) setCachedView(true);
+      setAuthReady(true);
+    });
+    const flush = () => updatePersistentCache(cache => { void cache.flush(); });
+    const visibility = () => { if (document.hidden) flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", visibility);
+    return () => {
+      active = false;
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", visibility);
+      const current = persistentCacheRef.current;
+      if (current) void current.promise.then(async cache => { await cache?.flush(); cache?.close(); });
+      persistentCacheRef.current = null;
+    };
+  }, [ensurePersistentCache, updatePersistentCache]);
+
+  useEffect(() => {
+    if (!account || verifiedTokenRef.current !== account.token) return;
+    updatePersistentCache(cache => { cache.setAccount(account); cache.setChats(chats); });
+  }, [account, chats, updatePersistentCache]);
+
+  useEffect(() => {
+    const room = session?.room;
+    if (!room || !account || verifiedTokenRef.current !== account.token) return;
+    updatePersistentCache(cache => {
+      cache.setLastRoom(room);
+      if (hasNewerHistory || cachedRoomsRef.current.has(room) || historyLoading) return;
+      cache.setRoom({ chatId: room, messages, ...historyPageRef.current,
+        peerReadAt, savedAt: Date.now() });
+    });
+  }, [account, session, messages, peerReadAt, hasNewerHistory, historyLoading, updatePersistentCache]);
 
   useEffect(() => {
     accountRef.current = account;
@@ -228,6 +335,36 @@ export function useChat() {
   );
 
   const persistAccount = useCallback((next: AuthAccount | null) => {
+    if (next) {
+      verifiedTokenRef.current = next.token;
+      ensurePersistentCache(next.token);
+    } else {
+      verifiedTokenRef.current = null;
+      const entry = persistentCacheRef.current;
+      persistentCacheRef.current = null;
+      if (entry) void entry.promise.then(cache => cache?.revoke());
+      historyCacheRef.current.clear();
+      peerReadCacheRef.current.clear();
+      cachedRoomsRef.current.clear();
+      previousRoomRef.current = null;
+      pendingAckTimersRef.current.forEach(timer => window.clearTimeout(timer));
+      pendingAckTimersRef.current.clear();
+      pendingSendsRef.current.clear();
+      sessionRef.current = null;
+      messagesRef.current = [];
+      chatsRef.current = [];
+      expectedRoomRef.current = null;
+      setSession(null);
+      setMessages([]);
+      setChats([]);
+      setPeople([]);
+      setChatMembers([]);
+      setPeerReadAt(null);
+      setOnline([]);
+      setTypingUsers([]);
+      setHistoryLoading(false);
+      setCachedView(false);
+    }
     accountRef.current = next;
     syncRingtoneAccount(next);
     setAccount(next);
@@ -237,14 +374,49 @@ export function useChat() {
     } catch {
       /* ignore */
     }
+  }, [ensurePersistentCache]);
+
+  // Removing/replacing a token in another tab immediately hides this session.
+  useEffect(() => {
+    const changed = (event: StorageEvent) => {
+      if (event.key !== TOKEN_KEY && event.key !== null) return;
+      const token = accountRef.current?.token;
+      if (!token || event.key === TOKEN_KEY && event.newValue === token) return;
+      const entry = persistentCacheRef.current;
+      persistentCacheRef.current = null;
+      if (entry) void entry.promise.then(cache => cache?.revoke());
+      verifiedTokenRef.current = null;
+      accountRef.current = null;
+      historyCacheRef.current.clear();
+      cachedRoomsRef.current.clear();
+      peerReadCacheRef.current.clear();
+      previousRoomRef.current = null;
+      pendingAckTimersRef.current.forEach(timer => window.clearTimeout(timer));
+      pendingAckTimersRef.current.clear();
+      pendingSendsRef.current.clear();
+      sessionRef.current = null;
+      expectedRoomRef.current = null;
+      messagesRef.current = [];
+      chatsRef.current = [];
+      authEpochRef.current++;
+      switchSeqRef.current++;
+      setAccount(null); setSession(null); setMessages([]); setChats([]); setPeople([]);
+      setChatMembers([]); setPeerReadAt(null); setOnline([]); setTypingUsers([]); setHistoryLoading(false);
+      setCachedView(false); setAuthReady(true);
+      // Rebind to the currently stored token on the normal restore path.
+      socketRef.current?.disconnect().connect();
+    };
+    window.addEventListener("storage", changed);
+    return () => window.removeEventListener("storage", changed);
   }, []);
   // Загрузка стикер-паков после логина и после реконнекта сокета.
   useEffect(() => {
-    if (!authReady || !account?.userId) return;
+    if (!authReady || !account?.userId || !connected) return;
     const s = socketRef.current;
     if (!s) return;
 
     const loadPacks = () => {
+      if (verifiedTokenRef.current !== account.token) return;
       s.emit(
         "sticker:list",
         {},
@@ -261,9 +433,7 @@ export function useChat() {
     return () => {
       s.off("connect", loadPacks);
     };
-  }, [authReady, account?.userId]);
-
-  const authEpochRef = useRef(0);
+  }, [authReady, account?.userId, account?.token, connected]);
 
   useEffect(() => {
     const socket = io({
@@ -291,7 +461,6 @@ export function useChat() {
     setSocket(socket);
 
     const restoreSessionAfterConnect = () => {
-      setConnected(true);
       setReconnecting(false);
       let token = "";
       try {
@@ -301,15 +470,17 @@ export function useChat() {
       }
 
       if (!token) {
+        setConnected(true);
         setAuthReady(true);
         return;
       }
+
+      setConnected(false);
 
       const restoreEpoch = authEpochRef.current;
       socket.emit("auth:restore", { token }, (result: AuthAck) => {
         // Ignore stale restore if user already logged in/out meanwhile.
         if (restoreEpoch !== authEpochRef.current) {
-          setAuthReady(true);
           return;
         }
 
@@ -324,22 +495,33 @@ export function useChat() {
           persistAccount(result.account);
           const room = sessionRef.current?.room;
           if (room) {
+            const switchSeq = switchSeqRef.current;
             expectedRoomRef.current = room;
             socket.emit(
               "chats:switch",
               { chatId: room },
               (ack: SessionAck) => {
+                if (switchSeq !== switchSeqRef.current || accountRef.current?.token !== token) return;
                 if (ack?.ok && ack.session) {
                   expectedRoomRef.current = ack.session.room;
                   setSession(ack.session);
+                } else {
+                  historyCacheRef.current.delete(room);
+                  cachedRoomsRef.current.delete(room);
+                  updatePersistentCache(cache => cache.removeRoom(room));
+                  sessionRef.current = null;
+                  expectedRoomRef.current = null;
+                  setSession(null); setMessages([]); setHistoryLoading(false); setCachedView(false);
                 }
               },
             );
           }
+          else setCachedView(false);
         } else if (currentToken === token) {
           // Only clear if the failed token is still the active one.
           persistAccount(null);
         }
+        setConnected(socket.connected);
         setAuthReady(true);
       });
     };
@@ -361,7 +543,6 @@ export function useChat() {
     socket.io.on("reconnect_attempt", () => setReconnecting(true));
     socket.io.on("reconnect", () => {
       setReconnecting(false);
-      setConnected(true);
       // `connect` also fires; restoreSessionAfterConnect re-binds room.
       // Re-deliver messages that were in flight when the socket dropped —
       // the server dedupes by clientId, so retries are safe.
@@ -385,10 +566,30 @@ export function useChat() {
     window.addEventListener("pageshow", onPageShow);
     window.addEventListener("focus", onVisibility);
 
-    socket.on("chats", (list: ChatInfo[]) => setChats(list));
+    socket.on("chats", (list: ChatInfo[]) => {
+      serverChatsReceivedRef.current = true;
+      chatsRef.current = list;
+      setChats(list);
+      const allowed = cachedRoomIds(list);
+      for (const room of historyCacheRef.current.keys()) {
+        if (!allowed.has(room)) { historyCacheRef.current.delete(room); cachedRoomsRef.current.delete(room); }
+      }
+      const room = sessionRef.current?.room;
+      if (room && !allowed.has(room)) {
+        switchSeqRef.current++;
+        expectedRoomRef.current = null;
+        sessionRef.current = null;
+        setSession(null); setMessages([]); setHistoryLoading(false); setCachedView(false);
+      }
+    });
     socket.on("chat:update", (update: { chatId: string; chat: ChatInfo | null }) => {
       if (!update?.chatId) return;
       setChats(previous => applyChatUpdate(previous, update.chatId, update.chat));
+      if (!update.chat) {
+        historyCacheRef.current.delete(update.chatId);
+        cachedRoomsRef.current.delete(update.chatId);
+        updatePersistentCache(cache => cache.removeRoom(update.chatId));
+      }
     });
     socket.on("people", (list: PeopleUser[]) => setPeople(list));
     socket.on(
@@ -456,6 +657,7 @@ export function useChat() {
         if (cached) {
           historyCacheRef.current.set(chatId, apply(cached));
         }
+        updatePersistentCache(cache => cache.patchRoom(chatId, apply));
 
         const currentRoom =
           expectedRoomRef.current || sessionRef.current?.room;
@@ -469,6 +671,8 @@ export function useChat() {
       const chatId = String(payload?.chatId || "");
       if (!chatId) return;
       historyCacheRef.current.delete(chatId);
+      cachedRoomsRef.current.delete(chatId);
+      updatePersistentCache(cache => cache.removeRoom(chatId));
       setChats((prev) => prev.filter((chat) => chat.id !== chatId));
 
       const currentRoom = expectedRoomRef.current || sessionRef.current?.room;
@@ -487,6 +691,8 @@ export function useChat() {
       if (!chatId) return;
       forgetLastRoom(chatId);
       historyCacheRef.current.delete(chatId);
+      cachedRoomsRef.current.delete(chatId);
+      updatePersistentCache(cache => cache.removeRoom(chatId));
       peerReadCacheRef.current.delete(chatId);
       if (previousRoomRef.current?.session.room === chatId) previousRoomRef.current = null;
       setChats((prev) => prev.filter((chat) => chat.id !== chatId));
@@ -571,10 +777,12 @@ export function useChat() {
         if (chatId || expectedRoomRef.current) {
           const key = chatId || expectedRoomRef.current || "";
           if (key) historyCacheRef.current.set(key, history);
+          cachedRoomsRef.current.delete(key);
         }
         setMessages(history);
         setHistoryVersion(version => version + 1);
         setHistoryLoading(false);
+        setCachedView(false);
         setTypingUsers([]);
         setComposerError(null);
       },
@@ -705,6 +913,7 @@ export function useChat() {
       if (cached) {
         historyCacheRef.current.set(message.room, patch(cached));
       }
+      updatePersistentCache(cache => cache.patchRoom(message.room, patch));
 
       const currentRoom = expectedRoomRef.current || sessionRef.current?.room;
       if (!currentRoom || message.room !== currentRoom) return;
@@ -803,13 +1012,13 @@ export function useChat() {
       socketRef.current = null;
       setSocket(null);
     };
-  }, [persistAccount, emitPendingMessage]);
+  }, [persistAccount, emitPendingMessage, updatePersistentCache]);
 
   // Keep Web Push subscription alive while logged in (for background calls).
   useEffect(() => {
-    if (!account?.token || !authReady) return;
+    if (!account?.token || !authReady || !connected || verifiedTokenRef.current !== account.token) return;
     void subscribeWebPush(account.token);
-  }, [account?.token, authReady]);
+  }, [account?.token, authReady, connected]);
 
   const register = useCallback(
     (username: string, password: string, invitationCode: string) => {
@@ -1019,13 +1228,16 @@ export function useChat() {
       "";
 
     if (roomHint) {
-      setSession({ name, room: roomHint });
+      sessionRef.current = { name, room: roomHint };
+      setSession(sessionRef.current);
+      updatePersistentCache(cache => cache.setLastRoom(roomHint));
+      setCachedView(cachedRoomsRef.current.has(roomHint) || verifiedTokenRef.current !== accountRef.current?.token);
     } else {
       setSession((prev) => (prev ? { ...prev, name } : { name, room: "" }));
     }
 
     return seq;
-  }, []);
+  }, [updatePersistentCache]);
 
   const loadHistory = useCallback((mode: "older" | "newer" | "latest" | "around", around?: string, signal?: AbortSignal): Promise<boolean> => {
     if (signal?.aborted) return Promise.resolve(false);
@@ -1122,6 +1334,7 @@ export function useChat() {
       }
 
       const seq = beginRoomSwitch(chatId);
+      if (!socketRef.current?.connected || verifiedTokenRef.current !== accountRef.current?.token) return;
       socketRef.current?.emit(
         "chats:switch",
         { chatId },
@@ -2223,6 +2436,8 @@ export function useChat() {
   );
 
   const markChatVisibleRead = useCallback((chatId?: string) => {
+    if (!socketRef.current?.connected || verifiedTokenRef.current !== accountRef.current?.token) return;
+    if (cachedRoomsRef.current.has(chatId || sessionRef.current?.room || "")) return;
     const room =
       chatId || expectedRoomRef.current || sessionRef.current?.room || "";
     if (!room) return;
@@ -2649,6 +2864,7 @@ const removeStickerFromPack = useCallback((packId: string, stickerId: string) =>
     socket,
     connected,
     reconnecting,
+    cachedView,
     authReady,
     unreadTotal,
     account,

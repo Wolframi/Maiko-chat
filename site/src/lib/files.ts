@@ -214,8 +214,8 @@ export function isImageAttachment(file?: FileLike) {
   // Browsers do not support HEIC/HEIF natively, treat as regular file download
   if (/\.(heic|heif)$/i.test(name)) return false;
   const mime = fileMime(file);
-  if (mime.startsWith("image/") && !mime.includes("svg") && !mime.includes("heic") && !mime.includes("heif")) return true;
-  return /\.(png|jpe?g|gif|webp|bmp)$/i.test(name);
+  if (/^image\/(png|jpeg|gif|webp|bmp|avif)$/.test(mime)) return true;
+  return /\.(png|jpe?g|jfif|gif|webp|bmp|avif)$/i.test(name);
 }
 
 /** Video attachments — media block, no filename caption / copy. */
@@ -413,40 +413,9 @@ export function validateAvatarFile(file: File) {
 }
 
 export function validateFile(file: File) {
-  if (!file || !file.size) return "Пустой файл";
+  if (!file) return "Файл не выбран";
   if (file.size > MAX_FILE_BYTES) {
     return `Файл больше ${formatBytes(MAX_FILE_BYTES)}`;
-  }
-  const name = file.name || "";
-  const ext = name.includes(".")
-    ? `.${name.split(".").pop()!.toLowerCase()}`
-    : "";
-  const blocked = new Set([
-    ".svg",
-    ".svgz",
-    ".html",
-    ".htm",
-    ".xhtml",
-    ".xml",
-    ".js",
-    ".mjs",
-    ".cjs",
-    ".php",
-    ".exe",
-    ".bat",
-    ".cmd",
-    ".ps1",
-    ".sh",
-  ]);
-  if (blocked.has(ext)) return "Этот тип файла запрещён";
-  const mime = (file.type || "").toLowerCase();
-  if (
-    mime.includes("svg") ||
-    mime === "text/html" ||
-    mime === "application/javascript" ||
-    mime === "text/javascript"
-  ) {
-    return "Этот тип файла запрещён";
   }
   return null;
 }
@@ -483,16 +452,8 @@ export function uploadPartFileName(file: File) {
     "audio/ogg": ".ogg",
     "audio/webm": ".weba",
   };
-  const known = new Set([
-    ...Object.values(byMime),
-    ".jpeg",
-    ".heic",
-    ".heif",
-  ]);
-  const ext = known.has(fromName)
-    ? fromName === ".jpeg"
-      ? ".jpg"
-      : fromName
+  const ext = /^\.[a-z0-9]{1,32}$/.test(fromName)
+    ? fromName
     : byMime[mime] || ".bin";
   return `upload${ext}`;
 }
@@ -531,12 +492,18 @@ async function postUploadJson<T>(
   body: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<{ status: number; result: T | null }> {
-  const response = await fetch(`/api/upload/direct/${action}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-pulse-token": token },
-    body: JSON.stringify(body),
-    signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`/api/upload/direct/${action}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-pulse-token": token },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (error) {
+    if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
+    throw new DirectUploadUnavailable("Direct upload request failed");
+  }
   let result: T | null = null;
   try {
     result = (await response.json()) as T;
@@ -614,8 +581,8 @@ async function uploadFileDirect(
     signal,
   );
   const ticket = start.result;
-  if (start.status === 404 && ticket?.direct === false) {
-    throw new DirectUploadUnavailable("Direct upload is disabled");
+  if ([404, 405, 408].includes(start.status) || start.status >= 500 || (start.status < 300 && !ticket?.ok)) {
+    throw new DirectUploadUnavailable("Direct upload is unavailable");
   }
   if (!ticket?.ok || !ticket.id || !ticket.parts?.length) {
     throw new Error(
@@ -677,20 +644,28 @@ async function uploadFileDirect(
     signal?.removeEventListener("abort", forwardAbort);
   }
 
-  const complete = await postUploadJson<{ ok?: boolean; file?: UploadedFile; error?: string }>(
-    "complete",
-    token,
-    { id, parts: etags.map((etag, index) => ({ partNumber: index + 1, etag })) },
-    signal,
-  );
-  if (!complete.result?.ok || !complete.result.file) {
-    throw new Error(complete.result?.error || "Не удалось загрузить файл");
+  try {
+    const complete = await postUploadJson<{ ok?: boolean; file?: UploadedFile; error?: string }>(
+      "complete",
+      token,
+      { id, parts: etags.map((etag, index) => ({ partNumber: index + 1, etag })) },
+      signal,
+    );
+    if ([404, 405, 408].includes(complete.status) || complete.status >= 500 || (complete.status < 300 && !complete.result?.ok)) {
+      throw new DirectUploadUnavailable("Direct upload completion is unavailable");
+    }
+    if (!complete.result?.ok || !complete.result.file) {
+      throw new Error(complete.result?.error || "Не удалось загрузить файл");
+    }
+    options?.onProgress?.(1);
+    return {
+      ...complete.result.file,
+      name: sanitizeDisplayName(file, complete.result.file.name),
+    };
+  } catch (error) {
+    void postUploadJson("abort", token, { id }).catch(() => undefined);
+    throw error;
   }
-  options?.onProgress?.(1);
-  return {
-    ...complete.result.file,
-    name: sanitizeDisplayName(file, complete.result.file.name),
-  };
 }
 
 export async function uploadFile(
@@ -712,6 +687,7 @@ export async function uploadFile(
         }
         throw error;
       }
+      if (options?.signal?.aborted) throw new Error("Загрузка отменена");
       directUploadDisabled = true;
       options?.onProgress?.(0);
     }

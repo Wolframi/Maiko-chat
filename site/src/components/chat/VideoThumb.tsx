@@ -9,11 +9,12 @@ type VideoThumbProps = {
   url: string;
   width?: number;
   height?: number;
+  microPreview?: string;
   onOpen?: () => void;
 };
 
 /** Inline chat video preview, loaded as it approaches the viewport. */
-export function VideoThumb({ url, width, height, onOpen }: VideoThumbProps) {
+export function VideoThumb({ url, width, height, microPreview, onOpen }: VideoThumbProps) {
   const base = signedMediaSrc(url) || mediaSrc(url);
 
   return (
@@ -24,7 +25,7 @@ export function VideoThumb({ url, width, height, onOpen }: VideoThumbProps) {
       onClick={onOpen}
       aria-label="Открыть видео"
     >
-      <VideoPreview src={base} className="bubble__video" />
+      <VideoPreview src={base} microPreview={microPreview} className="bubble__video" />
       <span className="bubble__video-play" aria-hidden>
         <IconPlay size={18} />
       </span>

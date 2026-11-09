@@ -307,14 +307,16 @@ function AlbumMosaic({
           >
             {video ? (
               <>
-                <VideoPreview src={src} />
+                <VideoPreview src={src} microPreview={file.microPreview} />
                 <span className="bubble__video-play" aria-hidden>
                   <IconPlay size={18} />
                 </span>
               </>
             ) : (
               <PhotoImage
-                src={thumbSrc(file.url, 430)}
+                src={isGifAttachment(file) ? src : thumbSrc(file.url, 430)}
+                microPreview={isGifAttachment(file) ? undefined : file.microPreview}
+                resolveMicroPreview={!isGifAttachment(file)}
               />
             )}
           </button>
@@ -541,7 +543,7 @@ function FileBodyInner({
             aria-label="Открыть фото"
           >
             { }
-            <PhotoImage src={thumbSrc(file.url, 430)} className="bubble__image" />
+            <PhotoImage src={thumbSrc(file.url, 430)} microPreview={file.microPreview} resolveMicroPreview className="bubble__image" />
           </button>
         )}
         {mediaUpload}
@@ -567,6 +569,7 @@ function FileBodyInner({
           url={file.url}
           width={file.width}
           height={file.height}
+          microPreview={file.microPreview}
           onOpen={() => onOpenImage?.(openSrc, file.name, "video")}
         />
         {mediaUpload}
@@ -1006,6 +1009,7 @@ function MessageBubbleInner({
 
             <PhotoImage
               src={thumbSrc(sticker.url)}
+              sticker
               alt="Стикер"
               draggable={false}
               loading="lazy"

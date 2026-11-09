@@ -1,12 +1,14 @@
 /** Real S3 integration check. Requires S3_CONFIG_FILE; all objects use a unique test prefix. */
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { randomBytes, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DeleteObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import sharp from "sharp";
+import { validMicroPreview } from "../src/lib/microPreview";
 
 async function main() {
   if (!process.env.S3_CONFIG_FILE) throw new Error("Set S3_CONFIG_FILE explicitly for this integration test");
@@ -16,17 +18,21 @@ async function main() {
   const originalCwd = process.cwd();
   const dir = mkdtempSync(path.join(tmpdir(), "pulse-s3-test-"));
   process.chdir(dir);
+  mkdirSync(path.join(dir, "data"));
+  writeFileSync(path.join(dir, "data", "registration-invites.json"), JSON.stringify({
+    required: false, adminUserId: null, secret: randomBytes(32).toString("hex"),
+  }), { mode: 0o600 });
   const storage = await import("../src/server/objectStorage");
   const uploads = await import("../src/server/uploads");
   const auth = await import("../src/server/auth");
+  const account = await auth.registerUser("s3_test", randomUUID());
+  assert(account.ok);
   const server = createServer((req, res) => {
     if (req.url?.startsWith("/api/upload")) uploads.handleUpload(req, res);
     else if (!uploads.tryServeUpload(req, res)) { res.statusCode = 404; res.end(); }
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const account = auth.registerUser("s3_test", randomUUID());
-  assert(account.ok);
   async function upload(name: string, body: Buffer, type: string, kind = "") {
     const form = new FormData();
     form.set("file", new Blob([new Uint8Array(body)], { type }), name);
@@ -35,7 +41,26 @@ async function main() {
       headers: { origin, "x-pulse-token": account.ok ? account.account.token || "" : "" },
     });
   }
+  async function preview(url: string) {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const response = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (response.ok && response.headers.get("content-type") === "image/webp") return { response, bytes };
+      assert(response.ok || response.status === 503, `Preview request failed: ${response.status}`);
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    throw new Error("S3 preview did not finish after the bounded original-file fallback");
+  }
+  async function microPreview(file: Parameters<typeof uploads.getUploadMicroPreview>[0]) {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const preview = validMicroPreview(await uploads.getUploadMicroPreview(file));
+      if (preview) return preview;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    throw new Error("S3 micro-JPEG did not finish within its background processing budget");
+  }
   try {
+    console.log("S3 check: signed uploads, reads, ranges and avatars");
     const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZlSAAAAAASUVORK5CYII=", "base64");
     const response = await upload("avatar.png", png, "image/png", "avatar");
     assert.equal(response.status, 200);
@@ -43,6 +68,10 @@ async function main() {
     assert(await uploads.isValidStoredAvatar(file.url));
     const info = await uploads.getUploadInfo(file.url);
     assert.equal(info?.size, png.length);
+    // The response can arrive before the background preview job releases its source.
+    for (let attempt = 0; attempt < 100 && existsSync(path.join(dir, "uploads", info!.fileName)); attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
     assert(!existsSync(path.join(dir, "uploads", info!.fileName)), "upload must not depend on a local original");
     const image = await fetch(`${origin}${file.url}`);
     assert.equal(image.status, 200);
@@ -63,6 +92,7 @@ async function main() {
     assert.equal(readdirSync(path.join(dir, "data", "media-tmp")).length, 0);
 
     const jpegPath = path.join(dir, "test.jpg");
+    console.log("S3 check: photo previews, micro-JPEG and transparent static stickers");
     const jpegResult = spawnSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc2=size=1920x1080,noise=alls=30:allf=t", "-frames:v", "1", "-q:v", "2", jpegPath], { windowsHide: true });
     assert.equal(jpegResult.status, 0, "ffmpeg is required for thumbnail integration checks");
     const jpeg = readFileSync(jpegPath);
@@ -70,22 +100,63 @@ async function main() {
     const photoResponse = await upload("photo.jpg", jpeg, "image/jpeg");
     assert.equal(photoResponse.status, 200);
     const photo = await photoResponse.json() as { file: { url: string } };
-    const thumb = await fetch(`${origin}${photo.file.url}&w=320`);
+    const { response: thumb, bytes: thumbBytes } = await preview(`${origin}${photo.file.url}&w=320`);
     assert.equal(thumb.status, 200);
-    assert.equal(thumb.headers.get("content-type"), "image/jpeg");
-    const thumbBytes = Buffer.from(await thumb.arrayBuffer());
+    assert.equal(thumb.headers.get("content-type"), "image/webp");
     assert(thumbBytes.length > 0 && thumbBytes.length < jpeg.length);
     const thumbHead = await fetch(`${origin}${photo.file.url}&w=320`, { method: "HEAD" });
     assert.equal(Number(thumbHead.headers.get("content-length")), thumbBytes.length);
-    assert.equal(readdirSync(path.join(dir, "uploads", "thumbs")).length, 0);
+    assert.equal((await sharp(thumbBytes).metadata()).width, 320);
+    const photoFile = { url: photo.file.url, name: "photo.jpg", mime: "image/jpeg", size: jpeg.length };
+    const micro = await sharp(Buffer.from((await microPreview(photoFile)).split(",")[1], "base64")).metadata();
+    assert.equal(micro.format, "jpeg");
+    assert.equal(Math.max(micro.width!, micro.height!), 32, "S3 photos must produce a micro-JPEG");
+    const metadata = await fetch(`${origin}${photo.file.url}&microPreview=1`);
+    assert.equal(metadata.status, 200);
+    assert(metadata.headers.get("content-type")?.includes("application/json"));
+    assert(validMicroPreview((await metadata.json() as { microPreview?: string }).microPreview));
+    assert.equal((await fetch(`${origin}${uploads.bareUploadUrl(photo.file.url)}?microPreview=1`)).status, 403);
+    assert.equal(await uploads.getUploadMicroPreview(photoFile), await uploads.getUploadMicroPreview(photoFile));
+
+    // Static stickers must retain alpha in both small originals and derived previews.
+    const pixels = Buffer.alloc(600 * 600 * 4);
+    for (let i = 0; i < pixels.length; i += 4) {
+      pixels[i] = (i / 4) % 256; pixels[i + 1] = Math.floor(i / 2400) % 256;
+      pixels[i + 2] = (i / 16) % 256; pixels[i + 3] = 96;
+    }
+    for (const format of ["png", "webp"] as const) {
+      const sticker = await sharp(pixels, { raw: { width: 600, height: 600, channels: 4 } })
+        .toFormat(format, format === "png" ? { compressionLevel: 0 } : { lossless: true }).toBuffer();
+      const stickerUpload = await upload(`sticker.${format}`, sticker, `image/${format}`);
+      assert.equal(stickerUpload.status, 200);
+      const uploaded = await stickerUpload.json() as { file: { url: string } };
+      const derived = sticker.length > 120_000 ? await preview(`${origin}${uploaded.file.url}&w=430`) : null;
+      const rendered = derived?.response ?? await fetch(`${origin}${uploaded.file.url}&w=430`);
+      assert.equal(rendered.status, 200);
+      const bytes = derived?.bytes ?? Buffer.from(await rendered.arrayBuffer());
+      assert.equal((await sharp(bytes).metadata()).hasAlpha, true);
+      const stats = await sharp(bytes).stats();
+      assert(Math.abs(stats.channels[3].mean - 96) < 2, "sticker alpha must survive S3 preview loading");
+      assert.equal((await fetch(`${origin}${uploads.bareUploadUrl(uploaded.file.url)}?w=430`)).status, 403);
+    }
+    const gif = await sharp({ create: { width: 32, height: 32, channels: 4, background: "red" } }).gif().toBuffer();
+    const gifUpload = await upload("animation.gif", gif, "image/gif");
+    assert.equal(gifUpload.status, 200);
+    const gifFile = await gifUpload.json() as { file: { url: string } };
+    assert.equal(await uploads.getUploadMicroPreview({ url: gifFile.file.url, name: "animation.gif", mime: "image/gif", size: gif.length }), undefined);
+    assert.equal((await fetch(`${origin}${gifFile.file.url}&microPreview=1`)).status, 204);
+    assert.deepEqual(Buffer.from(await (await fetch(`${origin}${gifFile.file.url}`)).arrayBuffer()), gif);
+    assert(readdirSync(path.join(dir, "uploads", "thumbs")).every(name => name.endsWith(".webp")), "only finished preview files may remain");
 
     const videoPath = path.join(dir, "test.mov");
+    console.log("S3 check: video covers, conversion and private documents");
     const videoResult = spawnSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10", "-t", "0.3", "-c:v", "mpeg4", videoPath], { windowsHide: true });
     assert.equal(videoResult.status, 0);
     const movieResponse = await upload("movie.mov", readFileSync(videoPath), "video/quicktime");
     assert.equal(movieResponse.status, 200);
     const movie = await movieResponse.json() as { file: { url: string } };
     assert.match(uploads.bareUploadUrl(movie.file.url), /\.mp4$/);
+    assert(validMicroPreview(await microPreview({ url: movie.file.url, name: "movie.mp4", mime: "video/mp4", size: 1 })), "S3 video covers must produce a micro-JPEG");
     const movieName = uploads.uploadNameFromUrl(movie.file.url)!;
     for (let i = 0; i < 100 && existsSync(path.join(dir, "uploads", movieName)); i++) await new Promise((resolve) => setTimeout(resolve, 100));
     assert(!existsSync(path.join(dir, "uploads", movieName)), "video must be cleaned after background conversion");
@@ -105,8 +176,9 @@ async function main() {
     assert.equal((await upload("fake.png", Buffer.from("not an image"), "image/png", "avatar")).status, 400);
     assert.equal((await upload("bad.html", Buffer.from("<script/>"), "text/html")).status, 400);
     for (const bad of ["/uploads/%2e%2e%2fdata%2fusers.json", "/uploads/%5cdata", "/uploads/%ZZ", `/uploads/${randomUUID()}.png`]) {
-      assert.equal((await fetch(`${origin}${bad}`)).status, 404);
+      assert.equal((await fetch(`${origin}${bad}`)).status, 403);
     }
+    assert.equal((await fetch(`${origin}${uploads.signUploadUrl(`/uploads/${randomUUID()}.png`)}`)).status, 404);
     assert.equal((await fetch(`${origin}${file.url}`, { method: "POST" })).status, 405);
 
     type DirectStart = { ok: boolean; id: string; parts: Array<{ partNumber: number; size: number; url: string }>; error?: string };
@@ -139,6 +211,7 @@ async function main() {
     }
 
     const directPdf = await directUpload("отчёт.pdf", pdf, "application/pdf");
+    console.log("S3 check: direct multipart uploads, abort, validation and CORS");
     assert.equal(directPdf.status, 200);
     const directDoc = await directPdf.json() as { file: { url: string; name: string; mime: string; size: number } };
     assert.equal(directDoc.file.name, "отчёт.pdf");
@@ -168,7 +241,8 @@ async function main() {
     assert.equal(directPhoto.status, 200);
     const directPhotoFile = await directPhoto.json() as { file: { url: string } };
     assert.equal((await uploads.getUploadInfo(directPhotoFile.file.url))?.image, true);
-    assert.equal((await fetch(`${origin}${uploads.bareUploadUrl(directPhotoFile.file.url)}`)).status, 200);
+    assert.equal((await fetch(`${origin}${uploads.bareUploadUrl(directPhotoFile.file.url)}`)).status, 403);
+    assert.equal((await fetch(`${origin}${directPhotoFile.file.url}`)).status, 200);
     assert.equal((await directCall("start", { name: "bad.html", size: 10, type: "text/html" })).status, 400);
     assert.equal((await directCall("start", { name: "huge.zip", size: 600 * 1024 * 1024, type: "application/zip" })).status, 413);
 

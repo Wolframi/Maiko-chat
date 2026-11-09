@@ -6,6 +6,8 @@ export type FileAttachment = {
   /** Pixel size — reserves photo/video previews and determines album layout. */
   width?: number;
   height?: number;
+  /** Static photos/video covers only; animations deliberately use no Micro-JPEG. */
+  microPreview?: string;
 };
 
 export type ReplyPreview = {

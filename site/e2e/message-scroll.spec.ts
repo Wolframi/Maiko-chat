@@ -95,15 +95,24 @@ test(`scrolling during a delayed prepend preserves every painted position and ne
     const id = anchor.id;
     const positions = [anchor.getBoundingClientRect().top];
     window.scrollTest.release();
+    let movement = 0;
     for (let frame = 0; frame < 24; frame++) {
+      // Continue through the prepend measurements with both native momentum
+      // and fresh wheel input, which must not discard layout compensation.
+      if (frame < 4) {
+        if (frame === 2) element.dispatchEvent(new WheelEvent("wheel", { deltaY: 10, bubbles: true }));
+        const before = element.scrollTop;
+        element.scrollTop += 10;
+        movement += element.scrollTop - before;
+      }
       await new Promise(requestAnimationFrame);
       const row = document.getElementById(id);
-      positions.push(row ? row.getBoundingClientRect().top : -10000);
+      positions.push(row ? row.getBoundingClientRect().top + movement : -10000);
     }
     return positions;
   });
   await expect(thread).toHaveAttribute("data-loaded-messages", "160");
-  console.log(JSON.stringify({ maximumPrependShift: Math.max(...frames) - Math.min(...frames) }));
+  console.log(JSON.stringify({ maximumPrependShift: Math.max(...frames) - Math.min(...frames), ...(Math.max(...frames) - Math.min(...frames) >= 6 ? { frames } : {}) }));
   expect(Math.max(...frames) - Math.min(...frames)).toBeLessThan(6);
   expect(await page.evaluate(() => window.scrollTest.older)).toBe(1);
   expect(await page.locator(".message-block").count()).toBeLessThan(80);
@@ -114,6 +123,25 @@ test(`scrolling during a delayed prepend preserves every painted position and ne
     return element.scrollTop - before;
   });
   expect(momentum).toBeGreaterThan(100);
+  // A wheel/touch gesture also has scroll frames without another input event.
+  // These must keep moving while Virtuoso replaces and measures nearby rows.
+  const inertia = await scroller.evaluate(async element => {
+    element.dispatchEvent(new WheelEvent('wheel', { deltaY: 10, bubbles: true }));
+    await new Promise(requestAnimationFrame);
+    const bounds = element.getBoundingClientRect();
+    const anchor = Array.from(element.querySelectorAll<HTMLElement>("[id^='msg-']"))
+      .find(row => row.getBoundingClientRect().top >= bounds.top + 160)!;
+    const initialTop = anchor.getBoundingClientRect().top;
+    const frames: { expected: number; actual: number }[] = [];
+    for (let step = 1; step <= 20; step++) {
+      element.scrollTop += 10;
+      await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+      frames.push({ expected: initialTop - step * 10, actual: anchor.getBoundingClientRect().top });
+    }
+    return frames;
+  });
+  console.log(JSON.stringify({ inertiaError: Math.max(...inertia.map(frame => Math.abs(frame.actual - frame.expected))) }));
+  expect(Math.max(...inertia.map(frame => Math.abs(frame.actual - frame.expected)))).toBeLessThan(6);
   await page.evaluate(() => window.scrollTest.search());
   await expect(page.locator("#msg-row-240")).toBeInViewport();
   await page.evaluate(() => window.scrollTest.clearSearch());

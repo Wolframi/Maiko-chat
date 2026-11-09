@@ -2,14 +2,60 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createWriteStream } from "node:fs";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import sharp from "sharp";
+import { encodeMediaMicroPreview } from "./mediaMicroPreview";
+
+// Do not retain input handles: upload/download temp files must be removable on Windows.
+sharp.cache({ files: 0 });
 
 type Request = { name: string; version: string; width: number; source: () => Promise<string> };
 export type Preview = { filename: string; size: number };
+
+// BMP still uses ffmpeg: prebuilt libvips binaries do not include a BMP loader.
+const PHOTO_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif"]);
+const MAX_REMOTE_PHOTO_BYTES = 500 * 1024 * 1024; // Same ceiling as uploads.
+
+async function photoPreview(source: string, width: number, temporary: string) {
+  const remote = /^https:\/\//.test(source);
+  const input = remote ? `${temporary}.source` : source;
+  try {
+    if (remote) {
+      const signal = AbortSignal.timeout(10_000);
+      const response = await fetch(source, { signal, redirect: "error" });
+      if (!response.ok || !response.body || Number(response.headers.get("content-length")) > MAX_REMOTE_PHOTO_BYTES) {
+        await response.body?.cancel();
+        throw new Error("Photo download failed");
+      }
+      let bytes = 0;
+      const limit = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          bytes += chunk.length;
+          callback(bytes > MAX_REMOTE_PHOTO_BYTES ? new Error("Photo download too large") : null, chunk);
+        },
+      });
+      const body = Readable.fromWeb(response.body as import("node:stream/web").ReadableStream<Uint8Array>);
+      await pipeline(body, limit, createWriteStream(input), { signal });
+    }
+    // The default pixel limit remains enabled; only the first animation frame is read.
+    await sharp(input, { pages: 1 })
+      .autoOrient()
+      .resize({ width, withoutEnlargement: true })
+      .webp({ quality: 76, effort: 3 })
+      .timeout({ seconds: 15 })
+      .toFile(temporary);
+  } finally {
+    if (remote) await unlink(input).catch(() => {});
+  }
+}
 
 /** Small, transparent WebP frames. Originals and signed access remain separate. */
 export function createMediaPreviewService(directory: string, options: { concurrency?: number; maxPending?: number } = {}) {
   const jobs = new Map<string, Promise<Preview | null>>();
   const failures = new Map<string, number>();
+  const microPreviews = new Map<string, Promise<string | undefined>>();
   const queue: (() => void)[] = [];
   const concurrency = options.concurrency ?? 2;
   const maxPending = options.maxPending ?? 32;
@@ -38,18 +84,22 @@ export function createMediaPreviewService(directory: string, options: { concurre
     try {
       await mkdir(directory, { recursive: true });
       const source = await request.source();
-      const ok = await new Promise<boolean>(resolve => {
-        const child = spawn("ffmpeg", ["-v", "error", "-y", "-threads", "1",
-          ...(/^https:\/\//.test(source) ? ["-rw_timeout", "10000000"] : []),
-          "-i", source, "-vf", `scale=w='min(${request.width},iw)':h=-2`,
-          "-frames:v", "1", "-c:v", "libwebp", "-quality", "76", "-compression_level", "3",
-          "-threads", "1", "-f", "webp", temporary],
-        { stdio: "ignore", windowsHide: true });
-        const timer = setTimeout(() => { child.kill(); }, 15_000);
-        child.once("error", () => { clearTimeout(timer); resolve(false); });
-        child.once("close", code => { clearTimeout(timer); resolve(code === 0); });
-      });
-      if (!ok) throw new Error("Preview generation failed");
+      if (PHOTO_EXTENSIONS.has(path.extname(request.name).toLowerCase())) {
+        await photoPreview(source, request.width, temporary);
+      } else {
+        const ok = await new Promise<boolean>(resolve => {
+          const child = spawn("ffmpeg", ["-v", "error", "-y", "-threads", "1",
+            ...(/^https:\/\//.test(source) ? ["-rw_timeout", "10000000"] : []),
+            "-i", source, "-vf", `scale=w='min(${request.width},iw)':h=-2`,
+            "-frames:v", "1", "-c:v", "libwebp", "-quality", "76", "-compression_level", "3",
+            "-threads", "1", "-f", "webp", temporary],
+          { stdio: "ignore", windowsHide: true });
+          const timer = setTimeout(() => { child.kill(); }, 15_000);
+          child.once("error", () => { clearTimeout(timer); resolve(false); });
+          child.once("close", code => { clearTimeout(timer); resolve(code === 0); });
+        });
+        if (!ok) throw new Error("Preview generation failed");
+      }
       const info = await stat(temporary);
       if (!info.size || info.size > 4 * 1024 * 1024) throw new Error("Invalid preview size");
       await rename(temporary, filename);
@@ -63,7 +113,7 @@ export function createMediaPreviewService(directory: string, options: { concurre
     }
   }
 
-  return {
+  const service = {
     async get(request: Request): Promise<Preview | null> {
       if (!request.name || /[/\\:\u0000-\u001f]/.test(request.name) || ![320, 430, 860, 1080].includes(request.width)) return null;
       const version = createHash("sha256").update(request.version).digest("hex").slice(0, 16);
@@ -90,6 +140,22 @@ export function createMediaPreviewService(directory: string, options: { concurre
         else queue.push(start);
       });
       jobs.set(filename, job);
+      return job;
+    },
+  };
+  return {
+    ...service,
+    async microPreview(request: Request): Promise<string | undefined> {
+      // GIFs keep thumbnail/animation loading, without Micro-JPEG.
+      if (path.extname(request.name).toLowerCase() === ".gif") return;
+      const preview = await service.get(request);
+      if (!preview) return;
+      let job = microPreviews.get(preview.filename);
+      if (!job) {
+        job = encodeMediaMicroPreview(preview.filename).catch(() => undefined);
+        if (microPreviews.size >= 512) microPreviews.delete(microPreviews.keys().next().value!);
+        microPreviews.set(preview.filename, job);
+      }
       return job;
     },
   };

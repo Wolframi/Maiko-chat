@@ -407,6 +407,7 @@
   z-index: 2;
   display: grid;
   place-items: center;
+  container-type: size;
   background: rgba(0, 0, 0, 0.28);
   pointer-events: none;
 }
@@ -417,8 +418,7 @@
 }
 
 .bubble__upload-overlay--cell .upload-ring--media {
-  width: 40px;
-  height: 40px;
+  --upload-ring-size: 40px;
 }
 
 .bubble__upload-slot {
@@ -445,9 +445,14 @@
 }
 
 .upload-ring--media {
-  width: 52px;
-  height: 52px;
+  width: min(var(--upload-ring-size, 52px), 65cqw, 65cqh);
+  height: min(var(--upload-ring-size, 52px), 65cqw, 65cqh);
   background: rgba(0, 0, 0, 0.5);
+}
+
+.upload-ring--media > svg:not(.upload-ring__svg) {
+  width: min(18px, 45%);
+  height: min(18px, 45%);
 }
 
 .upload-ring--file {
@@ -485,7 +490,8 @@
   stroke-linecap: round;
   transform: rotate(-90deg);
   transform-origin: 50% 50%;
-  transition: stroke-dashoffset 0.3s ease-out;
+  /* Keep the displayed arc in step with the latest upload progress. */
+  transition: none;
 }
 
 @keyframes upload-ring-spin {

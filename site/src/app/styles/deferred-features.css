@@ -1,0 +1,15 @@
+.feature-load-error,
+.feature-loading {
+  position: fixed;
+  z-index: 10000;
+  right: 16px;
+  bottom: 16px;
+  max-width: min(360px, calc(100vw - 32px));
+  padding: 12px 16px;
+  color: var(--text, #eee);
+  background: var(--panel, #202127);
+  border: 1px solid var(--border, #45464f);
+  border-radius: 12px;
+}
+.feature-load-error button { margin-left: 8px; text-decoration: underline; }
+.feature-loading { pointer-events: none; }

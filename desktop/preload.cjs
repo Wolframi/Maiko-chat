@@ -4,6 +4,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('maikoDesktop', Object.freeze({
   state: () => ipcRenderer.invoke('desktop:state'),
   startupModel: (intro) => ipcRenderer.invoke('desktop:startup-model', intro),
+  startupParticleWasm: () => ipcRenderer.invoke('desktop:startup-particle-wasm'),
+  startupParticleGraph: (intro, count) => ipcRenderer.invoke('desktop:startup-particle-graph', intro, count),
   startupModelFinished: () => ipcRenderer.invoke('desktop:startup-model-finished'),
   control: (action) => ipcRenderer.invoke('desktop:control', action),
   update: (action) => ipcRenderer.invoke('desktop:update', action),

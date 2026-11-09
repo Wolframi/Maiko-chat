@@ -24,15 +24,16 @@ function fixture(t: TestContext) {
 
 function run(directory: string, body: string) {
   execFileSync(process.execPath, ["--require", loader, "-e", `
+    (async () => {
     const assert = require('node:assert/strict');
     const fs = require('node:fs');
     const { createServer } = require('node:http');
     fs.mkdirSync('data', { recursive: true });
     if (!fs.existsSync('data/registration-invites.json')) fs.writeFileSync('data/registration-invites.json', JSON.stringify({ required: false, adminUserId: null, secret: 'a'.repeat(64) }));
     const auth = require(${JSON.stringify(authPath)});
-    const first = auth.registerUser('ringtone-user', 'Password123!').account || auth.loginUser('ringtone-user', 'Password123!').account;
-    const second = auth.loginUser('ringtone-user', 'Password123!').account;
-    const other = auth.registerUser('other-user', 'Password123!').account || auth.loginUser('other-user', 'Password123!').account;
+    const first = (await auth.registerUser('ringtone-user', 'Password123!')).account || (await auth.loginUser('ringtone-user', 'Password123!')).account;
+    const second = (await auth.loginUser('ringtone-user', 'Password123!')).account;
+    const other = (await auth.registerUser('other-user', 'Password123!')).account || (await auth.loginUser('other-user', 'Password123!')).account;
     fs.mkdirSync('uploads', { recursive: true });
     const clip = '/uploads/12345678-1234-1234-1234-123456789abc.wav';
     const source = '/uploads/22345678-1234-1234-1234-123456789abc.wav';
@@ -44,7 +45,6 @@ function run(directory: string, body: string) {
     const server = createServer((req, res) => { void handleRingtonePreference(req, res, id => notices.push(id), url => {
       const parsed = new URL(url); return parsed.protocol === 'https:' && parsed.hostname === 'zvukogram.com' && parsed.pathname.startsWith('/mp3/cats/');
     }); });
-    (async () => {
       await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
       const url = 'http://127.0.0.1:' + server.address().port + '/api/ringtones/preference';
       const read = async token => { const r = await fetch(url, { headers: { 'x-pulse-token': token } }); assert.equal(r.status, 200); return (await r.json()).settings; };

@@ -1,6 +1,6 @@
 {
   "name": "maiko-desktop",
-  "version": "1.1.28",
+  "version": "1.1.29",
   "private": true,
   "description": "Майко — приложение для Windows",
   "author": "Maiko",
@@ -24,6 +24,7 @@
     "test:built-icons": "node tests/built-icons.cjs",
     "test:window-animations": "node prepare-native.cjs && node tests/window-animations.cjs",
     "test:viewport": "node tests/viewport.cjs",
+    "test:message-scroll": "node tests/message-scroll.cjs",
     "test:resize": "node tests/window-resize.cjs",
     "test:snap": "node tests/window-snap.cjs",
     "test:compact-members": "node tests/compact-members.cjs",
@@ -35,6 +36,8 @@
     "verify:release": "node verify-release.cjs",
     "test:updates-ui": "node tests/updates-ui.cjs",
     "test:startup": "node tests/startup.cjs",
+    "test:startup-watchdog": "node tests/startup-watchdog.cjs",
+    "profile:startup": "node tests/profile-startup.cjs",
     "test:update-handoff": "node tests/update-handoff.cjs",
     "test:site-updates": "node tests/site-updates.cjs",
     "test:downloads": "node tests/downloads.cjs"

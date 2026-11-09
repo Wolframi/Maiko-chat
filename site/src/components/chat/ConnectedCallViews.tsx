@@ -2,15 +2,23 @@
 
 import { memo, type ComponentProps } from "react";
 import { useRuntimeState } from "./ChatRuntime";
-import { CallOverlay } from "./CallOverlay";
-import { VoiceOverlay } from "./VoiceOverlay";
+import type { CallOverlay as CallOverlayType } from "./CallOverlay";
+import type { VoiceOverlay as VoiceOverlayType } from "./VoiceOverlay";
+import { CallAlerts } from "./CallAlerts";
+import { deferredFeature, FeatureGate } from "./DeferredFeature";
 import { VoiceDock } from "./VoiceDock";
 import { HeaderCallChip } from "./HeaderCallChip";
 
-type CallContextProps = Pick<ComponentProps<typeof CallOverlay>, "peerAvatarUrl" | "selfAvatarUrl" | "incomingAvatarUrl" | "currentChatId" | "onExpandCall">;
+const CallOverlay = deferredFeature(() => import("./CallOverlay").then(module => module.CallOverlay));
+const VoiceOverlay = deferredFeature(() => import("./VoiceOverlay").then(module => module.VoiceOverlay));
+
+type CallContextProps = Pick<ComponentProps<typeof CallOverlayType>, "peerAvatarUrl" | "selfAvatarUrl" | "incomingAvatarUrl" | "currentChatId" | "onExpandCall">;
 export const ConnectedCallOverlay = memo(function ConnectedCallOverlay(props: CallContextProps) {
   const call = useRuntimeState("call", state => state);
-  return <CallOverlay {...props} incoming={call.incoming} active={call.active}
+  return <>
+    <CallAlerts incoming={call.incoming} active={call.active} status={call.status} incomingAvatarUrl={props.incomingAvatarUrl}
+      remoteAudioRef={call.remoteAudioRef} onAccept={call.acceptCall} onReject={call.rejectCall} />
+    <FeatureGate active={Boolean(call.active)}><CallOverlay {...props} incoming={call.incoming} active={call.active} externalAlerts
     localStream={call.localStream} remoteStream={call.remoteStream} muted={call.muted} deafened={call.deafened}
     cameraOff={call.cameraOff} sharingScreen={call.sharingScreen} mediaBusy={call.mediaBusy}
     remoteSharingScreen={call.remoteSharingScreen} remoteCameraOff={call.remoteCameraOff} minimized={call.minimized}
@@ -21,12 +29,13 @@ export const ConnectedCallOverlay = memo(function ConnectedCallOverlay(props: Ca
     onToggleDeafen={call.toggleDeafen} onToggleNoiseFilter={call.toggleNoiseFilter} onToggleCamera={call.toggleCamera}
     onSelectCamera={call.selectCamera} cameraDeviceId={call.cameraDeviceId} onFlipCamera={call.flipCamera}
     canFlipCamera={call.canFlipCamera} onToggleScreenShare={call.toggleScreenShare}
-    onToggleMinimized={() => call.setMinimized(value => !value)} />;
+    onToggleMinimized={() => call.setMinimized(value => !value)} /></FeatureGate>
+  </>;
 });
 
-export const ConnectedVoiceOverlay = memo(function ConnectedVoiceOverlay(props: Pick<ComponentProps<typeof VoiceOverlay>, "selfAvatarUrl" | "currentGroupId" | "onExpand">) {
+export const ConnectedVoiceOverlay = memo(function ConnectedVoiceOverlay(props: Pick<ComponentProps<typeof VoiceOverlayType>, "selfAvatarUrl" | "currentGroupId" | "onExpand">) {
   const voice = useRuntimeState("voice", state => state);
-  return <VoiceOverlay {...props} active={voice.active} peers={voice.peers} selfName={voice.selfName}
+  return <FeatureGate active={Boolean(voice.active)}><VoiceOverlay {...props} active={voice.active} peers={voice.peers} selfName={voice.selfName}
     localStream={voice.localStream} remoteStreams={voice.remoteStreams} muted={voice.muted} deafened={voice.deafened}
     cameraOff={voice.cameraOff} sharingScreen={voice.sharingScreen} mediaBusy={voice.mediaBusy}
     minimized={voice.minimized} selfSpeaking={voice.selfSpeaking} noiseFilterEnabled={voice.noiseFilterEnabled}
@@ -34,7 +43,7 @@ export const ConnectedVoiceOverlay = memo(function ConnectedVoiceOverlay(props: 
     rttMs={voice.rttMs} onLeave={voice.leave} onToggleMute={voice.toggleMute} onToggleDeafen={voice.toggleDeafen}
     onToggleNoiseFilter={voice.toggleNoiseFilter} onToggleCamera={voice.toggleCamera} onSelectCamera={voice.selectCamera}
     cameraDeviceId={voice.cameraDeviceId} onFlipCamera={voice.flipCamera} canFlipCamera={voice.canFlipCamera}
-    onToggleScreenShare={voice.toggleScreenShare} onToggleMinimized={() => voice.setMinimized(value => !value)} />;
+    onToggleScreenShare={voice.toggleScreenShare} onToggleMinimized={() => voice.setMinimized(value => !value)} /></FeatureGate>;
 });
 
 export const ConnectedVoiceDock = memo(function ConnectedVoiceDock(props: Pick<ComponentProps<typeof VoiceDock>, "onExpand">) {

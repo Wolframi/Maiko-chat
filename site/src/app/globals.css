@@ -3,6 +3,7 @@
 /* Keep this order: later files contain intentional cascade overrides.
    See styles/README.md for the stylesheet map. */
 @import "./styles/base.css";
+@import "./styles/deferred-features.css";
 @import "./styles/auth.css";
 @import "./styles/workspace.css";
 @import "./styles/message-actions.css";
@@ -13,6 +14,7 @@
 @import "./styles/room-controls.css";
 @import "./styles/reactions.css";
 @import "./styles/message-list.css";
+@import "./styles/media-loading.css";
 @import "./styles/message-bubbles.css";
 @import "./styles/composer.css";
 @import "./styles/call-mini.css";

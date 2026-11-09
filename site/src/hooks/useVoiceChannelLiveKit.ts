@@ -1,19 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  ConnectionQuality,
-  LocalAudioTrack,
-  LocalVideoTrack,
-  Room,
-  RoomEvent,
-  Track,
-  VideoPresets,
-  VideoQuality,
-  type RemoteParticipant,
-  type RemoteTrack,
-  type RemoteTrackPublication,
-} from "livekit-client";
+import type { ConnectionQuality, LocalAudioTrack, LocalVideoTrack, Room, Track, RemoteParticipant, RemoteTrack, RemoteTrackPublication } from "livekit-client";
+import { getLiveKit, loadLiveKit } from "@/lib/liveKitLoader";
 import type { Socket } from "socket.io-client";
 import type { VoiceChannelUser } from "@/lib/types";
 import {
@@ -99,8 +88,8 @@ type LiveKitTokenResponse = {
 function cameraCapture(facing: CameraFacing, tier: "high" | "mid" = "high", deviceId = "") {
   const resolution =
     tier === "high"
-      ? VideoPresets.h1080.resolution
-      : VideoPresets.h720.resolution;
+      ? getLiveKit().VideoPresets.h1080.resolution
+      : getLiveKit().VideoPresets.h720.resolution;
   return {
     resolution,
     frameRate: tier === "high" ? 30 : 24,
@@ -108,8 +97,8 @@ function cameraCapture(facing: CameraFacing, tier: "high" | "mid" = "high", devi
   };
 }
 
-const SCREEN_VIDEO_PUBLISH = {
-  source: Track.Source.ScreenShare,
+function screenVideoPublish() { return {
+  source: getLiveKit().Track.Source.ScreenShare,
   // Simulcast layers for screen share often never appear on LiveKit 1.8
   // (subscribers get notFoundTimeout / empty stage).
   simulcast: false,
@@ -124,9 +113,9 @@ const SCREEN_VIDEO_PUBLISH = {
     maxFramerate: SCREEN_SEND_PARAMS.maxFramerate,
     priority: "medium" as const,
   },
-};
+}; }
 
-const ROOM_PUBLISH_DEFAULTS = {
+function roomPublishDefaults() { return {
   audioPreset: { ...AUDIO_SEND_PARAMS, priority: "high" as const },
   // Mute must not stop the mic capture. Re-opening the device renegotiates
   // the peer connection and blinks camera and screen share.
@@ -141,13 +130,13 @@ const ROOM_PUBLISH_DEFAULTS = {
     maxFramerate: CAMERA_SEND_PARAMS.maxFramerate,
     priority: "medium" as const,
   },
-  videoSimulcastLayers: [VideoPresets.h360, VideoPresets.h720],
+  videoSimulcastLayers: [getLiveKit().VideoPresets.h360, getLiveKit().VideoPresets.h720],
   screenShareEncoding: {
     maxBitrate: SCREEN_SEND_PARAMS.maxBitrate,
     maxFramerate: SCREEN_SEND_PARAMS.maxFramerate,
   },
   screenShareSimulcastLayers: [],
-};
+}; }
 
 function markAsScreenTrack(track: MediaStreamTrack | undefined) {
   if (!track) return;
@@ -173,7 +162,7 @@ async function enableLiveKitScreenShare(
   prepareScreenTrack(videoTrack);
   const audioTrack = display.getAudioTracks()[0] || null;
   try {
-    await room.localParticipant.publishTrack(videoTrack, SCREEN_VIDEO_PUBLISH);
+    await room.localParticipant.publishTrack(videoTrack, screenVideoPublish());
   } catch (error) {
     display.getTracks().forEach((track) => track.stop());
     throw error;
@@ -183,7 +172,7 @@ async function enableLiveKitScreenShare(
   prepareScreenAudioTrack(audioTrack);
   try {
     await room.localParticipant.publishTrack(audioTrack, {
-      source: Track.Source.ScreenShareAudio,
+      source: getLiveKit().Track.Source.ScreenShareAudio,
       audioPreset: { ...SCREEN_AUDIO_SEND_PARAMS, priority: "high" },
       dtx: false,
       forceStereo: true,
@@ -253,7 +242,7 @@ export function useVoiceChannelLiveKit({
   const [mediaBusy, setMediaBusy] = useState(false);
   const [minimized, setMinimized] = useState(false);
   const [joining, setJoining] = useState(false);
-  const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality>(ConnectionQuality.Unknown);
+  const [connectionQuality, setConnectionQuality] = useState<`${ConnectionQuality}`>("unknown");
   const [rttMs, setRttMs] = useState<number | null>(null);
   const [linkPhase, setLinkPhase] = useState<
     "connecting" | "reconnecting" | "switching" | "failed" | null
@@ -306,7 +295,7 @@ export function useVoiceChannelLiveKit({
     }
     const quality = room.localParticipant.connectionQuality;
     setConnectionQuality(quality);
-    if (quality !== ConnectionQuality.Unknown) {
+    if (quality !== "unknown") {
       setLinkPhase((phase) =>
         phase === "connecting" || phase === "reconnecting" || phase === "switching"
           ? null
@@ -318,7 +307,7 @@ export function useVoiceChannelLiveKit({
       qualitySettleRef.current = null;
       if (roomRef.current !== room) return;
       setConnectionQuality((current) =>
-        current === ConnectionQuality.Unknown ? ConnectionQuality.Good : current,
+        current === "unknown" ? "good" : current,
       );
       setLinkPhase((phase) =>
         phase === "connecting" || phase === "reconnecting" || phase === "switching"
@@ -398,14 +387,14 @@ export function useVoiceChannelLiveKit({
     }
     const participant = room.localParticipant;
     const screenTrack = participant.getTrackPublication(
-      Track.Source.ScreenShare,
+      getLiveKit().Track.Source.ScreenShare,
     )?.track?.mediaStreamTrack;
     markAsScreenTrack(screenTrack);
     const tracks = [
-      participant.getTrackPublication(Track.Source.Microphone)?.track
+      participant.getTrackPublication(getLiveKit().Track.Source.Microphone)?.track
         ?.mediaStreamTrack,
       screenTrack,
-      participant.getTrackPublication(Track.Source.Camera)?.track
+      participant.getTrackPublication(getLiveKit().Track.Source.Camera)?.track
         ?.mediaStreamTrack,
     ].filter(
       (track): track is MediaStreamTrack =>
@@ -416,7 +405,7 @@ export function useVoiceChannelLiveKit({
       const stream = previous && before.length === tracks.length && tracks.every((track) => before.includes(track))
         ? previous
         : new MediaStream(tracks);
-      const screenAudio = participant.getTrackPublication(Track.Source.ScreenShareAudio)?.track?.mediaStreamTrack;
+      const screenAudio = participant.getTrackPublication(getLiveKit().Track.Source.ScreenShareAudio)?.track?.mediaStreamTrack;
       return withScreenAudioTracks(stream, screenAudio ? [screenAudio] : []);
     });
   }, []);
@@ -425,8 +414,8 @@ export function useVoiceChannelLiveKit({
     setRemoteStreams((previous) => {
     const next: Record<string, MediaStream> = {};
     for (const [userId, tracksBySource] of remoteTracksRef.current) {
-      const screen = tracksBySource.get(Track.Source.ScreenShare);
-      const camera = tracksBySource.get(Track.Source.Camera);
+      const screen = tracksBySource.get(getLiveKit().Track.Source.ScreenShare);
+      const camera = tracksBySource.get(getLiveKit().Track.Source.Camera);
       markAsScreenTrack(screen);
       const videos = [camera, screen].filter(
         (track): track is MediaStreamTrack =>
@@ -456,7 +445,7 @@ export function useVoiceChannelLiveKit({
       window.clearTimeout(qualitySettleRef.current);
       qualitySettleRef.current = null;
     }
-    setConnectionQuality(ConnectionQuality.Unknown);
+    setConnectionQuality("unknown");
     setRttMs(null);
     if (room) {
       room.removeAllListeners();
@@ -507,10 +496,10 @@ export function useVoiceChannelLiveKit({
     const update = noiseUpdateRef.current.catch(() => undefined).then(async () => {
       if (roomRef.current !== room) return;
       const publication = room.localParticipant.getTrackPublication(
-        Track.Source.Microphone,
+        getLiveKit().Track.Source.Microphone,
       );
       const track = publication?.track;
-      if (!(track instanceof LocalAudioTrack)) return;
+      if (!(track instanceof getLiveKit().LocalAudioTrack)) return;
       const prev = noiseFilterRef.current;
       if (prev && prev.outputTrack === track.mediaStreamTrack) {
         await prev.setEnabled(getNeuralNoiseEnabled());
@@ -542,9 +531,9 @@ export function useVoiceChannelLiveKit({
         try {
           // Keep screen share subscribed. Disabling it on minimize/tab-hide
           // often comes back as a black frame after LiveKit resubscribe.
-          if (source === Track.Source.ScreenShare) {
+          if (source === getLiveKit().Track.Source.ScreenShare) {
             publication.setEnabled(true);
-            publication.setVideoQuality(VideoQuality.HIGH);
+            publication.setVideoQuality(getLiveKit().VideoQuality.HIGH);
             continue;
           }
           if (hidden) {
@@ -552,7 +541,7 @@ export function useVoiceChannelLiveKit({
             continue;
           }
           publication.setEnabled(true);
-          publication.setVideoQuality(VideoQuality.HIGH);
+          publication.setVideoQuality(getLiveKit().VideoQuality.HIGH);
         } catch {
           /* publication may already be detached */
         }
@@ -566,14 +555,14 @@ export function useVoiceChannelLiveKit({
       publication: RemoteTrackPublication,
       participant: RemoteParticipant,
     ) => {
-      if (publication.source === Track.Source.ScreenShareAudio) {
+      if (publication.source === getLiveKit().Track.Source.ScreenShareAudio) {
         attachRemoteAudio(`${participant.identity}::screen`, track);
         syncRemoteStreams();
         return;
       }
       if (
-        track.kind === Track.Kind.Audio ||
-        publication.source === Track.Source.Microphone
+        track.kind === getLiveKit().Track.Kind.Audio ||
+        publication.source === getLiveKit().Track.Source.Microphone
       ) {
         attachRemoteAudio(participant.identity, track);
         return;
@@ -583,7 +572,7 @@ export function useVoiceChannelLiveKit({
         tracks = new Map();
         remoteTracksRef.current.set(participant.identity, tracks);
       }
-      if (publication.source === Track.Source.ScreenShare) {
+      if (publication.source === getLiveKit().Track.Source.ScreenShare) {
         markAsScreenTrack(track.mediaStreamTrack);
       }
       tracks.set(publication.source, track.mediaStreamTrack);
@@ -605,7 +594,7 @@ export function useVoiceChannelLiveKit({
       publication: RemoteTrackPublication,
       participant: RemoteParticipant,
     ) => {
-      if (publication.source === Track.Source.ScreenShareAudio) {
+      if (publication.source === getLiveKit().Track.Source.ScreenShareAudio) {
         const key = `${participant.identity}::screen`;
         const attached = remoteAudioTracksRef.current.get(key);
         if (!attached || attached.sid === track.sid) {
@@ -615,8 +604,8 @@ export function useVoiceChannelLiveKit({
         return;
       }
       if (
-        track.kind === Track.Kind.Audio ||
-        publication.source === Track.Source.Microphone
+        track.kind === getLiveKit().Track.Kind.Audio ||
+        publication.source === getLiveKit().Track.Source.Microphone
       ) {
         const attached = remoteAudioTracksRef.current.get(participant.identity);
         if (!attached || attached.sid === track.sid) {
@@ -643,19 +632,19 @@ export function useVoiceChannelLiveKit({
 
   const wireRoom = useCallback(
     (room: Room) => {
-      room.on(RoomEvent.TrackSubscribed, addRemoteTrack);
-      room.on(RoomEvent.TrackUnsubscribed, removeRemoteTrack);
-      room.on(RoomEvent.TrackPublished, (publication) => {
+      room.on(getLiveKit().RoomEvent.TrackSubscribed, addRemoteTrack);
+      room.on(getLiveKit().RoomEvent.TrackUnsubscribed, removeRemoteTrack);
+      room.on(getLiveKit().RoomEvent.TrackPublished, (publication) => {
         if (!publication.isSubscribed) {
           publication.setSubscribed(true);
         }
       });
-      room.on(RoomEvent.TrackSubscriptionFailed, (_sid, participant) => {
+      room.on(getLiveKit().RoomEvent.TrackSubscriptionFailed, (_sid, participant) => {
         for (const publication of participant.trackPublications.values()) {
           if (publication.isSubscribed) continue;
           try {
             publication.setSubscribed(true);
-            if (publication.source === Track.Source.ScreenShare) {
+            if (publication.source === getLiveKit().Track.Source.ScreenShare) {
               publication.setEnabled(true);
             }
           } catch {
@@ -664,18 +653,18 @@ export function useVoiceChannelLiveKit({
         }
       });
       const onVideoSignal = (publication: { kind: Track.Kind }) => {
-        if (publication.kind === Track.Kind.Video) syncRemoteStreams();
+        if (publication.kind === getLiveKit().Track.Kind.Video) syncRemoteStreams();
       };
-      room.on(RoomEvent.TrackMuted, onVideoSignal);
-      room.on(RoomEvent.TrackUnmuted, onVideoSignal);
-      room.on(RoomEvent.ParticipantDisconnected, (participant) => {
+      room.on(getLiveKit().RoomEvent.TrackMuted, onVideoSignal);
+      room.on(getLiveKit().RoomEvent.TrackUnmuted, onVideoSignal);
+      room.on(getLiveKit().RoomEvent.ParticipantDisconnected, (participant) => {
         remoteTracksRef.current.delete(participant.identity);
         remoteVideoPubsRef.current.delete(participant.identity);
         detachRemoteAudio(participant.identity);
         detachRemoteAudio(`${participant.identity}::screen`);
         syncRemoteStreams();
       });
-      room.on(RoomEvent.AudioPlaybackStatusChanged, () => {
+      room.on(getLiveKit().RoomEvent.AudioPlaybackStatusChanged, () => {
         if (room.canPlaybackAudio) {
           setError((current) =>
             current === "Нажмите в окно, чтобы включить звук"
@@ -686,23 +675,23 @@ export function useVoiceChannelLiveKit({
         }
         setError("Нажмите в окно, чтобы включить звук");
       });
-      room.on(RoomEvent.LocalTrackPublished, () => syncLocalStream(room));
-      room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
+      room.on(getLiveKit().RoomEvent.LocalTrackPublished, () => syncLocalStream(room));
+      room.on(getLiveKit().RoomEvent.LocalTrackUnpublished, (publication) => {
         syncLocalStream(room);
         if (
-          publication.source === Track.Source.ScreenShare &&
+          publication.source === getLiveKit().Track.Source.ScreenShare &&
           sharingScreenRef.current
         ) {
           const stillLive =
-            room.localParticipant.getTrackPublication(Track.Source.ScreenShare)
+            room.localParticipant.getTrackPublication(getLiveKit().Track.Source.ScreenShare)
               ?.track?.mediaStreamTrack?.readyState === "live";
           if (!stillLive) void stopScreenShareRef.current();
         }
       });
-      room.on(RoomEvent.ConnectionQualityChanged, (quality, participant) => {
+      room.on(getLiveKit().RoomEvent.ConnectionQualityChanged, (quality, participant) => {
         if (roomRef.current !== room || participant !== room.localParticipant) return;
         setConnectionQuality(quality);
-        if (quality === ConnectionQuality.Unknown) return;
+        if (quality === "unknown") return;
         if (qualitySettleRef.current != null) {
           window.clearTimeout(qualitySettleRef.current);
           qualitySettleRef.current = null;
@@ -715,16 +704,16 @@ export function useVoiceChannelLiveKit({
       });
       const reconnecting = () => {
         setLinkPhase("reconnecting");
-        setConnectionQuality(ConnectionQuality.Unknown);
+        setConnectionQuality("unknown");
         setRttMs(null);
       };
-      room.on(RoomEvent.Reconnecting, reconnecting);
-      room.on(RoomEvent.SignalReconnecting, reconnecting);
-      room.on(RoomEvent.Reconnected, () => {
+      room.on(getLiveKit().RoomEvent.Reconnecting, reconnecting);
+      room.on(getLiveKit().RoomEvent.SignalReconnecting, reconnecting);
+      room.on(getLiveKit().RoomEvent.Reconnected, () => {
         setLinkPhase(null);
         settleLinkQuality(room);
       });
-      room.on(RoomEvent.Disconnected, () => {
+      room.on(getLiveKit().RoomEvent.Disconnected, () => {
         if (intentionalDisconnectRef.current) return;
         // Under the hybrid coordinator, presence stays up — only media dies.
         // Rebind LiveKit so the UI does not sit "in channel" with silence.
@@ -755,7 +744,7 @@ export function useVoiceChannelLiveKit({
             )?.catch((error: unknown) => {
               if (error instanceof Error && error.name === "AbortError") return;
               setLinkPhase("failed");
-              setConnectionQuality(ConnectionQuality.Lost);
+              setConnectionQuality("lost");
             });
           }, 600);
         }
@@ -791,23 +780,23 @@ export function useVoiceChannelLiveKit({
     if (!room) return;
     const grabAudio = (source: Track.Source) => {
       const track = room.localParticipant.getTrackPublication(source)?.track;
-      return track instanceof LocalAudioTrack &&
+      return track instanceof getLiveKit().LocalAudioTrack &&
         track.mediaStreamTrack.readyState === "live"
         ? track
         : null;
     };
     const grabVideo = (source: Track.Source) => {
       const track = room.localParticipant.getTrackPublication(source)?.track;
-      return track instanceof LocalVideoTrack &&
+      return track instanceof getLiveKit().LocalVideoTrack &&
         track.mediaStreamTrack.readyState === "live"
         ? track
         : null;
     };
     heldLocalTracksRef.current = {
-      mic: grabAudio(Track.Source.Microphone),
-      camera: grabVideo(Track.Source.Camera),
-      screen: grabVideo(Track.Source.ScreenShare),
-      screenAudio: grabAudio(Track.Source.ScreenShareAudio),
+      mic: grabAudio(getLiveKit().Track.Source.Microphone),
+      camera: grabVideo(getLiveKit().Track.Source.Camera),
+      screen: grabVideo(getLiveKit().Track.Source.ScreenShare),
+      screenAudio: grabAudio(getLiveKit().Track.Source.ScreenShareAudio),
     };
     if (qualitySettleRef.current != null) {
       window.clearTimeout(qualitySettleRef.current);
@@ -920,7 +909,7 @@ export function useVoiceChannelLiveKit({
             ? "reconnecting"
             : "connecting",
       );
-      setConnectionQuality(ConnectionQuality.Unknown);
+      setConnectionQuality("unknown");
       const pendingActive = { channelId, groupId, title };
       activeRef.current = pendingActive;
       setActive(pendingActive);
@@ -948,10 +937,10 @@ export function useVoiceChannelLiveKit({
           }
           track.stop();
         };
-        release(Track.Source.Microphone, held.mic);
-        release(Track.Source.Camera, held.camera);
-        release(Track.Source.ScreenShare, held.screen);
-        release(Track.Source.ScreenShareAudio, held.screenAudio);
+        release(getLiveKit().Track.Source.Microphone, held.mic);
+        release(getLiveKit().Track.Source.Camera, held.camera);
+        release(getLiveKit().Track.Source.ScreenShare, held.screen);
+        release(getLiveKit().Track.Source.ScreenShareAudio, held.screenAudio);
       };
       let pendingRoom: Room | null = null;
       let settleInflight = () => {};
@@ -961,7 +950,7 @@ export function useVoiceChannelLiveKit({
       startMediaInflightRef.current = thisInflight;
 
       try {
-        const response = await fetch("/api/livekit/token", {
+        const [response] = await Promise.all([fetch("/api/livekit/token", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -969,7 +958,7 @@ export function useVoiceChannelLiveKit({
           },
           body: JSON.stringify({ channelId }),
           signal: controller.signal,
-        });
+        }), loadLiveKit(controller.signal)]);
         if (attempt !== joinAttemptRef.current || controller.signal.aborted) {
           const cancelled = new Error("SFU join cancelled");
           cancelled.name = "AbortError";
@@ -990,7 +979,7 @@ export function useVoiceChannelLiveKit({
         const validMicId = await resolveMicDeviceId();
 
         const makeRoom = () =>
-          new Room({
+          new (getLiveKit().Room)({
             adaptiveStream: false,
             dynacast: false,
             // Client 2.x defaults to /rtc/v1 + a giant join_request query.
@@ -998,10 +987,10 @@ export function useVoiceChannelLiveKit({
             singlePeerConnection: false,
             audioCaptureDefaults: liveKitAudioCapture(validMicId),
             videoCaptureDefaults: {
-              resolution: VideoPresets.h1080.resolution,
+              resolution: getLiveKit().VideoPresets.h1080.resolution,
               frameRate: 30,
             },
-            publishDefaults: ROOM_PUBLISH_DEFAULTS,
+            publishDefaults: roomPublishDefaults(),
             stopLocalTrackOnUnpublish: true,
           });
 
@@ -1062,7 +1051,7 @@ export function useVoiceChannelLiveKit({
         if (held?.mic && held.mic.mediaStreamTrack.readyState === "live") {
           try {
             await room.localParticipant.publishTrack(held.mic, {
-              source: Track.Source.Microphone,
+              source: getLiveKit().Track.Source.Microphone,
             });
             if (keepMuted) await held.mic.mute();
             else await held.mic.unmute();
@@ -1103,7 +1092,7 @@ export function useVoiceChannelLiveKit({
         ) {
           try {
             await room.localParticipant.publishTrack(held.camera, {
-              source: Track.Source.Camera,
+              source: getLiveKit().Track.Source.Camera,
               simulcast: true,
             });
             reusedCamera = true;
@@ -1123,7 +1112,7 @@ export function useVoiceChannelLiveKit({
           held.screen.mediaStreamTrack.readyState === "live"
         ) {
           try {
-            await room.localParticipant.publishTrack(held.screen, SCREEN_VIDEO_PUBLISH);
+            await room.localParticipant.publishTrack(held.screen, screenVideoPublish());
             markAsScreenTrack(held.screen.mediaStreamTrack);
             reusedScreen = true;
             if (
@@ -1132,7 +1121,7 @@ export function useVoiceChannelLiveKit({
             ) {
               try {
                 await room.localParticipant.publishTrack(held.screenAudio, {
-                  source: Track.Source.ScreenShareAudio,
+                  source: getLiveKit().Track.Source.ScreenShareAudio,
                   audioPreset: { ...SCREEN_AUDIO_SEND_PARAMS, priority: "high" },
                   dtx: false,
                   forceStereo: true,
@@ -1193,7 +1182,7 @@ export function useVoiceChannelLiveKit({
           setLocalStream(null);
           setRemoteStreams({});
           setLinkPhase("failed");
-          setConnectionQuality(ConnectionQuality.Lost);
+          setConnectionQuality("lost");
         } else if (!managedPresence) {
           resetState();
           setLinkPhase(null);
@@ -1453,10 +1442,10 @@ export function useVoiceChannelLiveKit({
     const room = roomRef.current;
     if (!room || cameraOffRef.current || mediaBusyRef.current) return;
     const publication = room.localParticipant.getTrackPublication(
-      Track.Source.Camera,
+      getLiveKit().Track.Source.Camera,
     );
     const track = publication?.track;
-    if (!(track instanceof LocalVideoTrack)) return;
+    if (!(track instanceof getLiveKit().LocalVideoTrack)) return;
     let nextTrack: MediaStreamTrack | undefined;
     mediaBusyRef.current = true;
     setMediaBusy(true);
@@ -1519,7 +1508,7 @@ export function useVoiceChannelLiveKit({
         return;
       }
       const screenTrack = room.localParticipant.getTrackPublication(
-        Track.Source.ScreenShare,
+        getLiveKit().Track.Source.ScreenShare,
       )?.track?.mediaStreamTrack;
       if (screenTrack?.readyState === "live") {
         setError("Не удалось остановить демонстрацию экрана");
@@ -1561,7 +1550,7 @@ export function useVoiceChannelLiveKit({
       sharingScreenRef.current = true;
       setSharingScreen(true);
       const publication = room.localParticipant.getTrackPublication(
-        Track.Source.ScreenShare,
+        getLiveKit().Track.Source.ScreenShare,
       );
       const screenTrack = publication?.track?.mediaStreamTrack;
       if (screenTrack) {
@@ -1720,8 +1709,8 @@ export function useVoiceChannelLiveKit({
       }
       sampling = true;
       try {
-        const track = room.localParticipant.getTrackPublication(Track.Source.Microphone)?.track;
-        const report = track instanceof LocalAudioTrack ? await track.getRTCStatsReport() : undefined;
+        const track = room.localParticipant.getTrackPublication(getLiveKit().Track.Source.Microphone)?.track;
+        const report = track instanceof getLiveKit().LocalAudioTrack ? await track.getRTCStatsReport() : undefined;
         if (!disposed && roomRef.current === room && room.state === "connected") {
           setRttMs(report ? readMediaRtt(report) : null);
         }
@@ -1794,18 +1783,18 @@ export function useVoiceChannelLiveKit({
     };
 
     const stopTicker = startSpeakingTicker(() => {
-      if (mutedRef.current) {
+      if (mutedRef.current || !roomRef.current) {
         speakHoldUntilRef.current = 0;
         setSpeaking(false);
         return;
       }
       const publication = roomRef.current?.localParticipant.getTrackPublication(
-        Track.Source.Microphone,
+        getLiveKit().Track.Source.Microphone,
       );
       const lkTrack = publication?.track;
       const mic = pickSpeakingTrack(
         noiseFilterRef.current?.sourceTrack ||
-          (lkTrack instanceof LocalAudioTrack
+          (lkTrack instanceof getLiveKit().LocalAudioTrack
             ? lkTrack.mediaStreamTrack
             : null),
       );

@@ -1,14 +1,18 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useState, useRef, useCallback } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useState, useRef, useCallback, useSyncExternalStore } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type { AuthAccount, ChatMessage, PeopleUser } from "@/lib/types";
 import { MessageBubble } from "@/components/chat/MessageBubble";
+import { Avatar } from "@/components/chat/Avatar";
 import { TypingIndicator } from "@/components/chat/TypingIndicator";
 import { ScrollAnchoredList } from "@/components/chat/ScrollAnchoredList";
+import { DesktopMessageScroller } from "@/components/chat/DesktopMessageScroller";
+import { bindVirtualMessageAvatars } from "@/components/chat/virtualMessageAvatars";
 import { formatDayChip } from "@/lib/dates";
 import { isMediaAttachment, messageAttachments } from "@/lib/files";
 import { soloEmojiSizePx } from "@/lib/emojiText";
+import { getDesktopMediaRuntime } from "@/lib/desktopMedia";
 
 type MessageListProps = {
   chatId: string;
@@ -135,6 +139,9 @@ const listComponents = { Header: HistoryHeader, Footer: HistoryFooter, List: Scr
 const initialFirstItemIndex = 1_000_000_000;
 const listOverscan = { main: 240, reverse: 120 };
 const listViewport = { top: 400, bottom: 400 };
+const subscribeDesktop = () => () => {};
+const desktopSnapshot = () => Boolean(getDesktopMediaRuntime());
+const serverDesktopSnapshot = () => false;
 
 export function MessageList({
   chatId,
@@ -174,9 +181,11 @@ export function MessageList({
   canModerate = false,
   showOwnAvatar = false,
 }: MessageListProps) {
+  const desktop = useSyncExternalStore(subscribeDesktop, desktopSnapshot, serverDesktopSnapshot);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const scrollerRef = useRef<HTMLElement | null>(null);
   const viewportObserverRef = useRef<ResizeObserver | null>(null);
+  const avatarCleanupRef = useRef<(() => void) | null>(null);
   const preparingPageRef = useRef(false);
   const loadingNewerRef = useRef(false);
   const scrollRevisionRef = useRef(0);
@@ -263,11 +272,18 @@ export function MessageList({
 
   const items = useMemo(() => {
     const searching = Boolean(searchQuery.trim());
+    const avatarClusters: string[] = [];
+    for (const [index, message] of messages.entries()) {
+      const prev = messages[index - 1];
+      avatarClusters.push(prev && attachedInCluster(prev, message)
+        ? avatarClusters[index - 1]
+        : messageKey(message));
+    }
     return messages.map((message, index) => {
       const prev = messages[index - 1];
       const next = messages[index + 1];
       const showDay = !prev || !sameDay(prev.createdAt, message.createdAt);
-      const clustered = !!prev && attachedInCluster(prev, message);
+      const clustered = index > 0 && avatarClusters[index] === avatarClusters[index - 1];
       const attachedToNext = !!next && attachedInCluster(message, next);
       const match = messageMatches(message, searchQuery);
       const key = messageKey(message);
@@ -290,7 +306,8 @@ export function MessageList({
         message,
         showDay,
         showMeta: !clustered,
-        showAvatar: isChatMessage(message) && !attachedToNext,
+        avatarCluster: avatarClusters[index],
+        showAvatar: isChatMessage(message),
         attachPrev: clustered,
         attachNext: attachedToNext,
         mine: isMine(message, account),
@@ -305,6 +322,29 @@ export function MessageList({
   }, [account, activeMatchId, firstUnreadIndex, messages, searchQuery]);
 
   type ListItem = (typeof items)[number];
+  const nativeGroupKeys = useRef(new Map<string, string>());
+  const nativeGroups = useMemo(() => {
+    if (!desktop) return [];
+    const groups: { key: string; rows: ListItem[] }[] = [];
+    for (const item of items) {
+      const previous = groups.at(-1);
+      if (previous?.rows[0].avatarCluster === item.avatarCluster) previous.rows.push(item);
+      else groups.push({ key: item.key, rows: [item] });
+    }
+    const assigned = new Set<string>();
+    for (const group of groups) {
+      // Keep the same group and message DOM when history is prepended or a new
+      // message extends a streak, including any playing audio in that streak.
+      const existing = group.rows.map(item => nativeGroupKeys.current.get(item.key))
+        .find((key): key is string => key !== undefined && !assigned.has(key));
+      group.key = existing ?? group.key;
+      assigned.add(group.key);
+    }
+    return groups;
+  }, [desktop, items]);
+  useLayoutEffect(() => {
+    nativeGroupKeys.current = new Map(nativeGroups.flatMap(group => group.rows.map(item => [item.key, group.key] as const)));
+  }, [nativeGroups]);
   useEffect(() => {
     setShowUnreadMark(unreadAtOpen > 0);
   }, [chatId, unreadAtOpen]);
@@ -369,8 +409,13 @@ export function MessageList({
 
   const bindScroller = useCallback((element: HTMLElement | Window | null) => {
     viewportObserverRef.current?.disconnect();
+    avatarCleanupRef.current?.();
+    avatarCleanupRef.current = null;
     scrollerRef.current = element instanceof HTMLElement ? element : null;
     if (scrollerRef.current) {
+      if (!scrollerRef.current.classList.contains("room__messages--native")) {
+        avatarCleanupRef.current = bindVirtualMessageAvatars(scrollerRef.current);
+      }
       viewportObserverRef.current = new ResizeObserver(scheduleInitialPosition);
       viewportObserverRef.current.observe(scrollerRef.current);
     }
@@ -503,9 +548,23 @@ export function MessageList({
     scheduleInitialPosition();
   }
 
+  const onDesktopScroll = useCallback(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const fromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    onBottomChange(fromBottom <= 120);
+    if (!initialScrollReadyRef.current) return;
+    if (hasMore && !historyError && scroller.scrollTop < 600) void loadOlder();
+    if (hasNewer && fromBottom < 320) void loadNewer();
+  }, [hasMore, hasNewer, historyError, loadOlder, loadNewer, onBottomChange]);
+
+  useEffect(() => {
+    if (desktop && !loading && items.length) onDesktopScroll();
+  }, [desktop, items.length, loading, onDesktopScroll]);
+
   function renderItem(
     item: ListItem,
-    opts?: { skipDay?: boolean; hideAvatarColumn?: boolean },
+    opts?: { skipDay?: boolean; hideAvatarColumn?: boolean; groupAvatar?: boolean },
   ) {
     const {
       key,
@@ -527,6 +586,8 @@ export function MessageList({
       <div
         key={key}
         className={`message-block${media ? " message-block--media" : ""}${mediaStack ? " message-block--media-stack" : ""}`}
+        data-avatar-cluster={item.avatarCluster}
+        data-avatar-static={!media && !attachPrev && !attachNext || undefined}
       >
         {!opts?.skipDay && showDay && (
           <p className="day-chip">{formatDayChip(message.createdAt)}</p>
@@ -541,7 +602,7 @@ export function MessageList({
           mine={mine}
           peopleById={peopleById}
           showMeta={showMeta}
-          showAvatar={showAvatar}
+          showAvatar={showAvatar && !opts?.groupAvatar}
           hideAvatarColumn={(mine && !showOwnAvatar) || opts?.hideAvatarColumn}
           attachPrev={attachPrev}
           attachNext={attachNext}
@@ -581,6 +642,10 @@ export function MessageList({
     );
   }
 
+  const context: ListContext = { names: othersTyping, hasMore, loadingOlder,
+    preserveScroll: listWindow.prepending || listWindow.appendingHistory,
+    anchorKey: `${firstItemIndex}:${items.length}`, scrollRevision: scrollRevisionRef, historyError, onLoadOlder: loadOlder };
+
   return (
     <div className="room__messages-wrap" data-loaded-messages={messages.length}
       onWheelCapture={scrollIntent}
@@ -594,14 +659,39 @@ export function MessageList({
       </div></div> : messages.length === 0 ? <div className="room__messages"><div className="room__empty room__empty--thread">
         <p className="room__empty-brand">Майко</p><p className="room__empty-copy">Напишите первое сообщение</p>
         <TypingIndicator names={othersTyping} />
-      </div></div> : <Virtuoso
+      </div></div> : desktop ? <DesktopMessageScroller
+        key={`${chatId}:${historyVersion}`}
+        firstMessageKey={items[0]?.key ?? ""}
+        scrollerRef={bindScroller}
+        onScroll={onDesktopScroll}
+      >
+        <HistoryHeader context={context} />
+        {nativeGroups.map(group => {
+          const first = group.rows[0];
+          const sticky = (group.rows.length > 1 || first.media) && first.showAvatar && (!first.mine || showOwnAvatar)
+            && group.rows.every(item => item.message.kind !== "invite");
+          const person = first.message.authorId ? peopleById.get(first.message.authorId) : undefined;
+          return <Fragment key={group.key}>
+            {first.showDay && <p key="day" className="day-chip">{formatDayChip(first.message.createdAt)}</p>}
+            <div key="group" className={`message-avatar-group${first.mine ? " message-avatar-group--mine" : ""}`} data-avatar-overlay={sticky || undefined}>
+              {sticky && <div key="avatar" className="message-avatar-group__rail"><div className="message-avatar-group__sticky">
+                <Avatar name={person?.displayName || person?.username || first.message.author} src={person?.avatarUrl} size="md" />
+              </div></div>}
+              <div key="messages" className="message-avatar-group__body">
+                {group.rows.map((item, index) => <div key={item.key} className="message-virtual-segment">{renderItem(item, { skipDay: index === 0, groupAvatar: sticky })}</div>)}
+              </div>
+            </div>
+          </Fragment>;
+        })}
+        <HistoryFooter context={context} />
+      </DesktopMessageScroller> : <Virtuoso
         key={`${chatId}:${historyVersion}`}
         ref={virtuosoRef}
         className="room__messages room__messages--virtual"
         style={{ padding: 0, overflowAnchor: "none" }}
         data={items}
         firstItemIndex={firstItemIndex}
-        context={{ names: othersTyping, hasMore, loadingOlder, preserveScroll: listWindow.prepending || listWindow.appendingHistory, anchorKey: `${firstItemIndex}:${items.length}`, scrollRevision: scrollRevisionRef, historyError, onLoadOlder: loadOlder }}
+        context={context}
         components={listComponents}
         defaultItemHeight={76}
         alignToBottom
@@ -615,9 +705,10 @@ export function MessageList({
         }}
         endReached={() => void loadNewer()}
         onScroll={() => {
-          if (!hasNewer) return;
           const scroller = scrollerRef.current;
-          if (scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 320) void loadNewer();
+          if (!scroller) return;
+          if (hasMore && !historyError && initialScrollReadyRef.current && scroller.scrollTop < 600) void loadOlder();
+          if (hasNewer && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 320) void loadNewer();
         }}
         overscan={listOverscan}
         increaseViewportBy={listViewport}

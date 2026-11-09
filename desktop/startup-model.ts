@@ -1,9 +1,14 @@
-import { chooseMaikoIntro, createMaikoCanvasRenderer, createMaikoRenderer, MAIKO_DANCE_SECONDS } from '../site/src/lib/maikoDance';
+import { chooseMaikoIntro, createMaikoCanvasRenderer, createMaikoRenderer, prepareMaikoDance, MAIKO_DANCE_SECONDS } from '../site/src/lib/maikoDance';
+import { warmMaikoParticleWasm } from '../site/src/lib/maikoParticleWasm';
+import { warmMaikoParticleGraph } from '../site/src/lib/maikoParticleGraph';
+import type { MaikoIntro } from '../site/src/lib/maikoIntro';
 
 // All code and model bytes come from the installed application. The renderer is
 // shared with HologramMaiko; startup never waits for a server to fetch a model.
 const api = (window as Window & { maikoDesktop: {
   startupModel(intro: string): Promise<Uint8Array>;
+  startupParticleWasm(): Promise<Uint8Array>;
+  startupParticleGraph(intro: string, count: number): Promise<Uint8Array>;
   startupModelFinished(): Promise<void>;
   state(): Promise<{ phase: string; startupCovered?: boolean }>;
   onState(callback: (state: { phase: string; startupCovered?: boolean }) => void): void;
@@ -11,28 +16,51 @@ const api = (window as Window & { maikoDesktop: {
 let canvas = document.getElementById('startup-model') as HTMLCanvasElement;
 let phase = '', generation = 0;
 let dispose = () => {};
+let preparation: AbortController | undefined;
 const MINIMUM_INTRO_MS = 3000;
 const finishIntro = () => { void api.startupModelFinished().catch(() => {}); };
+const graphSource = (intro: MaikoIntro, count: number) => api.startupParticleGraph(intro, count).catch(error => {
+  void warmMaikoParticleWasm(() => api.startupParticleWasm());
+  throw error;
+});
 
 async function start(token: number) {
+  performance.mark('maiko-model-start');
   const intro = chooseMaikoIntro(Math.random());
   canvas.dataset.state = 'loading';
+  delete canvas.dataset.fallbackReason;
+  const controller = preparation = new AbortController();
+  void warmMaikoParticleGraph(intro, innerWidth < 600 ? 40000 : 84000, graphSource);
   try {
     const bytes = await api.startupModel(intro);
+    performance.mark('maiko-model-bytes');
     if (token !== generation) return;
     const buffer = new Uint8Array(bytes).buffer;
     const random = Math.random();
     let renderer: ReturnType<typeof createMaikoRenderer>;
     try {
-      renderer = createMaikoRenderer(canvas, buffer, innerWidth < 600 ? 40000 : 84000, random);
+      const limit = innerWidth < 600 ? 40000 : 84000;
+      const prepared = await prepareMaikoDance(buffer, limit, controller.signal, graphSource);
+      performance.mark('maiko-graph-ready');
+      if (token !== generation) return;
+      renderer = createMaikoRenderer(canvas, buffer, limit, random, prepared);
+      performance.mark('maiko-webgl-ready');
       canvas.dataset.renderer = 'webgl';
-    } catch {
+      canvas.dataset.points = String(prepared.dance.count);
+    } catch (error) {
+      if (token !== generation || controller.signal.aborted) return;
+      console.warn('Local startup WebGL fallback', error);
+      canvas.dataset.fallbackReason = error instanceof Error ? error.message : String(error);
       // A canvas cannot switch from WebGL to 2D after acquiring a context.
       const replacement = canvas.cloneNode() as HTMLCanvasElement;
       canvas.replaceWith(replacement);
       canvas = replacement;
-      renderer = createMaikoCanvasRenderer(canvas, buffer, innerWidth < 600 ? 7000 : 14000, random);
+      const limit = innerWidth < 600 ? 7000 : 14000;
+      const prepared = await prepareMaikoDance(buffer, limit, controller.signal, graphSource);
+      if (token !== generation) return;
+      renderer = createMaikoCanvasRenderer(canvas, buffer, limit, random, prepared);
       canvas.dataset.renderer = 'canvas';
+      canvas.dataset.points = String(prepared.dance.count);
     }
     const reduced = matchMedia('(prefers-reduced-motion: reduce)');
     let finishTimer: ReturnType<typeof setTimeout> | undefined;
@@ -95,6 +123,7 @@ async function start(token: number) {
     canvas.dataset.startedAt = String(Date.now());
     canvas.dataset.danceStart = String(renderer.startSeconds);
     resize(); resume();
+    performance.mark('maiko-first-draw');
     // The site loads in parallel. Count from the first model frame, so a warm
     // browser cache cannot dismiss the dance before it has been seen.
     if (reduced.matches) finishIntro();
@@ -112,9 +141,14 @@ function render(state: { phase: string; startupCovered?: boolean }) {
   if (phase === state.phase) return;
   phase = state.phase;
   const token = ++generation;
+  preparation?.abort();
   dispose(); dispose = () => {};
   canvas.hidden = phase !== 'loading';
   if (phase === 'loading') {
+    // A previous Canvas fallback permanently owns its 2D context. Use a fresh
+    // surface so the next refresh can recover full WebGL quality.
+    canvas.replaceWith(canvas.cloneNode());
+    canvas = document.getElementById('startup-model') as HTMLCanvasElement;
     // Let the shell finish loading so main can start the network request before
     // model decoding or first-time shader compilation occupies this renderer.
     const begin = () => { if (token === generation) void start(token); };

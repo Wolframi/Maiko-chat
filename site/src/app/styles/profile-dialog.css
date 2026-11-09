@@ -29,8 +29,8 @@
 }
 
 .profile__tabs {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   padding: 4px;
   border-radius: 12px;
@@ -39,6 +39,7 @@
 }
 
 .profile__tab {
+  flex: 1 1 auto;
   border: 0;
   border-radius: 9px;
   padding: 8px 4px;
@@ -64,6 +65,27 @@
 .registration-invites button:disabled { opacity: 0.5; cursor: default; }
 .registration-invites__admin { display: grid; gap: 12px; border-top: 1px solid var(--line); padding-top: 18px; margin-top: 4px; }
 .registration-invites__error { color: var(--danger, #ef7777); }
+
+.devices { display: grid; gap: 14px; min-width: 0; }
+.devices p { margin: 0; line-height: 1.5; }
+.devices__hint { color: var(--muted); font-size: 0.8rem; }
+.devices__toolbar { display: flex; flex-wrap: wrap; gap: 8px; }
+.devices button { padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-raised); color: var(--ink); font: inherit; font-size: 0.8rem; cursor: pointer; }
+.devices button:hover:not(:disabled) { border-color: var(--accent); }
+.devices button:disabled { opacity: 0.5; cursor: default; }
+.devices .devices__danger, .devices__error { color: var(--danger, #ef7777); }
+.devices__list { display: grid; gap: 10px; list-style: none; padding: 0; margin: 0; }
+.devices__item { display: flex; align-items: flex-start; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; }
+.devices__item.is-current { border-color: var(--accent); }
+.devices__icon { flex-shrink: 0; color: var(--muted); margin-top: 2px; }
+.devices__details { display: grid; gap: 5px; min-width: 0; overflow-wrap: anywhere; }
+.devices__details strong { font-size: 0.88rem; }
+.devices__details p { color: var(--muted); font-size: 0.76rem; }
+.devices__current { color: var(--accent); font-size: 0.74rem; }
+.devices__location { display: flex; align-items: baseline; gap: 4px; }
+.devices__location svg { flex-shrink: 0; }
+.devices__ip { font-family: monospace; }
+.devices__details button { justify-self: start; margin-top: 5px; }
 
 .voice-settings {
   display: grid;

@@ -33,6 +33,39 @@ test('bundling excludes service workers, maps and dynamic routes', () => {
   assert.equal(publicAsset('/audio/dtln-0.1.1/LICENSE'), true);
   assert.equal(publicAsset('models/README.md'), false);
   assert.equal(publicAsset('audio/dtln-0.1.1/worker.js'), true);
+  assert.equal(publicAsset('wasm/maiko-particle-graph-59e79ec8c83446cb.wasm'), true);
   assert.equal(nextAsset('/_next/static/chunks/abc123.js'), true);
   for (const url of ['/api/health', '/uploads/photo.png', '/_next/static/../secret.js', '/_next/static/chunks/a.js.map']) assert.equal(nextAsset(url), false);
+});
+
+test('bundled particle graph keeps its WASM MIME type and byte signature', async () => {
+  const artifact = require('../../site/native/particle-graph/artifact.json');
+  const file = path.join(__dirname, '../../site/public', artifact.asset);
+  const response = await localResponse(new Request('https://maiko.example' + artifact.asset), file);
+  assert.equal(response.headers.get('content-type'), 'application/wasm');
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  assert.deepEqual([...bytes.slice(0, 4)], [0, 97, 115, 109]);
+  assert.ok(WebAssembly.validate(bytes));
+});
+
+test('precomputed graph URLs and shell IPC files share the verified binary', async t => {
+  const metadata = require('../../site/native/particle-graph/precomputed.json');
+  const directory = path.join(__dirname, '../bundled-assets');
+  const saved = await fs.readFile(path.join(directory, 'manifest.json'), 'utf8').catch(error => {
+    if (error.code !== 'ENOENT') throw error;
+    return null;
+  });
+  if (!saved) { t.skip('Run npm run assets to prepare the local bundle'); return; }
+  const manifest = JSON.parse(saved);
+  for (const [intro, model] of Object.entries(metadata.models)) {
+    for (const [count, graph] of Object.entries(model.graphs)) {
+      assert.equal(manifest[`${graph.asset}.gz`], graph.asset.slice(1));
+      const binary = await fs.readFile(path.join(__dirname, '../../site/public', graph.asset));
+      assert.deepEqual(await fs.readFile(path.join(directory, 'particles', `startup-${intro}-${count}.bin`)), binary);
+      const response = await localResponse(new Request(`https://maiko.example${graph.asset}.gz`), path.join(directory, manifest[`${graph.asset}.gz`]));
+      assert.equal(response.headers.get('content-type'), 'application/octet-stream');
+      assert.equal(response.headers.get('content-encoding'), null);
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), binary);
+    }
+  }
 });
