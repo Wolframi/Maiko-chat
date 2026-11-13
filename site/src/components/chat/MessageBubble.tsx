@@ -11,6 +11,7 @@ import {
 } from "react";
 import { motion } from "motion/react";
 import type {
+  BotButton,
   ChatMessage,
   FileAttachment,
   MessageStatus,
@@ -59,6 +60,8 @@ import { AnimatedSticker } from "@/components/chat/AnimatedSticker";
 import { VideoPreview } from "@/components/chat/VideoPreview";
 import { VideoThumb } from "@/components/chat/VideoThumb";
 import { MessageMenu } from "@/components/chat/MessageMenu";
+import { MessageTable } from "@/components/chat/MessageTable";
+import { parseMarkdownTables } from "@/lib/tables";
 
 type MessageBubbleProps = {
   message: ChatMessage;
@@ -89,6 +92,10 @@ type MessageBubbleProps = {
   onForward?: (message: ChatMessage) => void;
   onInviteRespond?: (messageId: string, accept: boolean) => void;
   onTranscribe?: (messageId: string) => void;
+  /** Клик по инлайн-кнопке бота (callback уходит боту). */
+  onBotButton?: (message: ChatMessage, button: BotButton) => void | Promise<void>;
+  /** Клик по `/команде` в тексте сообщения бота. */
+  onBotCommand?: (command: string, botUsername?: string) => void;
   /** Клик по стикеру — открыть пак, из которого он отправлен. */
   onOpenStickerPack?: (packId: string, stickerId: string) => void;
   canDelete?: boolean;
@@ -154,12 +161,14 @@ function resolveAuthor(
     return {
       name: byId.displayName || byId.username,
       avatarUrl: byId.avatarUrl,
+      isBot: Boolean(byId.isBot),
     };
   }
 
   return {
     name: message.author,
     avatarUrl: undefined as string | undefined,
+    isBot: false,
   };
 }
 
@@ -817,6 +826,8 @@ function MessageBubbleInner({
   onForward,
   onInviteRespond,
   onTranscribe,
+  onBotButton,
+  onBotCommand,
   onOpenStickerPack,
   canDelete = false,
   canEdit = false,
@@ -825,6 +836,17 @@ function MessageBubbleInner({
 }: MessageBubbleProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [pressedButton, setPressedButton] = useState<string | null>(null);
+
+  async function pressButton(button: BotButton, key: string) {
+    if (!onBotButton || !button.data) return;
+    setPressedButton(key);
+    try {
+      await onBotButton(message, button);
+    } finally {
+      setPressedButton(null);
+    }
+  }
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const touchStart = useRef<{ x: number; y: number } | null>(null);
   const bubbleRef = useRef<HTMLDivElement | null>(null);
@@ -1158,7 +1180,22 @@ function MessageBubbleInner({
     }
   }
 
-  const textNode = renderMessageText(message.text, searchQuery);
+  const authorBot = message.authorId
+    ? peopleById?.get(message.authorId)
+    : undefined;
+  const textOptions =
+    authorBot && onBotCommand && authorBot.commands?.length
+      ? {
+          commands: authorBot.commands.map((item) => item.command),
+          onCommand: (token: string) => onBotCommand(token, authorBot.username),
+        }
+      : undefined;
+  const textNode = renderMessageText(message.text, searchQuery, textOptions);
+  const tableParts =
+    message.kind !== "file" && !bigEmoji
+      ? parseMarkdownTables(message.text)
+      : [];
+  const hasTables = tableParts.some((part) => part.type === "table");
   const soloGlyphs = bigEmoji
     ? splitTextAndEmoji(message.text)
         .filter((part) => part.type === "emoji")
@@ -1201,6 +1238,11 @@ function MessageBubbleInner({
         {showMeta && !mine && (
           <div className="bubble__meta-line">
             <span className="bubble__author">{author.name}</span>
+            {author.isBot && (
+              <span className="bubble__bot" title="Бот" aria-label="Бот">
+                БОТ
+              </span>
+            )}
           </div>
         )}
 
@@ -1256,6 +1298,22 @@ function MessageBubbleInner({
               {sendTime}
             </div>
           </>
+        ) : hasTables ? (
+          <div className="bubble__text bubble__text--blocks">
+            {tableParts.map((part, index) =>
+              part.type === "table" ? (
+                <MessageTable key={`table-${index}`} table={part.table} />
+              ) : part.value.trim() ? (
+                <p key={`text-${index}`} className="bubble__paragraph">
+                  {renderMessageText(part.value, searchQuery, textOptions)}
+                </p>
+              ) : null,
+            )}
+            {message.editedAt ? (
+              <em className="bubble__edited"> изменено</em>
+            ) : null}
+            {!reactions && sendTime}
+          </div>
         ) : (
           <p className="bubble__text">
             {textNode}
@@ -1267,6 +1325,46 @@ function MessageBubbleInner({
         )}
 
         {reactions}
+
+        {message.buttons && message.buttons.length > 0 && (
+          <div className="bubble__buttons" role="group" aria-label="Действия бота">
+            {message.buttons.map((row, rowIndex) => (
+              <div className="bubble__buttons-row" key={rowIndex}>
+                {row.map((button, buttonIndex) => {
+                  const key = `${rowIndex}:${buttonIndex}`;
+                  if (button.url) {
+                    return (
+                      <a
+                        key={key}
+                        className="bubble__btn"
+                        href={button.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        {button.text}
+                      </a>
+                    );
+                  }
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      className={`bubble__btn${pressedButton === key ? " is-pressed" : ""}`}
+                      disabled={pressedButton !== null || !onBotButton}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void pressButton(button, key);
+                      }}
+                    >
+                      {button.text}
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        )}
 
         {mine && message.status === "failed" && (
           <div className="bubble__fail">

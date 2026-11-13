@@ -122,7 +122,10 @@ function MemberRow({
           {name}
           {isSelf ? " (вы)" : ""}
         </strong>
-        <em>{isOwner ? "Создатель сервера" : `@${user.username}`}</em>
+        <em>
+          {isOwner ? "Создатель сервера" : `@${user.username}`}
+          {user.isBot ? " · бот" : ""}
+        </em>
       </span>
     </button>
   );

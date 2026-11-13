@@ -3,7 +3,7 @@ import { shallowEqual } from "./externalStore";
 
 /** Routing and header data; live previews and voice activity belong to the sidebar. */
 export type ShellChat = Pick<ChatInfo, "id" | "type" | "title" | "topic" | "members" | "peerId" |
-  "avatarUrl" | "createdBy" | "memberIds" | "visibility"> & {
+  "peerIsBot" | "peerUsername" | "peerDescription" | "peerCommands" | "avatarUrl" | "createdBy" | "memberIds" | "visibility"> & {
   textChannels?: { id: string; title: string }[];
 };
 
@@ -18,7 +18,7 @@ export function createChatCatalogSelector() {
         nextCache.set(chat.id, previous);
         return previous.value;
       }
-      const { id, type, title, topic, members, peerId, avatarUrl, createdBy, visibility } = chat;
+      const { id, type, title, topic, members, peerId, peerIsBot, peerUsername, peerDescription, peerCommands, avatarUrl, createdBy, visibility } = chat;
       let memberIds = chat.memberIds;
       let textChannels = chat.textChannels?.map(({ id, title }) => ({ id, title }));
       if (previous) {
@@ -28,7 +28,7 @@ export function createChatCatalogSelector() {
           textChannels = previous.value.textChannels;
         }
       }
-      const projection: ShellChat = { id, type, title, topic, members, peerId, avatarUrl, createdBy, visibility, memberIds, textChannels };
+      const projection: ShellChat = { id, type, title, topic, members, peerId, peerIsBot, peerUsername, peerDescription, peerCommands, avatarUrl, createdBy, visibility, memberIds, textChannels };
       const value = previous && shallowEqual(previous.value, projection) ? previous.value : projection;
       nextCache.set(id, { source: chat, value });
       return value;

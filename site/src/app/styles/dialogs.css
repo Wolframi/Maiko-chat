@@ -26,6 +26,62 @@
 .mention-menu__meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .mention-menu__meta strong { font-size: 0.92rem; }
 .mention-menu__meta em { font-style: normal; color: var(--muted); font-size: 0.78rem; }
+
+/* `/` autocomplete for bot commands — same geometry as the mention menu. */
+.command-menu {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(100% - 4px);
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border-radius: 12px;
+  background: #16161a;
+  border: 1px solid var(--line);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  max-height: 240px;
+  overflow: auto;
+}
+
+.command-menu__item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 8px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.command-menu__item.is-active,
+.command-menu__item:hover {
+  background: rgba(76, 109, 169, 0.16);
+}
+
+.command-menu__name {
+  flex: 0 0 auto;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: color-mix(in srgb, var(--accent) 55%, var(--ink));
+}
+
+.command-menu__desc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
 .forward-sheet { position: fixed; inset: 0; z-index: 60; display: grid; place-items: end center; padding: 16px; }
 .avatar-crop {
   position: fixed;

@@ -138,6 +138,19 @@ export function getChat(id: string) {
   return chats.get(id) ?? ownerOfTextChannel(id);
 }
 
+/** Used by the bot CLI, which knows a group by its visible title. */
+export function findGroupByTitle(titleRaw: string) {
+  const raw = titleRaw.trim();
+  if (!raw) return null;
+  const exactId = chats.get(raw);
+  if (exactId?.type === "group") return exactId;
+  const title = raw.toLowerCase();
+  const hits = [...chats.values()].filter(
+    (chat) => chat.type === "group" && chat.title.trim().toLowerCase() === title,
+  );
+  return hits.length === 1 ? hits[0] : null;
+}
+
 /** Message bucket for a group or one of its extra text channels. */
 export function messageRoomFor(chat: ChatMeta, roomId: string) {
   if (!roomId || roomId === chat.id) return chat.id;
@@ -615,8 +628,30 @@ export function leaveGroup(chatId: string, userId: string) {
   return { ok: true as const, chat };
 }
 
-export function dmTitleForViewer(chat: ChatMeta, viewerId: string) {
-  if (chat.type !== "dm") return chat.title;
+/**
+ * Drops a user from every chat. Used when a manual bot is removed: its messages
+ * stay as history, but the account must disappear from member lists and DMs.
+ */
+export function removeMemberEverywhere(userId: string) {
+  const changed: ChatMeta[] = [];
+  for (const chat of chats.values()) {
+    if (!chat.memberIds.includes(userId)) continue;
+    const members = chat.memberIds.filter((id) => id !== userId);
+    if (chat.type === "dm" || members.length === 0) {
+      chats.delete(chat.id);
+      changed.push(chat);
+      continue;
+    }
+    chat.memberIds = members;
+    if (chat.createdBy === userId) chat.createdBy = members[0];
+    chats.set(chat.id, chat);
+    changed.push(chat);
+  }
+  if (changed.length) saveChats();
+  return changed;
+}
+
+export function dmTitleForViewer(chat: ChatMeta, viewerId: string) {  if (chat.type !== "dm") return chat.title;
   const otherId = chat.memberIds.find((id) => id !== viewerId);
   return otherId ? getDisplayNameById(otherId) : chat.title;
 }
@@ -652,6 +687,7 @@ export function listMemberProfiles(
     bio: string;
     online: boolean;
     lastSeenAt?: number;
+    isBot?: boolean;
   }[] = [];
 
   for (const id of ids) {
@@ -665,6 +701,7 @@ export function listMemberProfiles(
       bio: user.bio || "",
       online: onlineIds.has(user.id),
       lastSeenAt: user.lastSeenAt,
+      ...(user.isBot ? { isBot: true } : {}),
     });
   }
 

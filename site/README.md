@@ -39,6 +39,23 @@ Created automatically unless `SEED_DEMO=0`:
 | bob | Bob12345! |
 | kirill | Kirill123! |
 
+## Bots
+
+Боты добавляются вручную и работают отдельным процессом с токеном — на вашем
+ПК, не на сервере. Умеют отправлять сообщения и файлы, отвечать на `/команды`,
+показывать инлайн-кнопки, объявлять список команд, описание и аватар; `/команды`
+в сообщениях бота кликабельны; в пустом ЛС есть кнопка **Старт**.
+
+```bash
+npm run dev                                   # создаст data/bot-admin-secret.txt
+npm run bots:add -- --name "Эхо" --username echo_bot
+node bots/echo-bot.mjs --token maiko_bot_...  # пример на JavaScript
+python3 bots/python/example_bot.py --token maiko_bot_...   # пример на Python
+```
+
+Примеры: [bots/README.md](bots/README.md). Полная инструкция и API:
+[docs/bots.md](../docs/bots.md).
+
 ## Production
 
 ```bash

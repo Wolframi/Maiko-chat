@@ -36,6 +36,10 @@ export type StoredUser = {
   lastSeenAt?: number;
   invitedBy?: string;
   ringtoneSettings?: { ringtone: SavedRingtone | null; custom: SavedRingtone | null };
+  /** Bot accounts authenticate by token, never by password. */
+  isBot?: boolean;
+  /** Human who created the bot (for the admin list). */
+  botOwnerId?: string;
 };
 
 export type AuthAccount = {
@@ -54,6 +58,7 @@ export type PublicUser = {
   avatarUrl?: string;
   bio: string;
   lastSeenAt?: number;
+  isBot?: boolean;
 };
 
 type AuthResult =
@@ -100,6 +105,7 @@ function toPublic(user: StoredUser): PublicUser {
     avatarUrl: user.avatarUrl,
     bio: user.bio || "",
     lastSeenAt: user.lastSeenAt,
+    ...(user.isBot ? { isBot: true } : {}),
   };
 }
 
@@ -140,7 +146,7 @@ function atomicWriteJson(filePath: string, payload: unknown) {
 }
 
 /** Users file never stores live session tokens. */
-function saveUsers() {
+function saveUsers(allowEmpty = false) {
   const safe = [...usersByName.values()].map((user) => ({
     id: user.id,
     username: user.username,
@@ -152,8 +158,10 @@ function saveUsers() {
     lastSeenAt: user.lastSeenAt,
     ringtoneSettings: user.ringtoneSettings,
     invitedBy: user.invitedBy,
+    isBot: user.isBot,
+    botOwnerId: user.botOwnerId,
   }));
-  if (safe.length === 0 && existsSync(USERS_FILE)) {
+  if (!allowEmpty && safe.length === 0 && existsSync(USERS_FILE)) {
     console.error("[auth] refuse to replace users.json with an empty list");
     return;
   }
@@ -169,8 +177,8 @@ function saveSessions() {
   atomicWriteJson(SESSIONS_FILE, rows);
 }
 
-function persistAuth() {
-  saveUsers();
+function persistAuth(allowEmptyUsers = false) {
+  saveUsers(allowEmptyUsers);
   saveSessions();
 }
 
@@ -413,8 +421,79 @@ export async function registerUser(usernameRaw: string, passwordRaw: string, cli
   return { ok: true, account: issueSession(user) };
 }
 
-/** Creates demo accounts if missing (for local/demo deploys). */
-export async function ensureDemoUsers() {
+export type BotAccountInput = {
+  username: string;
+  displayName: string;
+  bio?: string;
+  avatarUrl?: string;
+  ownerId?: string;
+};
+
+/**
+ * Bots are ordinary user records (so chats, members, DMs and messages work
+ * unchanged) with two differences: `isBot` and a random password nobody knows.
+ * Authentication happens through the bot token, never through login.
+ */
+export async function createBotUser(
+  input: BotAccountInput,
+): Promise<{ ok: true; user: StoredUser } | { ok: false; error: string }> {
+  const username = normalizeUsername(input.username);
+  const usernameError = validateUsername(username);
+  if (usernameError) return { ok: false, error: usernameError };
+  if (usersByName.has(username.toLowerCase())) {
+    return { ok: false, error: "Такой логин уже занят" };
+  }
+  const displayName = normalizeDisplayName(input.displayName, username);
+  if (displayName.length < 2) return { ok: false, error: "Имя бота от 2 символов" };
+  const avatarUrl = String(input.avatarUrl || "").trim();
+  if (avatarUrl && !isPlausibleAvatarUrl(avatarUrl)) {
+    return { ok: false, error: "Некорректный аватар бота" };
+  }
+  const passwordHash = await hashPassword(randomBytes(32).toString("hex"));
+  // Another registration may have taken the name while scrypt was running.
+  if (usersByName.has(username.toLowerCase())) {
+    return { ok: false, error: "Такой логин уже занят" };
+  }
+  const user: StoredUser = {
+    id: randomUUID(),
+    username,
+    displayName,
+    passwordHash,
+    createdAt: Date.now(),
+    bio: normalizeBio(input.bio || ""),
+    isBot: true,
+    ...(input.ownerId ? { botOwnerId: String(input.ownerId).slice(0, 64) } : {}),
+    ...(avatarUrl ? { avatarUrl } : {}),
+  };
+  usersByName.set(username.toLowerCase(), user);
+  try {
+    persistAuth();
+  } catch (error) {
+    usersByName.delete(username.toLowerCase());
+    throw error;
+  }
+  return { ok: true, user };
+}
+
+/** Removes the bot's user record and every session it could have had. */
+export function removeBotUser(userId: string): boolean {
+  const user = findUserById(userId);
+  if (!user || !user.isBot) return false;
+  usersByName.delete(user.username.toLowerCase());
+  for (const [token, session] of [...sessionsByToken]) {
+    if (session.userId !== userId) continue;
+    sessionsByToken.delete(token);
+    sessionRevokeHandler?.({ userId, revokedToken: token });
+  }
+  persistAuth(true);
+  return true;
+}
+
+export function isBotUser(userId: string): boolean {
+  return Boolean(findUserById(String(userId || ""))?.isBot);
+}
+
+/** Creates demo accounts if missing (for local/demo deploys). */export async function ensureDemoUsers() {
   const demos: {
     username: string;
     password: string;
@@ -485,6 +564,12 @@ export async function loginUser(usernameRaw: string, passwordRaw: string): Promi
   const password = String(passwordRaw || "");
   const user = usersByName.get(username.toLowerCase());
   if (!user) {
+    await verifyPassword(password, LOGIN_DUMMY_HASH);
+    return { ok: false, error: "Неверный логин или пароль" };
+  }
+  // Bot accounts have an unguessable random password; keep the reply identical
+  // to a wrong password so the login form cannot enumerate bots.
+  if (user.isBot) {
     await verifyPassword(password, LOGIN_DUMMY_HASH);
     return { ok: false, error: "Неверный логин или пароль" };
   }

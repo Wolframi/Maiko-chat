@@ -1068,6 +1068,7 @@ export function ChatSidebar({
                       <strong>{user.displayName || user.username}</strong>
                       <em>
                         @{user.username}
+                        {user.isBot ? " · бот" : ""}
                         {user.online ? " · в сети" : ""}
                       </em>
                     </span>

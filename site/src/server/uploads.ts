@@ -26,6 +26,7 @@ import {
 } from "./objectStorage";
 import { isDevAccessibleHost } from "../lib/devHosts";
 import { restoreSession } from "./auth";
+import { resolveBotToken } from "./bots";
 import { rateLimit } from "./rateLimit";
 import { createMediaPreviewService, previewWithin } from "./mediaPreview";
 import { microPreviewWithin } from "./mediaMicroPreview";
@@ -977,7 +978,11 @@ export function handleUpload(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  if (!isAllowedUploadOrigin(req)) {
+  // Bots authenticate with their own token; they run outside a browser and
+  // therefore send no Origin/Referer at all.
+  const bot = resolveBotToken(String(req.headers["x-bot-token"] || ""));
+
+  if (!bot && !isAllowedUploadOrigin(req)) {
     res.statusCode = 403;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ ok: false, error: "Запрещённый Origin" }));
@@ -990,14 +995,14 @@ export function handleUpload(req: IncomingMessage, res: ServerResponse) {
   const maxSize = isAvatar ? AVATAR_MAX_SIZE : MAX_SIZE;
 
   // Header-only auth — never accept ?token= (leaks via Referer/logs)
-  const token = String(req.headers["x-pulse-token"] || "");
-  const session = restoreSession(token);
-  if (!session.ok) {
+  const session = bot ? null : restoreSession(String(req.headers["x-pulse-token"] || ""));
+  if (!bot && (!session || !session.ok)) {
     res.statusCode = 401;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ ok: false, error: "Нужен вход" }));
     return;
   }
+  const ownerId = bot ? bot.botId : session && session.ok ? session.account.userId : "";
 
   const directAction = parsed.pathname.startsWith(DIRECT_PREFIX)
     ? parsed.pathname.slice(DIRECT_PREFIX.length)
@@ -1005,7 +1010,7 @@ export function handleUpload(req: IncomingMessage, res: ServerResponse) {
   const clientKey =
     String(req.socket.remoteAddress || "unknown") +
     ":" +
-    session.account.userId;
+    ownerId;
   if (
     (!directAction || directAction === "start") &&
     !rateLimit(`upload:${clientKey}`, 30, 60_000)
@@ -1016,7 +1021,7 @@ export function handleUpload(req: IncomingMessage, res: ServerResponse) {
     return;
   }
   if (directAction) {
-    void handleDirectUpload(req, res, directAction, session.account.userId).catch((error) => {
+    void handleDirectUpload(req, res, directAction, ownerId).catch((error) => {
       console.error("[upload] direct failed", (error as Error).name);
       sendJson(res, 503, { ok: false, error: "Хранилище недоступно" });
     });
@@ -1263,7 +1268,7 @@ export function handleUpload(req: IncomingMessage, res: ServerResponse) {
         respond(400, { ok: false, error: "Не удалось сохранить файл" });
         return;
       }
-      rememberUploadOwner(saved.url, session.account.userId);
+      rememberUploadOwner(saved.url, ownerId);
       respond(200, {
         ok: true,
         file: { ...saved, url: signUploadUrl(saved.url) },

@@ -339,6 +339,113 @@
   line-height: 1.4;
 }
 
+/* Invite-code popover in the room header. */
+.group-invite-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.group-invite-pop {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 80;
+  width: min(300px, calc(100vw - 24px));
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+
+.group-invite-pop__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.group-invite-pop__title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.group-invite-pop__close {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
+.group-invite-pop__close:hover,
+.group-invite-pop__close:focus-visible {
+  color: var(--ink);
+  outline: none;
+}
+
+.group-invite-pop__code {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-deep);
+  color: var(--ink);
+  font-family: ui-monospace, monospace;
+  font-size: 0.95rem;
+  letter-spacing: 0.08em;
+  text-align: center;
+  cursor: text;
+}
+
+.group-invite-pop__code:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.group-invite-pop__hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.group-invite-pop__actions {
+  display: flex;
+  gap: 6px;
+}
+
+.group-invite-pop__copy,
+.group-invite-pop__cancel {
+  flex: 1 1 0;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.group-invite-pop__copy {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.group-invite-pop__copy:hover,
+.group-invite-pop__cancel:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
 /* Call members follow Invite and share the channel list's scroller. */
 .sidebar__call-members {
   min-width: 0;

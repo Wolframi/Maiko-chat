@@ -23,7 +23,10 @@
     "prebuild": "npm run audio:prepare && npm run models:prepare && npm run particles:prepare",
     "prestart": "npm run audio:prepare && npm run models:prepare && npm run particles:prepare",
     "test": "tsx --test tests/*.test.ts",
-    "messages:migrate": "tsx scripts/migrate-messages-mongodb.ts"
+    "messages:migrate": "tsx scripts/migrate-messages-mongodb.ts",
+    "bots:add": "node scripts/bots-add.mjs",
+    "bots:demo": "node bots/echo-bot.mjs",
+    "bots:test": "node bots/test-bot.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1139.0",
@@ -31,6 +34,7 @@
     "@deepgram/sdk": "^5.13.0",
     "@emoji-mart/data": "^1.2.1",
     "@emoji-mart/react": "^1.1.1",
+    "@livekit/rtc-node": "^1.2.1",
     "@next/env": "16.2.12",
     "@wavesurfer/react": "^1.0.12",
     "@workadventure/noise-suppression": "0.1.1",

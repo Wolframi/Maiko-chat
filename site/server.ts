@@ -67,6 +67,7 @@ import {
   ensureVoiceChannels,
   findVoiceChannel,
   getChat,
+  findGroupByTitle,
   groupVisibility,
   joinPublicGroup,
   getGroupInviteCode,
@@ -82,12 +83,13 @@ import {
   updateGroupVisibility,
   deleteGroup,
   leaveGroup,
+  removeMemberEverywhere,
   isProtectedChat,
   type ChatMeta,
+  type VoiceChannelMeta,
 } from "./src/server/chats";
 import {
-  addSticker as addStickerToPack,
-  canSendSticker,
+  addSticker as addStickerToPack,  canSendSticker,
   createPack as createStickerPack,
   deletePack as deleteStickerPack,
   findSticker,
@@ -98,6 +100,32 @@ import {
   uninstallPack as uninstallStickerPack,
   updatePackTitle,
 } from "./src/server/stickers";
+import {
+  botAdminSecret,
+  botProfileMeta,
+  createBot,
+  findBot,
+  findBotByUsername,
+  isBotUserId,
+  listBots,
+  markBotConnected,
+  publicBot,
+  removeBot,
+  resolveBotToken,
+  rotateBotToken,
+  setBotCommands,
+  setBotDescription,
+  setBotDisplayName,
+  verifyBotAdminSecret,
+} from "./src/server/bots";
+import {
+  BOT_MAX_CAPTION,
+  BOT_MAX_FILES,
+  BOT_MAX_TEXT,
+  normalizeBotButtons,
+  parseBotCommand,
+  sanitizeBotText,
+} from "./src/server/botProtocol";
 import {
   handleUpload,
   tryServeUpload,
@@ -150,7 +178,7 @@ import {
 } from "./src/server/transcribe";
 import { parseGiphyMediaUrl } from "./src/lib/giphyMedia";
 import { validMicroPreview } from "./src/lib/microPreview";
-import type { RoomMediaItem } from "./src/lib/types";
+import type { BotButton, RoomMediaItem } from "./src/lib/types";
 import {
   isDevAccessibleHost,
   lanIPv4Addresses,
@@ -408,6 +436,8 @@ type ChatMessage = {
     width?: number;
     height?: number;
   };
+  /** Inline keyboard rows; only bot messages carry them. */
+  buttons?: BotButton[][];
   reactions?: MessageReaction[];
   transcription?: string;
   transcriptionStatus?: "pending" | "ready" | "error";
@@ -1188,11 +1218,41 @@ async function* scanMessages(chatId?: string, viewerId?: string, newestFirst = f
 
 async function emitRoomMessage(io: Server, event: "message" | "message:update", message: ChatMessage) {
   for (const socketId of io.sockets.adapter.rooms.get(message.room) || []) {
-    const account = getSocketAccount(socketId);
-    if (!account || !messageVisibleTo(message, account.userId)) continue;
     const client = io.sockets.sockets.get(socketId);
-    if (client && isSocketBackedUp(client)) { client.disconnect(true); continue; }
-    io.to(socketId).emit(event, await publicMessage(message, account.userId));
+    if (!client) continue;
+    const account = getSocketAccount(socketId);
+    if (account) {
+      if (!messageVisibleTo(message, account.userId)) continue;
+      if (isSocketBackedUp(client)) { client.disconnect(true); continue; }
+      io.to(socketId).emit(event, await publicMessage(message, account.userId));
+      continue;
+    }
+    // Bots are not user sessions: they receive the room they were joined to.
+    const bot = botSessionOf(client);
+    if (!bot) continue;
+    // Never echo a bot's own message back to it — that would invite reply loops.
+    if (message.authorId === bot.botId) continue;
+    const chat = getChat(message.room);
+    if (!chat || !canAccessChat(chat, bot.botId)) continue;
+    // Slow bots are throttled by their rate limits, never killed silently.
+    const payload = await publicMessage(message, bot.botId);
+    if (event !== "message" || message.kind === "system") {
+      io.to(socketId).emit(event, payload);
+      continue;
+    }
+    const command = isBotUserId(message.authorId) ? null : parseBotCommand(message.text);
+    io.to(socketId).emit(event, command
+      ? {
+          ...payload,
+          command: {
+            name: command.name,
+            args: command.args,
+            target: command.target,
+            // Private chat has a single bot, so `/help` is unambiguous there.
+            addressed: command.target ? command.target === bot.username.toLowerCase() : chat.type === "dm",
+          },
+        }
+      : payload);
   }
 }
 
@@ -1335,11 +1395,14 @@ function presenceNames(room: string) {
 }
 
 function onlineUserIds() {
-  return new Set(
+  const online = new Set(
     [...usersBySocket.values()]
       .filter((user) => Boolean(user.userId))
       .map((user) => user.userId),
   );
+  // Bots have no presence entry; a live bot socket means the bot is online.
+  for (const botId of botSocketsById.keys()) online.add(botId);
+  return online;
 }
 
 function contactIdsFor(userId: string) {
@@ -1430,6 +1493,8 @@ function peopleForViewer(viewerId: string) {
       bio: user.id === viewerId ? user.bio : "",
       lastSeenAt: user.id === viewerId ? user.lastSeenAt : undefined,
       online: online.has(user.id),
+      ...(user.isBot ? { isBot: true } : {}),
+      ...botPeopleFields(user.id, user.isBot),
     }))
     .sort((a, b) => {
       if (a.online !== b.online) return a.online ? -1 : 1;
@@ -1460,6 +1525,8 @@ function searchPeople(viewerId: string, queryRaw: string) {
       avatarUrl: user.avatarUrl
         ? signAvatarUrl(bareUploadUrl(user.avatarUrl))
         : undefined,
+      ...(user.isBot ? { isBot: true } : {}),
+      ...botPeopleFields(user.id, user.isBot),
     }));
 }
 
@@ -1483,6 +1550,8 @@ function suggestPeople(viewerId: string, query = "") {
       avatarUrl: user.avatarUrl
         ? signAvatarUrl(bareUploadUrl(user.avatarUrl))
         : undefined,
+      ...(user.isBot ? { isBot: true } : {}),
+      ...botPeopleFields(user.id, user.isBot),
     }));
 }
 
@@ -1499,9 +1568,23 @@ function labelOf(account: AuthAccount) {
   return account.displayName || account.username;
 }
 
+/** Bot description/commands for people payloads (empty for humans). */
+function botPeopleFields(userId: string, isBot?: boolean) {
+  if (!isBot) return {};
+  const meta = botProfileMeta(userId);
+  if (!meta) return {};
+  return {
+    ...(meta.description ? { description: meta.description } : {}),
+    ...(meta.commands.length ? { commands: meta.commands } : {}),
+  };
+}
+
 async function chatInfo(chat: ChatMeta, viewerId: string) {
   const { count, unreadCount, last } = await messageSummary(chat.id, viewerId);
   const preview = last ? chatListPreview(last) : null;
+  const peer = peerIdForViewer(chat, viewerId);
+  const peerUser = peer ? getUserById(peer) : undefined;
+  const peerBotMeta = peerUser?.isBot ? botProfileMeta(peerUser.id) : null;
 
   const group =
     chat.type === "group" ? ensureVoiceChannels(chat) : chat;
@@ -1510,13 +1593,27 @@ async function chatInfo(chat: ChatMeta, viewerId: string) {
     id: chat.id,
     type: chat.type,
     title: dmTitleForViewer(chat, viewerId),
-    topic: chat.topic,
+    topic: chat.type === "dm" && peerBotMeta?.description
+      ? peerBotMeta.description
+      : chat.topic,
     online: presenceNames(chat.id).length,
     messages: count,
     members: chat.type === "channel" ? onlineUserIds().size : chat.memberIds.length,
     unreadCount,
     pinned: isPinned(viewerId, chat.id),
-    peerId: peerIdForViewer(chat, viewerId),
+    peerId: peer,
+    ...(peerUser?.isBot
+      ? {
+          peerIsBot: true,
+          peerUsername: peerUser.username,
+          ...(peerBotMeta?.description
+            ? { peerDescription: peerBotMeta.description }
+            : {}),
+          ...(peerBotMeta?.commands.length
+            ? { peerCommands: peerBotMeta.commands }
+            : {}),
+        }
+      : {}),
     avatarUrl: chat.avatarUrl
       ? signAvatarUrl(bareUploadUrl(chat.avatarUrl))
       : undefined,
@@ -1595,6 +1692,10 @@ function emitVoiceState(io: Server, group: ChatMeta) {
   const payload = voiceStateForGroup(group);
   for (const memberId of group.memberIds) {
     emitToUser(io, memberId, "voice:state", payload);
+    // Bots track channel occupancy so scripts can answer "кто в канале".
+    if (isBotUserId(memberId)) {
+      emitToBotSockets(io, memberId, "bot:voiceState", payload);
+    }
   }
 }
 
@@ -1712,6 +1813,296 @@ function emitToUser(io: Server, userId: string, event: string, payload: unknown)
   }
 }
 
+/** botId → socket ids of the bot process(es) currently connected. */
+const botSocketsById = new Map<string, Set<string>>();
+
+type BotSocketSession = {
+  botId: string;
+  username: string;
+  displayName: string;
+};
+
+function botSocketIds(botId: string) {
+  return botSocketsById.get(botId) ?? new Set<string>();
+}
+
+/** Delivers an event to every live socket of one bot; returns the delivery count. */
+function emitToBotSockets(io: Server, botId: string, event: string, payload: unknown) {
+  let delivered = 0;
+  for (const socketId of botSocketIds(botId)) {
+    const target = io.sockets.sockets.get(socketId);
+    if (!target) continue;
+    target.emit(event, payload);
+    delivered += 1;
+  }
+  return delivered;
+}
+
+function registerBotSocket(botId: string, socketId: string) {
+  const sockets = botSocketsById.get(botId) ?? new Set<string>();
+  sockets.add(socketId);
+  botSocketsById.set(botId, sockets);
+}
+
+function unregisterBotSocket(botId: string, socketId: string) {
+  const sockets = botSocketsById.get(botId);
+  if (!sockets) return;
+  sockets.delete(socketId);
+  if (sockets.size === 0) botSocketsById.delete(botId);
+}
+
+function botSessionOf(socket: Socket): BotSocketSession | null {
+  const session = socket.data?.bot as BotSocketSession | undefined;
+  return session && typeof session.botId === "string" ? session : null;
+}
+
+/** Every message bucket of a chat: #general plus the extra text channels. */
+function chatRoomIds(chat: ChatMeta) {
+  return [chat.id, ...(chat.textChannels || []).map((channel) => channel.id)];
+}
+
+/**
+ * A bot added to a chat while connected must start receiving its messages
+ * without reconnecting. Bots are joined to every room of the chat.
+ */
+function syncBotRooms(io: Server, chat: ChatMeta) {
+  const rooms = chatRoomIds(chat);
+  for (const memberId of chat.memberIds) {
+    if (!findBot(memberId)) continue;
+    for (const socketId of botSocketIds(memberId)) {
+      const botSocket = io.sockets.sockets.get(socketId);
+      if (!botSocket) continue;
+      for (const roomId of rooms) botSocket.join(roomId);
+      botSocket.emit("bot:added", {
+        chatId: chat.id,
+        type: chat.type,
+        title: chat.title,
+      });
+    }
+  }
+}
+
+function botChatSummaries(botId: string) {
+  return listChatsForUser(botId).map((chat) => ({
+    id: chat.id,
+    type: chat.type,
+    title: chat.type === "dm" ? dmTitleForViewer(chat, botId) : chat.title,
+    topic: chat.topic,
+    rooms: chatRoomIds(chat),
+    peerId: peerIdForViewer(chat, botId),
+    voiceChannels:
+      chat.type === "group"
+        ? (chat.voiceChannels || []).map((channel) => ({
+            id: channel.id,
+            title: channel.title,
+            users: voiceUsersForChannel(channel.id),
+          }))
+        : undefined,
+  }));
+}
+
+type BotVoiceChannel = {
+  group: ChatMeta;
+  channel: VoiceChannelMeta;
+  channelId: string;
+};
+
+function botVoiceChannel(botId: string, raw: unknown): BotVoiceChannel | null {
+  const channelId = String(raw || "").slice(0, 200);
+  const found = findVoiceChannel(channelId);
+  if (!found || !canAccessChat(found.group, botId)) return null;
+  return { group: found.group, channel: found.channel, channelId };
+}
+
+/**
+ * LiveKit credentials for a bot. The bot process publishes audio/video itself;
+ * the server only registers presence and grants publish rights for the room.
+ */
+async function botVoiceCredentials(
+  socket: Socket,
+  bot: BotSocketSession,
+  channelId: string,
+) {
+  const config = loadLiveKitConfig();
+  if (!config.url || !config.apiKey || !config.apiSecret) return null;
+  const participant = new AccessToken(config.apiKey, config.apiSecret, {
+    identity: bot.botId,
+    name: bot.displayName,
+    ttl: "2h",
+  });
+  participant.addGrant({
+    roomJoin: true,
+    room: liveKitRoomName(channelId),
+    canPublish: true,
+    canSubscribe: true,
+    canPublishData: true,
+    canPublishSources: [
+      TrackSource.MICROPHONE,
+      TrackSource.CAMERA,
+      TrackSource.SCREEN_SHARE,
+      TrackSource.SCREEN_SHARE_AUDIO,
+    ],
+  });
+  return {
+    url: publicLiveKitUrl(socket.request),
+    room: liveKitRoomName(channelId),
+    token: await participant.toJwt(),
+    canPublish: ["microphone", "camera", "screen_share", "screen_share_audio"],
+  };
+}
+
+function botJoinVoice(
+  io: Server,
+  socket: Socket,
+  bot: BotSocketSession,
+  channelIdRaw: unknown,
+) {
+  const found = botVoiceChannel(bot.botId, channelIdRaw);
+  if (!found) return { ok: false as const, error: "Голосовой канал не найден" };
+  const channelId = found.channelId;
+
+  // A bot is in one channel at a time; drop previous presence (any socket).
+  const previousChannel = voiceByUser.get(bot.botId);
+  if (previousChannel) {
+    const previousRoom = voiceByChannel.get(previousChannel);
+    const previousMember = previousRoom?.get(bot.botId);
+    if (previousRoom && previousMember) {
+      const previousSize = previousRoom.size;
+      previousRoom.delete(bot.botId);
+      voiceBySocket.delete(previousMember.socketId);
+      if (previousRoom.size === 0) voiceByChannel.delete(previousChannel);
+      voiceByUser.delete(bot.botId);
+      void removeLiveKitParticipant(previousChannel, bot.botId);
+      maybeBumpVoiceTopology(previousChannel, previousSize);
+      const previousFound = findVoiceChannel(previousChannel);
+      if (previousFound) emitVoiceState(io, previousFound.group);
+    }
+  }
+  voiceBySocket.delete(socket.id);
+
+  let room = voiceByChannel.get(channelId);
+  if (!room) {
+    room = new Map<string, VoiceMember>();
+    voiceByChannel.set(channelId, room);
+  }
+  if (room.size >= 12) return { ok: false as const, error: "Канал заполнен" };
+
+  const previousSize = room.size;
+  const member: VoiceMember = {
+    userId: bot.botId,
+    name: bot.displayName,
+    muted: true,
+    deafened: false,
+    speaking: false,
+    cameraOff: true,
+    sharingScreen: false,
+    mediaRevision: 0,
+    avatarUrl: getUserById(bot.botId)?.avatarUrl,
+    socketId: socket.id,
+  };
+  room.set(bot.botId, member);
+  voiceByUser.set(bot.botId, channelId);
+  voiceBySocket.set(socket.id, channelId);
+  maybeBumpVoiceTopology(channelId, previousSize);
+  persistLiveMedia();
+  emitVoiceState(io, found.group);
+
+  return {
+    ok: true as const,
+    channelId,
+    groupId: found.group.id,
+    channel: { id: found.channel.id, title: found.channel.title },
+    members: voiceUsersForChannel(channelId),
+  };
+}
+
+function botLeaveVoice(io: Server, socket: Socket, bot: BotSocketSession) {
+  const channelId = voiceByUser.get(bot.botId) || null;
+  leaveVoiceChannel(io, socket, bot.botId);
+  return {
+    ok: true as const,
+    channelId,
+    members: channelId ? voiceUsersForChannel(channelId) : [],
+  };
+}
+
+function botSetVoiceMedia(
+  io: Server,
+  socket: Socket,
+  bot: BotSocketSession,
+  payload: {
+    muted?: unknown;
+    deafened?: unknown;
+    cameraOff?: unknown;
+    sharingScreen?: unknown;
+  },
+) {
+  const channelId = voiceByUser.get(bot.botId);
+  if (!channelId) return { ok: false as const, error: "Бот не в голосовом канале" };
+  const room = voiceByChannel.get(channelId);
+  const member = room?.get(bot.botId);
+  if (!room || !member || member.socketId !== socket.id) {
+    return { ok: false as const, error: "Нет доступа" };
+  }
+
+  let supplied = false;
+  let changed = false;
+  const apply = (
+    key: "muted" | "deafened" | "cameraOff" | "sharingScreen",
+    value: unknown,
+  ) => {
+    if (typeof value !== "boolean") return;
+    supplied = true;
+    if (member[key] !== value) {
+      member[key] = value;
+      changed = true;
+    }
+  };
+  apply("muted", payload?.muted);
+  apply("deafened", payload?.deafened);
+  apply("cameraOff", payload?.cameraOff);
+  apply("sharingScreen", payload?.sharingScreen);
+  if (!supplied) return { ok: false as const, error: "Нет изменений" };
+  if (member.muted) member.speaking = false;
+  if (changed) member.mediaRevision += 1;
+  room.set(bot.botId, member);
+
+  const mediaState = {
+    channelId,
+    userId: bot.botId,
+    cameraOff: member.cameraOff,
+    sharingScreen: member.sharingScreen,
+    mediaRevision: member.mediaRevision,
+  };
+  for (const voiceMember of room.values()) {
+    io.to(voiceMember.socketId).emit("voice:media", mediaState);
+  }
+  if (changed) {
+    const found = findVoiceChannel(channelId);
+    if (found) emitVoiceState(io, found.group);
+  }
+  return {
+    ok: true as const,
+    channelId,
+    muted: member.muted,
+    deafened: member.deafened,
+    cameraOff: member.cameraOff,
+    sharingScreen: member.sharingScreen,
+    mediaRevision: member.mediaRevision,
+  };
+}
+
+function botVoiceMembers(botId: string, channelIdRaw: unknown) {
+  const found = botVoiceChannel(botId, channelIdRaw);
+  if (!found) return null;
+  return {
+    channelId: found.channelId,
+    groupId: found.group.id,
+    title: found.channel.title,
+    members: voiceUsersForChannel(found.channelId),
+  };
+}
+
 async function pushMessage(io: Server, chat: ChatMeta, message: ChatMessage) {
   const roomId = messageRoomFor(chat, message.room);
   message.room = roomId;
@@ -1768,6 +2159,8 @@ async function pushMessage(io: Server, chat: ChatMeta, message: ChatMessage) {
       };
       for (const userId of chat.memberIds) {
         if (userId === message.authorId) continue;
+        // Bots have no browser tab and no push subscription.
+        if (isBotUserId(userId)) continue;
         let viewing = false;
         for (const socketId of socketsForUser(userId)) {
           const presence = usersBySocket.get(socketId);
@@ -2070,8 +2463,832 @@ async function afterAuth(io: Server, socket: Socket, account: AuthAccount) {
   }
 }
 
-function refreshPresenceName(io: Server, account: AuthAccount) {
-  for (const [socketId, presence] of usersBySocket.entries()) {
+type BotAck = (result: Record<string, unknown>) => void;
+
+type BotFileInput = {
+  url?: string;
+  name?: string;
+  size?: number;
+  mime?: string;
+  width?: number;
+  height?: number;
+};
+
+/** Resolve a bot's membership in a chat (text channels resolve to their group). */
+function botChatAccess(botId: string, chatIdRaw: unknown) {
+  const chatId = String(chatIdRaw || "").slice(0, 200);
+  const chat = getChat(chatId);
+  if (!chat || !canAccessChat(chat, botId)) return null;
+  return { chat, roomId: messageRoomFor(chat, chatId) };
+}
+
+/**
+ * Bot socket session: no presence entry, no user handlers — only the small
+ * bot API below. A bot joins every room of every chat it is a member of.
+ */
+function attachBotSocket(io: Server, socket: Socket, bot: BotSocketSession) {
+  const record = findBot(bot.botId);
+  if (!record) {
+    socket.disconnect(true);
+    return;
+  }
+
+  registerBotSocket(bot.botId, socket.id);
+  markBotConnected(bot.botId);
+
+  const joinAll = () => {
+    for (const chat of listChatsForUser(bot.botId)) {
+      for (const roomId of chatRoomIds(chat)) socket.join(roomId);
+    }
+  };
+  joinAll();
+  broadcastPeople(io);
+  socket.emit("bot:ready", {
+    ok: true,
+    bot: publicBot(record),
+    chats: botChatSummaries(bot.botId),
+  });
+
+  function onBot<Args extends unknown[]>(
+    event: string,
+    handler: (...args: Args) => Promise<void> | void,
+  ) {
+    socket.on(event, (...args: Args) => {
+      void (async () => {
+        try {
+          await handler(...args);
+        } catch (error) {
+          console.error("[bot:" + event + "]", (error as Error).name);
+          const ack = args[args.length - 1];
+          if (typeof ack === "function") {
+            (ack as BotAck)({ ok: false, error: "Внутренняя ошибка сервера" });
+          }
+        }
+      })();
+    });
+  }
+
+  onBot(
+    "bot:send",
+    async (
+      payload: {
+        chatId?: string;
+        text?: string;
+        replyToId?: string;
+        clientId?: string;
+        buttons?: unknown;
+      },
+      ack?: BotAck,
+    ) => {
+      if (typeof ack !== "function") return;
+      const access = botChatAccess(bot.botId, payload?.chatId);
+      if (!access) {
+        ack({ ok: false, error: "Бот не участник этого чата" });
+        return;
+      }
+      if (
+        !rateLimit(`bot-send:${bot.botId}`, 60, 60_000) ||
+        !rateLimit(`bot-send-room:${bot.botId}:${access.roomId}`, 30, 60_000)
+      ) {
+        ack({ ok: false, error: "Слишком много сообщений" });
+        return;
+      }
+      const text = sanitizeBotText(payload?.text, BOT_MAX_TEXT);
+      if (!text) {
+        ack({ ok: false, error: "Пустое сообщение" });
+        return;
+      }
+      const buttons = normalizeBotButtons(payload?.buttons);
+      if (buttons === null) {
+        ack({ ok: false, error: "Некорректные кнопки" });
+        return;
+      }
+
+      const rawClientId = String(payload?.clientId || "").slice(0, 80);
+      const clientId = /^[a-zA-Z0-9_-]+$/.test(rawClientId) ? rawClientId : "";
+      // Same per-room ordering as human messages, and the duplicate check must
+      // live inside it so two retries cannot both win the race.
+      await messageTasks.run(["room:" + access.roomId], async () => {
+        if (clientId) {
+          const duplicate = await findClientMessage(access.roomId, bot.botId, clientId, bot.botId);
+          if (duplicate) {
+            ack({ ok: true, messageId: duplicate.id, duplicate: true });
+            return;
+          }
+        }
+        const message: ChatMessage = {
+          id: randomUUID(),
+          room: access.roomId,
+          author: bot.displayName,
+          authorId: bot.botId,
+          text,
+          createdAt: Date.now(),
+          kind: "text",
+          clientId: clientId || undefined,
+          ...(buttons ? { buttons } : {}),
+          replyTo: await resolveReply(access.roomId, payload?.replyToId, bot.botId),
+        };
+        await pushMessage(io, access.chat, message);
+        ack({ ok: true, messageId: message.id });
+      });
+    },
+  );
+
+  onBot(
+    "bot:sendFile",
+    async (
+      payload: {
+        chatId?: string;
+        text?: string;
+        caption?: string;
+        replyToId?: string;
+        file?: BotFileInput;
+        files?: BotFileInput[];
+        buttons?: unknown;
+      },
+      ack?: BotAck,
+    ) => {
+      if (typeof ack !== "function") return;
+      const access = botChatAccess(bot.botId, payload?.chatId);
+      if (!access) {
+        ack({ ok: false, error: "Бот не участник этого чата" });
+        return;
+      }
+      if (!rateLimit(`bot-file:${bot.botId}`, 30, 60_000)) {
+        ack({ ok: false, error: "Слишком много файлов" });
+        return;
+      }
+      const buttons = normalizeBotButtons(payload?.buttons);
+      if (buttons === null) {
+        ack({ ok: false, error: "Некорректные кнопки" });
+        return;
+      }
+      const rawList =
+        Array.isArray(payload?.files) && payload.files.length
+          ? payload.files
+          : payload?.file
+            ? [payload.file]
+            : [];
+      if (!rawList.length) {
+        ack({ ok: false, error: "Файл не передан" });
+        return;
+      }
+      if (rawList.length > BOT_MAX_FILES) {
+        ack({ ok: false, error: `Не больше ${BOT_MAX_FILES} файлов в сообщении` });
+        return;
+      }
+
+      const resolved: {
+        url: string;
+        name: string;
+        size: number;
+        mime: string;
+        isAudio: boolean;
+        width?: number;
+        height?: number;
+      }[] = [];
+      for (const file of rawList) {
+        const url = String(file?.url || "");
+        const remote = parseGiphyMediaUrl(url);
+        if (remote) {
+          resolved.push({
+            url: remote.url,
+            name: sanitizeBotText(file?.name || remote.name, 120) || remote.name,
+            size: Math.max(0, Math.min(Number(file?.size) || 0, 20 * 1024 * 1024)),
+            mime: remote.mime,
+            isAudio: false,
+            ...parseMediaSize(file),
+          });
+          continue;
+        }
+        const stored = await getUploadInfo(url).catch(() => null);
+        if (!stored) {
+          ack({ ok: false, error: `Файл не найден: ${sanitizeBotText(file?.name || url, 80)}` });
+          return;
+        }
+        if (!uploadOwnedBy(url, bot.botId)) {
+          ack({ ok: false, error: "Этот файл загружен другим аккаунтом" });
+          return;
+        }
+        const name = sanitizeBotText(file?.name || stored.fileName, 120) || stored.fileName;
+        const mime =
+          String(file?.mime || stored.mime || mimeFromName(stored.fileName))
+            .split(";")[0]
+            .trim()
+            .toLowerCase() || "application/octet-stream";
+        const attachment = { url, name, size: stored.size, mime };
+        resolved.push({
+          url: bareUploadUrl(url),
+          name,
+          size: stored.size,
+          mime,
+          isAudio: mime.startsWith("audio/") || isAudioAttachment(attachment),
+          ...parseMediaSize(file),
+        });
+      }
+
+      const album =
+        resolved.length > 1 &&
+        resolved.every((item) => isImageAttachment(item) || isVideoAttachment(item));
+      if (resolved.length > 1 && !album) {
+        ack({ ok: false, error: "В одном сообщении можно объединять только фото и видео" });
+        return;
+      }
+
+      const attachments = await Promise.all(
+        resolved.map(async ({ url, name, size, mime, width, height }) => {
+          const microPreview = await getUploadMicroPreview({ url, name, size, mime });
+          return {
+            url,
+            name,
+            size,
+            mime,
+            ...(width && height ? { width, height } : {}),
+            ...(microPreview ? { microPreview } : {}),
+          };
+        }),
+      );
+      const first = resolved[0];
+      const caption = sanitizeBotText(payload?.caption ?? payload?.text, BOT_MAX_CAPTION);
+      const text = album
+        ? caption
+        : first.isAudio
+          ? caption || "Аудио"
+          : isImageAttachment(first) || isVideoAttachment(first)
+            ? caption
+            : caption || first.name;
+
+      await messageTasks.run(["room:" + access.roomId], async () => {
+        // Storage work yielded: membership might have changed meanwhile.
+        const current = botChatAccess(bot.botId, payload?.chatId);
+        if (!current || current.roomId !== access.roomId) {
+          ack({ ok: false, error: "Бот больше не участник этого чата" });
+          return;
+        }
+        const message: ChatMessage = {
+          id: randomUUID(),
+          room: access.roomId,
+          author: bot.displayName,
+          authorId: bot.botId,
+          text: text.slice(0, 200),
+          createdAt: Date.now(),
+          kind: "file",
+          file: attachments[0],
+          files: attachments.length > 1 ? attachments : undefined,
+          ...(buttons ? { buttons } : {}),
+          replyTo: await resolveReply(access.roomId, payload?.replyToId, bot.botId),
+        };
+        await pushMessage(io, current.chat, message);
+        ack({ ok: true, messageId: message.id, url: message.file?.url });
+      });
+    },
+  );
+
+  onBot(
+    "bot:edit",
+    async (
+      payload: {
+        chatId?: string;
+        messageId?: string;
+        text?: unknown;
+        buttons?: unknown;
+      },
+      ack?: BotAck,
+    ) => {
+      if (typeof ack !== "function") return;
+      const access = botChatAccess(bot.botId, payload?.chatId);
+      const messageId = String(payload?.messageId || "").slice(0, 200);
+      if (!access || !messageId) {
+        ack({ ok: false, error: "Некорректный запрос" });
+        return;
+      }
+      if (!rateLimit(`bot-edit:${bot.botId}`, 60, 60_000)) {
+        ack({ ok: false, error: "Слишком много изменений" });
+        return;
+      }
+      const hasText = Object.prototype.hasOwnProperty.call(payload || {}, "text");
+      const hasButtons = Object.prototype.hasOwnProperty.call(payload || {}, "buttons");
+      if (!hasText && !hasButtons) {
+        ack({ ok: false, error: "Нечего менять" });
+        return;
+      }
+      const text = hasText ? sanitizeBotText(payload?.text, BOT_MAX_TEXT) : undefined;
+      if (hasText && !text) {
+        ack({ ok: false, error: "Пустой текст" });
+        return;
+      }
+      // `buttons: []` clears the keyboard, omitted `buttons` keeps it.
+      const buttons = hasButtons ? normalizeBotButtons(payload?.buttons) : undefined;
+      if (buttons === null) {
+        ack({ ok: false, error: "Некорректные кнопки" });
+        return;
+      }
+
+      await messageTasks.run(["room:" + access.roomId], async () => {
+        const message = await findMessage(access.roomId, messageId, bot.botId);
+        if (!message || message.authorId !== bot.botId || message.kind === "system") {
+          ack({ ok: false, error: "Сообщение не найдено" });
+          return;
+        }
+        if (text !== undefined) message.text = text;
+        if (hasButtons) {
+          if (buttons) message.buttons = buttons;
+          else delete message.buttons;
+        }
+        message.editedAt = Date.now();
+        persistMessages([message]);
+        await emitRoomMessage(io, "message:update", message);
+        await notifyChatMembers(io, access.chat);
+        ack({ ok: true, messageId: message.id });
+      });
+    },
+  );
+
+  onBot(
+    "bot:setCommands",
+    async (payload: { commands?: unknown }, ack?: BotAck) => {
+      if (typeof ack !== "function") return;
+      if (!rateLimit(`bot-profile:${bot.botId}`, 12, 60_000)) {
+        ack({ ok: false, error: "Слишком часто" });
+        return;
+      }
+      const result = setBotCommands(bot.botId, payload?.commands);
+      if (!result.ok) {
+        ack({ ok: false, error: result.error });
+        return;
+      }
+      broadcastPeople(io);
+      for (const chat of listChatsForUser(bot.botId)) {
+        await notifyChatMembers(io, chat);
+      }
+      ack({ ok: true, commands: result.commands });
+    },
+  );
+
+  onBot(
+    "bot:setProfile",
+    async (
+      payload: {
+        description?: unknown;
+        displayName?: unknown;
+        avatarUrl?: unknown;
+      },
+      ack?: BotAck,
+    ) => {
+      if (typeof ack !== "function") return;
+      if (!rateLimit(`bot-profile:${bot.botId}`, 12, 60_000)) {
+        ack({ ok: false, error: "Слишком часто" });
+        return;
+      }
+      if (
+        payload?.description === undefined &&
+        payload?.displayName === undefined &&
+        payload?.avatarUrl === undefined
+      ) {
+        ack({ ok: false, error: "Нечего менять" });
+        return;
+      }
+
+      const avatarPatch: { avatarUrl?: string | null } = {};
+      if (payload?.avatarUrl === null) {
+        avatarPatch.avatarUrl = null;
+      } else if (typeof payload?.avatarUrl === "string" && payload.avatarUrl) {
+        const avatarUrl = bareUploadUrl(payload.avatarUrl);
+        if (!(await isValidStoredAvatar(avatarUrl))) {
+          ack({ ok: false, error: "Некорректный аватар" });
+          return;
+        }
+        if (!uploadOwnedBy(avatarUrl, bot.botId)) {
+          ack({ ok: false, error: "Аватар загружен другим аккаунтом" });
+          return;
+        }
+        avatarPatch.avatarUrl = avatarUrl;
+      }
+
+      let displayName = bot.displayName;
+      if (payload?.displayName !== undefined || avatarPatch.avatarUrl !== undefined) {
+        const updated = updateProfile(bot.botId, {
+          ...(typeof payload?.displayName === "string"
+            ? { displayName: payload.displayName }
+            : {}),
+          ...avatarPatch,
+        });
+        if (!updated.ok) {
+          ack({ ok: false, error: updated.error });
+          return;
+        }
+        displayName = updated.account.displayName;
+        setBotDisplayName(bot.botId, displayName);
+        bot.displayName = displayName;
+      }
+
+      if (payload?.description !== undefined) {
+        const described = setBotDescription(bot.botId, payload.description);
+        if (!described.ok) {
+          ack({ ok: false, error: described.error });
+          return;
+        }
+      }
+
+      broadcastPeople(io);
+      for (const chat of listChatsForUser(bot.botId)) {
+        await notifyChatMembers(io, chat);
+      }
+      const record = findBot(bot.botId);
+      ack({ ok: true, bot: record ? publicBot(record) : null });
+    },
+  );
+
+  onBot("bot:voiceJoin", async (payload: { channelId?: string }, ack?: BotAck) => {
+    if (typeof ack !== "function") return;
+    if (!rateLimit(`bot-voice:${bot.botId}`, 20, 60_000)) {
+      ack({ ok: false, error: "Слишком часто" });
+      return;
+    }
+    const joined = botJoinVoice(io, socket, bot, payload?.channelId);
+    if (!joined.ok) {
+      ack({ ok: false, error: joined.error });
+      return;
+    }
+    const livekit = await botVoiceCredentials(socket, bot, joined.channelId);
+    ack({
+      ...joined,
+      livekit,
+      ...(livekit
+        ? {}
+        : {
+            warning:
+              "LiveKit не настроен: бот виден в канале, но аудио/видео публиковать некуда",
+          }),
+    });
+  });
+
+  onBot("bot:voiceLeave", (_payload: unknown, ack?: BotAck) => {
+    if (typeof ack !== "function") return;
+    if (!rateLimit(`bot-voice:${bot.botId}`, 20, 60_000)) {
+      ack({ ok: false, error: "Слишком часто" });
+      return;
+    }
+    ack(botLeaveVoice(io, socket, bot));
+  });
+
+  onBot("bot:voiceMembers", (payload: { channelId?: string }, ack?: BotAck) => {
+    if (typeof ack !== "function") return;
+    const result = botVoiceMembers(bot.botId, payload?.channelId);
+    if (!result) {
+      ack({ ok: false, error: "Голосовой канал не найден" });
+      return;
+    }
+    ack({ ok: true, ...result });
+  });
+
+  onBot(
+    "bot:voiceMedia",
+    (
+      payload: {
+        muted?: unknown;
+        deafened?: unknown;
+        cameraOff?: unknown;
+        sharingScreen?: unknown;
+      },
+      ack?: BotAck,
+    ) => {
+      if (typeof ack !== "function") return;
+      if (!rateLimit(`bot-voice:${bot.botId}`, 40, 60_000)) {
+        ack({ ok: false, error: "Слишком часто" });
+        return;
+      }
+      ack(botSetVoiceMedia(io, socket, bot, payload || {}));
+    },
+  );
+
+  onBot(
+    "bot:sendVoice",
+    async (
+      payload: { chatId?: string; file?: BotFileInput; replyToId?: string },
+      ack?: BotAck,
+    ) => {
+      if (typeof ack !== "function") return;
+      const access = botChatAccess(bot.botId, payload?.chatId);
+      if (!access) {
+        ack({ ok: false, error: "Бот не участник этого чата" });
+        return;
+      }
+      if (!rateLimit(`bot-voice-msg:${bot.botId}`, 20, 60_000)) {
+        ack({ ok: false, error: "Слишком много голосовых" });
+        return;
+      }
+      const url = String(payload?.file?.url || "");
+      const info = await getUploadInfo(url).catch(() => null);
+      if (!info) {
+        ack({ ok: false, error: "Файл не найден" });
+        return;
+      }
+      if (!uploadOwnedBy(url, bot.botId)) {
+        ack({ ok: false, error: "Файл загружен другим аккаунтом" });
+        return;
+      }
+      const clientMime = String(payload?.file?.mime || "")
+        .split(";")[0]
+        .trim()
+        .toLowerCase();
+      const mime = clientMime.startsWith("audio/")
+        ? clientMime
+        : info.mime || mimeFromName(info.fileName);
+      if (!isAudioAttachment({ url, name: info.fileName, mime })) {
+        ack({ ok: false, error: "Голосовое сообщение должно быть аудиофайлом" });
+        return;
+      }
+      const extension = path.extname(info.fileName || "").toLowerCase() || ".ogg";
+      const provided = sanitizeBotText(payload?.file?.name, 100);
+      const name = /^voice[-_]/i.test(provided)
+        ? provided
+        : `voice-${Date.now()}${extension}`;
+      const message: ChatMessage = {
+        id: randomUUID(),
+        room: access.roomId,
+        author: bot.displayName,
+        authorId: bot.botId,
+        text: "Голосовое сообщение",
+        createdAt: Date.now(),
+        kind: "file",
+        file: { url: bareUploadUrl(url), name, size: info.size, mime },
+        replyTo: await resolveReply(access.roomId, payload?.replyToId, bot.botId),
+      };
+      await messageTasks.run(["room:" + access.roomId], async () => {
+        await pushMessage(io, access.chat, message);
+      });
+      if (voiceAttachmentOf(message)) {
+        await startVoiceTranscription(io, access.chat, message);
+      }
+      ack({ ok: true, messageId: message.id, url: message.file?.url });
+    },
+  );
+
+  onBot("bot:typing", (payload: { chatId?: string; isTyping?: boolean }) => {
+    const access = botChatAccess(bot.botId, payload?.chatId);
+    if (!access) return;
+    if (!rateLimit(`bot-typing:${bot.botId}`, 60, 10_000)) return;
+    socket.to(access.roomId).emit("typing", {
+      chatId: access.roomId,
+      name: bot.displayName,
+      isTyping: Boolean(payload?.isTyping),
+    });
+  });
+
+  onBot("bot:chats", (_payload: unknown, ack?: BotAck) => {
+    ack?.({ ok: true, chats: botChatSummaries(bot.botId) });
+  });
+
+  onBot(
+    "bot:history",
+    async (payload: { chatId?: string; before?: string }, ack?: BotAck) => {
+      if (typeof ack !== "function") return;
+      const access = botChatAccess(bot.botId, payload?.chatId);
+      if (!access) {
+        ack({ ok: false, error: "Бот не участник этого чата" });
+        return;
+      }
+      if (!rateLimit(`bot-history:${bot.botId}`, 60, 60_000)) {
+        ack({ ok: false, error: "Слишком много запросов" });
+        return;
+      }
+      const page = await historyPage(
+        access.roomId,
+        bot.botId,
+        String(payload?.before || "").slice(0, 200) || undefined,
+      );
+      ack({
+        ok: true,
+        chatId: access.roomId,
+        messages: await publicMessages(page.messages, bot.botId),
+        hasMore: page.hasMore,
+        before: page.before,
+      });
+    },
+  );
+
+  onBot(
+    "bot:joinGroup",
+    async (payload: { code?: string }, ack?: BotAck) => {
+      if (typeof ack !== "function") return;
+      if (!rateLimit(`bot-join-group:${bot.botId}`, 10, 60_000)) {
+        ack({ ok: false, error: "Слишком много попыток. Попробуйте через минуту." });
+        return;
+      }
+      let joined: ReturnType<typeof joinGroupByCode>;
+      try {
+        joined = joinGroupByCode(bot.botId, String(payload?.code || ""));
+      } catch {
+        ack({ ok: false, error: "Не удалось проверить код. Попробуйте позже." });
+        return;
+      }
+      if (!joined.ok) {
+        ack({ ok: false, error: joined.error });
+        return;
+      }
+      syncBotRooms(io, joined.chat);
+      await notifyChatMembers(io, joined.chat);
+      for (const memberId of joined.chat.memberIds) {
+        emitToUser(io, memberId, "people", peopleForViewer(memberId));
+      }
+      ack({
+        ok: true,
+        already: joined.already,
+        chat: botChatSummaries(bot.botId).find(
+          (chat) => chat.id === joined.chat.id,
+        ),
+      });
+    },
+  );
+
+  // Manual resync: after a restart a bot may be added to chats while offline.
+  onBot("bot:join", (_payload: unknown, ack?: BotAck) => {
+    joinAll();
+    ack?.({ ok: true, chats: botChatSummaries(bot.botId) });
+  });
+
+  socket.on("disconnect", () => {
+    leaveVoiceChannel(io, socket, bot.botId);
+    unregisterBotSocket(bot.botId, socket.id);
+    broadcastPeople(io);
+  });
+}
+
+const BOT_ADMIN_BODY_LIMIT = 64 * 1024;
+
+function readSmallJson(req: IncomingMessage): Promise<Record<string, unknown> | null> {
+  return new Promise((resolve) => {
+    let size = 0;
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > BOT_ADMIN_BODY_LIMIT) {
+        resolve(null);
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      try {
+        const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        resolve(
+          value && typeof value === "object" && !Array.isArray(value)
+            ? (value as Record<string, unknown>)
+            : null,
+        );
+      } catch {
+        resolve(null);
+      }
+    });
+    req.on("error", () => resolve(null));
+  });
+}
+
+function botAdminJson(res: ServerResponse, status: number, body: Record<string, unknown>) {
+  if (res.headersSent || res.writableEnded) return;
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.end(JSON.stringify(body));
+}
+
+/**
+ * Local bot administration used by `npm run bots:add`.
+ * Auth is the machine-local secret (data/bot-admin-secret.txt or
+ * BOT_ADMIN_SECRET), never a user session: bots are added manually by the owner.
+ */
+async function handleBotsAdmin(req: IncomingMessage, res: ServerResponse, io: Server) {
+  if (req.method !== "POST") {
+    botAdminJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+  if (!rateLimit(`bots-admin:${clientAddress(req)}`, 30, 60_000)) {
+    botAdminJson(res, 429, { ok: false, error: "Слишком много запросов" });
+    return;
+  }
+  if (!verifyBotAdminSecret(req.headers["x-bot-admin-secret"])) {
+    botAdminJson(res, 403, { ok: false, error: "Нет доступа к управлению ботами" });
+    return;
+  }
+  const body = await readSmallJson(req);
+  if (!body) {
+    botAdminJson(res, 400, { ok: false, error: "Неверный запрос" });
+    return;
+  }
+  const action = String(body.action || "create");
+
+  if (action === "list") {
+    botAdminJson(res, 200, { ok: true, bots: listBots() });
+    return;
+  }
+
+  if (action === "create") {
+    const groupId = String(body.groupId || "").trim();
+    let group = groupId ? getChat(groupId) : null;
+    if (groupId && (!group || group.type !== "group")) group = findGroupByTitle(groupId);
+    if (groupId && (!group || group.type !== "group")) {
+      botAdminJson(res, 404, { ok: false, error: "Группа не найдена" });
+      return;
+    }
+    const created = await createBot({
+      displayName: body.displayName,
+      username: body.username,
+      bio: body.bio,
+      avatarUrl: body.avatarUrl,
+      ownerId: body.ownerId,
+      description: body.description,
+    });
+    if (!created.ok) {
+      botAdminJson(res, 400, { ok: false, error: created.error });
+      return;
+    }
+    if (group) {
+      const added = addGroupMember(group.id, created.bot.botId);
+      if (!added.ok) {
+        removeBot(created.bot.botId);
+        botAdminJson(res, 400, { ok: false, error: added.error });
+        return;
+      }
+      syncBotRooms(io, added.chat);
+      await notifyChatMembers(io, added.chat);
+    }
+    botAdminJson(res, 200, {
+      ok: true,
+      bot: created.bot,
+      token: created.token,
+      ...(group ? { groupId: group.id } : {}),
+    });
+    return;
+  }
+
+  const target = String(body.botId || body.username || "").trim();
+  const record = findBot(target) ?? findBotByUsername(target);
+  if (!record) {
+    botAdminJson(res, 404, { ok: false, error: "Бот не найден" });
+    return;
+  }
+
+  if (action === "addToGroup") {
+    const groupRaw = String(body.groupId || "").trim();
+    let group = groupRaw ? getChat(groupRaw) : null;
+    if (groupRaw && (!group || group.type !== "group")) group = findGroupByTitle(groupRaw);
+    if (!group || group.type !== "group") {
+      botAdminJson(res, 404, { ok: false, error: "Группа не найдена" });
+      return;
+    }
+    const added = addGroupMember(group.id, record.botId);
+    if (!added.ok) {
+      botAdminJson(res, 400, { ok: false, error: added.error });
+      return;
+    }
+    syncBotRooms(io, added.chat);
+    await notifyChatMembers(io, added.chat);
+    botAdminJson(res, 200, { ok: true, bot: publicBot(record), groupId: group.id });
+    return;
+  }
+
+  if (action === "rotate") {
+    const rotated = rotateBotToken(record.botId);
+    if (!rotated.ok) {
+      botAdminJson(res, 400, { ok: false, error: rotated.error });
+      return;
+    }
+    // Old token must stop working right away: drop its live sockets.
+    for (const socketId of [...botSocketIds(record.botId)]) {
+      io.sockets.sockets.get(socketId)?.disconnect(true);
+    }
+    botAdminJson(res, 200, { ok: true, bot: rotated.bot, token: rotated.token });
+    return;
+  }
+
+  if (action === "remove") {
+    const chats = listChatsForUser(record.botId);
+    const removed = removeBot(record.botId);
+    if (!removed.ok) {
+      botAdminJson(res, 400, { ok: false, error: removed.error });
+      return;
+    }
+    removeMemberEverywhere(record.botId);
+    for (const socketId of [...botSocketIds(record.botId)]) {
+      io.sockets.sockets.get(socketId)?.disconnect(true);
+    }
+    botSocketsById.delete(record.botId);
+    broadcastPeople(io);
+    for (const chat of chats) {
+      const live = getChat(chat.id);
+      if (live) await notifyChatMembers(io, live);
+    }
+    botAdminJson(res, 200, { ok: true, bot: removed.bot });
+    return;
+  }
+
+  botAdminJson(res, 400, { ok: false, error: "Неизвестное действие" });
+}
+
+function refreshPresenceName(io: Server, account: AuthAccount) {  for (const [socketId, presence] of usersBySocket.entries()) {
     if (presence.userId !== account.userId) continue;
     presence.name = labelOf(account);
     usersBySocket.set(socketId, presence);
@@ -2088,6 +3305,12 @@ app.prepare().then(async () => {
   // Finish demo password hashing before accepting connections.
   if (process.env.SEED_DEMO === "1") {
     await ensureDemoUsers();
+  }
+  // Bots are added by hand: make sure the CLI secret exists before listening.
+  try {
+    botAdminSecret();
+  } catch (error) {
+    console.warn("[bots] cannot prepare admin secret", (error as Error).name);
   }
   if (messageStore) {
     await messageStore.connect();
@@ -2443,6 +3666,13 @@ app.prepare().then(async () => {
       void handleRingtones(req, res, (userId) => emitToUser(io, userId, "ringtone:changed", {}));
       return;
     }
+    if (url.startsWith("/api/bots/admin")) {
+      void handleBotsAdmin(req, res, io).catch((error: Error) => {
+        console.error("[bots:admin]", error.name);
+        botAdminJson(res, 500, { ok: false, error: "Не удалось выполнить действие с ботами" });
+      });
+      return;
+    }
     if (url.startsWith("/api/upload")) {
       handleUpload(req, res);
       return;
@@ -2524,6 +3754,32 @@ app.prepare().then(async () => {
     nextSocket();
   });
 
+  // Bot processes authenticate once, at the handshake, with their token.
+  // Everything else (session events, presence, calls) stays unavailable to them.
+  io.use((socket, nextSocket) => {
+    const auth = socket.handshake.auth as { botToken?: unknown } | undefined;
+    const token = auth?.botToken;
+    if (!token) {
+      nextSocket();
+      return;
+    }
+    if (!rateLimit(`bot-connect:${clientKey(socket)}`, 20, 60_000)) {
+      nextSocket(new Error("Слишком много попыток подключения"));
+      return;
+    }
+    const record = resolveBotToken(token);
+    if (!record) {
+      nextSocket(new Error("Неверный токен бота"));
+      return;
+    }
+    socket.data.bot = {
+      botId: record.botId,
+      username: record.username,
+      displayName: record.displayName,
+    } satisfies BotSocketSession;
+    nextSocket();
+  });
+
   function revokeSocketSession(revokedToken: string) {
     for (const socketId of socketIdsForToken(revokedToken)) {
       const target = io.sockets.sockets.get(socketId);
@@ -2551,6 +3807,16 @@ app.prepare().then(async () => {
   io.on("connection", (socket) => {
     ioServer = io;
     monitorSocketBackpressure(socket);
+    const botSession = botSessionOf(socket);
+    if (botSession) {
+      try {
+        attachBotSocket(io, socket, botSession);
+      } catch (error) {
+        console.error("[bot:connect]", (error as Error).name);
+        socket.disconnect(true);
+      }
+      return;
+    }
     function on<Args extends unknown[]>(event: string, handler: (...args: Args) => unknown) {
       socket.on(event, (...args: Args) => {
         const action = async () => { await handler(...args); };
@@ -3014,6 +4280,7 @@ app.prepare().then(async () => {
           return;
         }
         // Refresh chat lists + contact people only for group members (not all users).
+        syncBotRooms(io, joined.chat);
         await notifyChatMembers(io, joined.chat);
         for (const memberId of joined.chat.memberIds) {
           emitToUser(io, memberId, "people", peopleForViewer(memberId));
@@ -3050,6 +4317,7 @@ app.prepare().then(async () => {
         ack?.({ ok: false, error: "Не удалось проверить код. Попробуйте позже." }); return;
       }
       if (!joined.ok) { ack?.({ ok: false, error: joined.error }); return; }
+      syncBotRooms(io, joined.chat);
       await notifyChatMembers(io, joined.chat);
       for (const memberId of joined.chat.memberIds) {
         emitToUser(io, memberId, "people", peopleForViewer(memberId));
@@ -3249,6 +4517,7 @@ app.prepare().then(async () => {
           return;
         }
 
+        syncBotRooms(io, opened.chat);
         await notifyChatMembers(io, opened.chat);
         const result = await joinChat(io, socket, account, opened.chat.id);
         ack?.(result);
@@ -3387,6 +4656,7 @@ app.prepare().then(async () => {
         persistMessages([message]);
         await emitRoomMessage(io, "message:update", message);
         await notifyChatMembers(io, dm);
+        syncBotRooms(io, added.chat);
         await notifyChatMembers(io, added.chat);
         ack?.({ ok: true, groupId: added.chat.id });
       },
@@ -4082,6 +5352,61 @@ app.prepare().then(async () => {
     );
 
     on(
+      "message:button",
+      async (
+        payload: { chatId?: string; messageId?: string; data?: string },
+        ack?: (result: { ok: boolean; error?: string }) => void,
+      ) => {
+        const account = requireAccount(socket);
+        const chatId = String(payload?.chatId || "");
+        const messageId = String(payload?.messageId || "");
+        const data = String(payload?.data || "");
+        if (!account || !chatId || !messageId || !data || data.length > 64) {
+          ack?.({ ok: false, error: "Некорректный запрос" });
+          return;
+        }
+        if (!rateLimit(`msg-button:${account.userId}`, 40, 60_000)) {
+          ack?.({ ok: false, error: "Слишком часто" });
+          return;
+        }
+        const chat = getChat(chatId);
+        if (!chat || !canAccessChat(chat, account.userId)) {
+          ack?.({ ok: false, error: "Нет доступа" });
+          return;
+        }
+        const roomId = messageRoomFor(chat, chatId);
+        const message = await findMessage(roomId, messageId, account.userId);
+        const button = message?.buttons
+          ?.flat()
+          .find((item) => item.data && item.data === data);
+        const botRecord = message?.authorId ? findBot(message.authorId) : undefined;
+        if (!message || !button?.data || !botRecord) {
+          ack?.({ ok: false, error: "Кнопка недоступна" });
+          return;
+        }
+        // The bot answers asynchronously (edit the message or send a new one),
+        // so the click itself only delivers the callback.
+        const delivered = emitToBotSockets(io, botRecord.botId, "bot:callback", {
+          chatId: roomId,
+          chatType: chat.type,
+          messageId: message.id,
+          messageText: message.text,
+          data: button.data,
+          from: {
+            id: account.userId,
+            name: labelOf(account),
+            username: account.username,
+          },
+        });
+        if (!delivered) {
+          ack?.({ ok: false, error: "Бот сейчас не в сети — попробуйте позже" });
+          return;
+        }
+        ack?.({ ok: true });
+      },
+    );
+
+    on(
       "message:delete",
       async (
         payload: { chatId?: string; messageId?: string },
@@ -4622,6 +5947,10 @@ app.prepare().then(async () => {
         const reconnect = Boolean(payload?.reconnect);
         if (!getUserById(toUserId)) {
           ack?.({ ok: false, error: "Пользователь не найден" });
+          return;
+        }
+        if (isBotUserId(toUserId)) {
+          ack?.({ ok: false, error: "Боты не принимают звонки" });
           return;
         }
         const onlineSockets = socketsForUser(toUserId);

@@ -16,6 +16,24 @@ export type ReplyPreview = {
   text: string;
 };
 
+/** Inline keyboard button of a bot message (Telegram-style). */
+export type BotButton = {
+  /** Caption, up to 64 characters. */
+  text: string;
+  /** Callback payload sent back to the bot via `bot:callback`. */
+  data?: string;
+  /** Opens in the browser instead of sending a callback. */
+  url?: string;
+};
+
+/** Command declared by a bot (Telegram BotFather-style command list). */
+export type BotCommandInfo = {
+  /** Name without the slash, lowercase, `[a-z0-9_]` up to 32. */
+  command: string;
+  /** Short description shown in the command list. */
+  description: string;
+};
+
 export type MessageReaction = {
   emoji: string;
   userIds: string[];
@@ -60,6 +78,8 @@ export type ChatMessage = {
     text?: string;
   };
   invite?: GroupInvite;
+  /** Rows of inline buttons; only bots can attach them. */
+  buttons?: BotButton[][];
   reactions?: MessageReaction[];
   status?: MessageStatus;
   /** Client-only: 0..1 while attachments are uploading from this device. */
@@ -136,6 +156,12 @@ export type ChatInfo = {
   pinned: boolean;
   peerId?: string;
   avatarUrl?: string;
+  /** True when the DM peer is a bot account (shows the «Старт» button). */
+  peerIsBot?: boolean;
+  peerUsername?: string;
+  /** Bot description and command list for the bot DM. */
+  peerDescription?: string;
+  peerCommands?: BotCommandInfo[];
   createdBy?: string;
   /** Group member ids (for invite UI). */
   memberIds?: string[];
@@ -197,6 +223,12 @@ export type PeopleUser = {
   bio: string;
   online: boolean;
   lastSeenAt?: number;
+  /** Bot account — shown with a БОТ badge and cannot log in or answer calls. */
+  isBot?: boolean;
+  /** Bot description (bots only). */
+  description?: string;
+  /** Commands declared by the bot, e.g. for the `/` menu. */
+  commands?: BotCommandInfo[];
 };
 
 export type CallMode = "audio" | "video";

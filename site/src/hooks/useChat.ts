@@ -2266,6 +2266,42 @@ export function useChat() {
     [],
   );
 
+  /** Клик по инлайн-кнопке бота — сервер пересылает callback самому боту. */
+  const pressBotButton = useCallback(
+    async (
+      chatId: string,
+      messageId: string,
+      data: string,
+    ): Promise<{ ok: boolean; error?: string }> => {
+      const socket = socketRef.current;
+      if (!socket?.connected) return { ok: false, error: "Нет соединения" };
+      try {
+        const result = await new Promise<{ ok?: boolean; error?: string }>(
+          (resolve, reject) => {
+            const timer = window.setTimeout(
+              () => reject(new Error("Сервер не ответил")),
+              12_000,
+            );
+            socket.emit(
+              "message:button",
+              { chatId, messageId, data },
+              (response?: { ok?: boolean; error?: string }) => {
+                window.clearTimeout(timer);
+                resolve(response ?? {});
+              },
+            );
+          },
+        );
+        return result.ok
+          ? { ok: true }
+          : { ok: false, error: result.error || "Кнопка недоступна" };
+      } catch (error) {
+        return { ok: false, error: (error as Error).message };
+      }
+    },
+    [],
+  );
+
   const setTyping = useCallback((isTyping: boolean) => {
     socketRef.current?.emit("typing", isTyping);
   }, []);
@@ -2936,6 +2972,7 @@ const removeStickerFromPack = useCallback((packId: string, stickerId: string) =>
     reconnect,
     markAllRead,
     reactToMessage,
+    pressBotButton,
     transcribeVoice,
     setTyping,
     clearComposerError,

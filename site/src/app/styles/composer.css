@@ -11,8 +11,7 @@
 
 .composer--drag .composer__box {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
+  box-shadow: 0 0 0 3px var(--accent-soft);}
 
 .composer__drop {
   position: absolute;

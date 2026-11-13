@@ -2,10 +2,17 @@
 
 import { Fragment, useEffect, useLayoutEffect, useMemo, useState, useRef, useCallback, useSyncExternalStore } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
-import type { AuthAccount, ChatMessage, PeopleUser } from "@/lib/types";
+import type {
+  AuthAccount,
+  BotButton,
+  BotCommandInfo,
+  ChatMessage,
+  PeopleUser,
+} from "@/lib/types";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { Avatar } from "@/components/chat/Avatar";
 import { TypingIndicator } from "@/components/chat/TypingIndicator";
+import { IconPlay } from "@/lib/icons";
 import { ScrollAnchoredList } from "@/components/chat/ScrollAnchoredList";
 import { DesktopMessageScroller } from "@/components/chat/DesktopMessageScroller";
 import { bindVirtualMessageAvatars } from "@/components/chat/virtualMessageAvatars";
@@ -46,6 +53,18 @@ type MessageListProps = {
   onForward?: (message: ChatMessage) => void;
   onInviteRespond?: (messageId: string, accept: boolean) => void;
   onTranscribe?: (messageId: string) => void;
+  /** Инлайн-кнопки бота. */
+  onBotButton?: (message: ChatMessage, button: BotButton) => void | Promise<void>;
+  /** Клик по `/команде` в тексте бота. */
+  onBotCommand?: (command: string, botUsername?: string) => void;
+  /** Собеседник — бот: в пустом диалоге показываем «Старт» и команды. */
+  botPeer?: {
+    displayName: string;
+    username: string;
+    description?: string;
+    commands?: BotCommandInfo[];
+  } | null;
+  onStartBot?: () => void;
   /** Клик по стикеру → открыть пак, из которого он был отправлен. */
   onOpenStickerPack?: (packId: string, stickerId: string) => void;
   onMarkRead?: () => void;
@@ -175,6 +194,10 @@ export function MessageList({
   onForward,
   onInviteRespond,
   onTranscribe,
+  onBotButton,
+  onBotCommand,
+  botPeer = null,
+  onStartBot,
   onOpenStickerPack,
   onMarkRead,
   peerReadAt = null,
@@ -625,6 +648,8 @@ export function MessageList({
           onForward={onForward}
           onInviteRespond={onInviteRespond}
           onTranscribe={onTranscribe}
+          onBotButton={onBotButton}
+          onBotCommand={onBotCommand}
           onOpenStickerPack={onOpenStickerPack}
           canEdit={mine}
           canForward
@@ -657,7 +682,26 @@ export function MessageList({
       {loading ? <div className="room__messages"><div className="msg-skeleton" aria-hidden>
         {Array.from({ length: 5 }, (_, i) => <div key={i} className={`msg-skeleton__row${i % 2 ? " msg-skeleton__row--mine" : ""}`}><i /><span /></div>)}
       </div></div> : messages.length === 0 ? <div className="room__messages"><div className="room__empty room__empty--thread">
-        <p className="room__empty-brand">Майко</p><p className="room__empty-copy">Напишите первое сообщение</p>
+        <p className="room__empty-brand">{botPeer ? botPeer.displayName : "Майко"}</p>
+        <p className="room__empty-copy">
+          {botPeer
+            ? `Это бот @${botPeer.username}. Запустите его, чтобы увидеть команды.`
+            : "Напишите первое сообщение"}
+        </p>
+        {botPeer && onStartBot && (
+          <button type="button" className="room__empty-start" onClick={onStartBot}>
+            <IconPlay size={16} />
+            Старт
+          </button>
+        )}
+        {botPeer?.description ? (
+          <p className="room__empty-desc">{botPeer.description}</p>
+        ) : null}
+        {botPeer?.commands?.length ? (
+          <p className="room__empty-hint">
+            Начните с «/» — появится список команд
+          </p>
+        ) : null}
         <TypingIndicator names={othersTyping} />
       </div></div> : desktop ? <DesktopMessageScroller
         key={`${chatId}:${historyVersion}`}

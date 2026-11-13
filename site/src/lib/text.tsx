@@ -1,8 +1,9 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import Linkify from "linkify-react";
 import { splitTextAndEmoji } from "@/lib/emojiText";
+import { splitCommandText } from "@/lib/botCommands";
 
 const LINKIFY_OPTIONS = {
   target: "_blank",
@@ -12,6 +13,13 @@ const LINKIFY_OPTIONS = {
     url: (value: string) => /^https?:\/\//i.test(value),
   },
   ignoreTags: ["a", "script", "style"] as string[],
+};
+
+export type MessageTextOptions = {
+  /** Command names (without slash) that can be clicked. */
+  commands?: readonly string[];
+  /** Called with the full token, e.g. `/help@echo_bot`. */
+  onCommand?: (token: string) => void;
 };
 
 export function linkifyText(text: string): ReactNode {
@@ -42,7 +50,7 @@ export function highlightText(text: string, query: string): ReactNode {
   return nodes;
 }
 
-export function renderMessageText(text: string, query?: string): ReactNode {
+function renderPlainText(text: string, query?: string): ReactNode {
   const parts = splitTextAndEmoji(text);
   if (!parts.length) return text;
   if (parts.length === 1 && parts[0].type === "text") {
@@ -66,4 +74,38 @@ export function renderMessageText(text: string, query?: string): ReactNode {
       </Linkify>
     );
   });
+}
+
+export function renderMessageText(
+  text: string,
+  query?: string,
+  options?: MessageTextOptions,
+): ReactNode {
+  const onCommand = options?.onCommand;
+  const commandNames = options?.commands ?? [];
+  if (!onCommand || !commandNames.length) return renderPlainText(text, query);
+
+  const parts = splitCommandText(text, commandNames);
+  if (!parts.some((part) => part.type === "command")) {
+    return renderPlainText(text, query);
+  }
+
+  return parts.map((part, index) =>
+    part.type === "command" ? (
+      <button
+        key={`c-${index}`}
+        type="button"
+        className="bubble__cmd"
+        title={`Отправить ${part.value}`}
+        onClick={(event) => {
+          event.stopPropagation();
+          onCommand(part.value);
+        }}
+      >
+        {part.value}
+      </button>
+    ) : (
+      <Fragment key={`t-${index}`}>{renderPlainText(part.value, query)}</Fragment>
+    ),
+  );
 }

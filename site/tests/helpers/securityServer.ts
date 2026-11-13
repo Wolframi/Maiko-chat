@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { scryptSync } from "node:crypto";
 import { MessageStore } from "../../src/server/messageStore";
 
-export async function securityServer(options: { registrationRequired?: boolean; historyMessages?: number; mongo?: { uri: string; database: string } } = {}) {
+export async function securityServer(options: { registrationRequired?: boolean; historyMessages?: number; mongo?: { uri: string; database: string }; botAdminSecret?: string } = {}) {
   const site = fileURLToPath(new URL("../../", import.meta.url));
   const folder = mkdtempSync(path.join(tmpdir(), "maiko-http-security-"));
   const listener = createServer();
@@ -52,7 +52,7 @@ export async function securityServer(options: { registrationRequired?: boolean; 
   const secret = "security-fixture-turn-secret-" + "x".repeat(40);
   const child = spawn(process.execPath, ["--import", pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href, "server.ts"], {
     cwd: folder, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, NODE_ENV: "production", PORT: String(port), HOSTNAME: "127.0.0.1", PUBLIC_ORIGIN: `http://127.0.0.1:${port}`, SEED_DEMO: "0", NEXT_PUBLIC_DEMO: "0", MONGODB_URI: options.mongo?.uri ?? "", MONGODB_DATABASE: options.mongo?.database ?? "maiko", MEDIA_STORAGE: "local", GIPHY_API_KEY: "", TURN_AUTH_SECRET: secret, TURN_HOST: "relay.example.com" },
+    env: { ...process.env, NODE_ENV: "production", PORT: String(port), HOSTNAME: "127.0.0.1", PUBLIC_ORIGIN: `http://127.0.0.1:${port}`, SEED_DEMO: "0", NEXT_PUBLIC_DEMO: "0", MONGODB_URI: options.mongo?.uri ?? "", MONGODB_DATABASE: options.mongo?.database ?? "maiko", MEDIA_STORAGE: "local", GIPHY_API_KEY: "", TURN_AUTH_SECRET: secret, TURN_HOST: "relay.example.com", BOT_ADMIN_SECRET: options.botAdminSecret ?? "" },
   });
   let logs = "";
   child.stdout.on("data", data => { logs = (logs + data).slice(-12000); });

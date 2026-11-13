@@ -87,3 +87,10 @@ next-env.d.ts
 
 # локальный клон репозитория
 pulse-chat/
+
+# generated media cache for bots
+/bots/.media-cache/
+
+# downloaded LiveKit SFU binary (npm run livekit)
+/tools/livekit/
+

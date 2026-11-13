@@ -138,6 +138,18 @@ function roomPublishDefaults() { return {
   screenShareSimulcastLayers: [],
 }; }
 
+function friendlySfuError(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  if (
+    /could not establish signal connection|websocket error|connection establishment|failed to fetch|networkerror/i.test(
+      message,
+    )
+  ) {
+    return "Голосовой сервер LiveKit не запущен или недоступен. Запустите npm run livekit и попробуйте снова.";
+  }
+  return message || "Не удалось подключиться к SFU";
+}
+
 function markAsScreenTrack(track: MediaStreamTrack | undefined) {
   if (!track) return;
   try {
@@ -1193,11 +1205,7 @@ export function useVoiceChannelLiveKit({
           setRemoteStreams({});
           setLinkPhase(null);
         }
-        setError(
-          joinError instanceof Error
-            ? joinError.message
-            : "Не удалось подключиться к SFU",
-        );
+        setError(friendlySfuError(joinError));
         throw joinError;
       } finally {
         if (attempt !== joinAttemptRef.current && pendingRoom) {
@@ -1884,6 +1892,27 @@ export function useVoiceChannelLiveKit({
     setPeers(next);
   }, []);
   const hasRoom = useCallback(() => Boolean(roomRef.current), []);
+
+  // Browser autoplay policy can block remote audio (especially screen-share
+  // audio that arrives after the initial join click). Retry on first gesture.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const unlock = () => {
+      for (const element of remoteAudioRef.current.values()) {
+        void element.play().catch(() => undefined);
+      }
+      void roomRef.current?.startAudio().catch(() => undefined);
+    };
+    window.addEventListener("pointerdown", unlock, {
+      once: true,
+      capture: true,
+    });
+    window.addEventListener("keydown", unlock, { once: true, capture: true });
+    return () => {
+      window.removeEventListener("pointerdown", unlock, true);
+      window.removeEventListener("keydown", unlock, true);
+    };
+  }, []);
 
   return {
     active,

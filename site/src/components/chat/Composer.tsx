@@ -25,14 +25,16 @@ import {
   validateFile,
 } from "@/lib/files";
 import { clearDraft, loadDraft, saveDraft } from "@/lib/drafts";
+import { commandQueryFromDraft, filterBotCommands } from "@/lib/botCommands";
 import {
   CANCEL_SLIDE_PX,
   VoiceRecorderBar,
   type VoiceRecorderControls,
 } from "@/components/chat/VoiceRecorderBar";
 import { MentionMenu } from "@/components/chat/MentionMenu";
+import { CommandMenu } from "@/components/chat/CommandMenu";
 import { UnifiedPicker } from "@/components/chat/UnifiedPicker";
-import type { FileAttachment, PeopleUser, StickerPack } from "@/lib/types";
+import type { BotCommandInfo, FileAttachment, PeopleUser, StickerPack } from "@/lib/types";
 import { toast } from "sonner";
 import { parseGiphyMediaUrl } from "@/lib/giphyMedia";
 
@@ -70,6 +72,8 @@ type ComposerProps = {
   focusToken?: string | number;
   onAttachmentsCleared?: () => void;
   mentionMembers?: PeopleUser[];
+  /** Команды бота для автокомплита при вводе `/`. */
+  botCommands?: BotCommandInfo[];
   editingText?: string | null;
   onCancelEdit?: () => void;
   userId?: string;
@@ -109,6 +113,7 @@ export function Composer({
   focusToken,
   onAttachmentsCleared,
   mentionMembers = [],
+  botCommands = [],
   editingText = null,
   onCancelEdit,
   userId = "",
@@ -131,6 +136,8 @@ export function Composer({
   const [mentionQuery, setMentionQuery] = useState("");
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionStart, setMentionStart] = useState<number | null>(null);
+  const [commandIndex, setCommandIndex] = useState(0);
+  const [commandDismissed, setCommandDismissed] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [errorTick, setErrorTick] = useState(0);
   const [sentPulse, setSentPulse] = useState(false);
@@ -236,6 +243,25 @@ export function Composer({
     [pending],
   );
   const shownError = localError || error;
+
+  // `/` command autocomplete: only while the whole draft is a command being typed.
+  const commandQuery =
+    !locked && !pending.length && editingText == null
+      ? commandQueryFromDraft(text)
+      : undefined;
+  const filteredCommands = useMemo(
+    () =>
+      commandQuery === undefined
+        ? []
+        : filterBotCommands(botCommands, commandQuery),
+    [botCommands, commandQuery],
+  );
+  const commandOpen =
+    commandQuery !== undefined && filteredCommands.length > 0 && !commandDismissed;
+  const activeCommandIndex = Math.min(
+    commandIndex,
+    Math.max(0, filteredCommands.length - 1),
+  );
 
   const flashError = useCallback((msg: string) => {
     setLocalError(msg);
@@ -362,6 +388,8 @@ export function Composer({
 
   function markTyping(next: string) {
     setText(next);
+    setCommandIndex(0);
+    setCommandDismissed(false);
     persistDraft(next);
     onClearError?.();
     setLocalError(null);
@@ -551,7 +579,58 @@ export function Composer({
     void submit();
   }
 
+  function pickCommand(item: BotCommandInfo) {
+    if (locked) return;
+    const sent = onSend(`/${item.command}`, replyTo?.id);
+    if (sent === false) return;
+    setText("");
+    setCommandDismissed(true);
+    setCommandIndex(0);
+    if (focusToken !== undefined) {
+      const key = String(focusToken);
+      draftsRef.current.set(key, "");
+      clearDraft(key);
+    }
+    onClearReply?.();
+    pulseSend();
+    if (typingRef.current) {
+      typingRef.current = false;
+      onTyping(false);
+    }
+    requestAnimationFrame(() => areaRef.current?.focus());
+  }
+
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (commandOpen) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setCommandIndex((index) =>
+          Math.min(index + 1, Math.max(0, filteredCommands.length - 1)),
+        );
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setCommandIndex((index) => Math.max(0, index - 1));
+        return;
+      }
+      if (
+        event.key === "Tab" ||
+        (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing)
+      ) {
+        const pick = filteredCommands[activeCommandIndex];
+        if (pick) {
+          event.preventDefault();
+          pickCommand(pick);
+          return;
+        }
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setCommandDismissed(true);
+        return;
+      }
+    }
     if (event.key === "Escape" && editingText != null) {
       event.preventDefault();
       onCancelEdit?.();
@@ -808,6 +887,14 @@ export function Composer({
           </button>
         </div>
       )}
+
+      <CommandMenu
+        open={commandOpen && !locked}
+        commands={filteredCommands}
+        activeIndex={activeCommandIndex}
+        onPick={pickCommand}
+        onHover={setCommandIndex}
+      />
 
       <MentionMenu
         open={mentionOpen && !locked}

@@ -57,7 +57,7 @@ import {
   IconSearch,
 } from "@/lib/icons";
 import { ConfirmDialog } from "@/components/chat/ConfirmDialog";
-import type { ChatMessage, RoomMediaItem } from "@/lib/types";
+import type { BotButton, ChatMessage, RoomMediaItem } from "@/lib/types";
 import { isImageAttachment, isVideoAttachment, albumPreviewText } from "@/lib/files";
 import { formatLastSeen } from "@/lib/notify";
 import { isChatMuted, toggleChatMuted } from "@/lib/mute";
@@ -143,6 +143,7 @@ function ChatWorkspace({ intro }: { intro?: MaikoIntro }) {
     cancelUpload,
     markAllRead,
     reactToMessage,
+    pressBotButton,
     transcribeVoice,
     setTyping,
     clearComposerError,
@@ -1237,6 +1238,38 @@ function ChatWorkspace({ intro }: { intro?: MaikoIntro }) {
       transcribeVoice(session.room, messageId);
     },
     [session?.room, transcribeVoice],
+  );
+
+  /** Инлайн-кнопки бота: ссылка открывается сразу, callback уходит боту. */
+  const handleBotButton = useCallback(
+    async (message: ChatMessage, button: BotButton) => {
+      if (button.url) {
+        window.open(button.url, "_blank", "noopener,noreferrer");
+        return;
+      }
+      if (!button.data) return;
+      const result = await pressBotButton(message.room, message.id, button.data);
+      if (!result.ok) toast.error(result.error || "Не удалось нажать кнопку");
+    },
+    [pressBotButton],
+  );
+
+  /** Кнопка «Старт» в пустом диалоге с ботом отправляет /start. */
+  const handleStartBot = useCallback(() => {
+    if (!sendMessage("/start")) toast.error("Чат ещё открывается — подождите");
+  }, [sendMessage]);
+
+  /** Клик по /команде в сообщении или в списке: в группе адресуем боту. */
+  const handleBotCommand = useCallback(
+    (command: string, botUsername?: string) => {
+      const needsTarget =
+        Boolean(currentChat && currentChat.type !== "dm") &&
+        Boolean(botUsername) &&
+        !command.includes("@");
+      const value = needsTarget ? `${command}@${botUsername}` : command;
+      if (!sendMessage(value)) toast.error("Чат ещё открывается — подождите");
+    },
+    [currentChat, sendMessage],
   );
 
   const handleCopied = useCallback(() => {
@@ -2370,6 +2403,19 @@ function ChatWorkspace({ intro }: { intro?: MaikoIntro }) {
                       onReply={handleReply}
                       onOpenImage={handleOpenImage}
                       onReact={handleReact}
+                      onBotButton={handleBotButton}
+                      onBotCommand={handleBotCommand}
+                      botPeer={
+                        currentChat?.peerIsBot
+                          ? {
+                              displayName: currentChat.title,
+                              username: currentChat.peerUsername || "",
+                              description: currentChat.peerDescription,
+                              commands: currentChat.peerCommands,
+                            }
+                          : null
+                      }
+                      onStartBot={currentChat?.peerIsBot ? handleStartBot : undefined}
                       onTranscribe={handleTranscribe}
                       onJumpTo={jumpToMessage}
                       onCopied={handleCopied}
@@ -2409,6 +2455,7 @@ function ChatWorkspace({ intro }: { intro?: MaikoIntro }) {
                     }
                     onPickerOpenChange={setCallPickerOpen}
                     mentionMembers={railMembers}
+                    botCommands={currentChat?.peerIsBot ? currentChat.peerCommands ?? [] : []}
                     editingText={editingMessage?.text || null}
                     onCancelEdit={handleCancelEdit}
                     onAttachmentsCleared={handleAttachmentsCleared}
